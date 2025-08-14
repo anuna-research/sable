@@ -4,7 +4,9 @@
 
 # SABLE: Secure Attested Biometric Library for Edge
 
-**Mobile-Optimized Privacy-Preserving Biometric Identity Verification**
+**Prove who you are without revealing your biometric data**
+
+SABLE lets you verify your identity between smartphones using biometrics (like palm prints or face scans) **without exposing your actual biometric data** to anyone - not to the person verifying you, not to the government, and not to any central database.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Rust](https://img.shields.io/badge/rust-1.77%2B-brightgreen.svg)](https://www.rust-lang.org)
@@ -32,47 +34,63 @@
 
 ---
 
-## 🎯 Motivation
+## 🤔 What Does SABLE Do?
 
-Current biometric authentication systems suffer from fundamental limitations that SABLE addresses:
+Imagine you need to prove your identity to someone - maybe to enter a building, verify your age, or access a service. Normally, you'd either:
+- Show an ID card (which can be forged)
+- Use your fingerprint (which reveals your actual biometric data)
+- Rely on a central database (which can be hacked or misused)
 
-### **Privacy Crisis in Biometric Systems**
-- **Centralized Vulnerabilities**: Traditional systems store sensitive biometric templates in centralized databases, creating privacy risks and single points of failure
-- **Government Surveillance**: Citizens must surrender privacy to government databases in exchange for official verification credentials
-- **Data Exposure**: Biometric data is exposed to verifying parties, creating unnecessary privacy risks
+**SABLE works differently.** It lets your phone create a mathematical "fingerprint" of your biometric data that proves it's you without revealing what that data actually is. Think of it like a tamper-proof envelope that says "this person is verified" without anyone being able to see what's inside.
 
-### **Mobile Authentication Gaps**
-- **Limited P2P Capability**: Mobile biometric systems rely on device-local storage without enabling secure peer-to-peer verification
-- **Network Dependencies**: Blockchain-based solutions like BioZero require constant internet connectivity, transaction fees, and smart contract dependencies
-- **Performance Issues**: Existing cryptographic approaches lack mobile optimization, requiring desktop-class resources
+## 🚀 How It Works (Simple Version)
 
-### **SABLE's Innovation**
-SABLE provides a **privacy-first** solution that enables:
+1. **📱 Capture**: Use your phone's camera to scan your palm or face
+2. **🔒 Secure**: Your phone creates a mathematical proof of your identity that can't be reversed or faked
+3. **📡 Share**: When someone needs to verify you, your phones talk directly (via NFC/Bluetooth) - no internet needed
+4. **✅ Verify**: They get confirmation you're legitimate without seeing your actual biometric data
+5. **🏛️ Attest**: Government agencies can officially verify you without storing your biometrics
 
-✅ **True Privacy Preservation**: Biometric data never leaves the device - commitments enable verification without exposure  
-✅ **Government Attestation Without Surveillance**: Official credentials bind to biometric digests while preventing government biometric access  
-✅ **Offline Peer-to-Peer Verification**: Works via NFC/Bluetooth/WiFi Direct without blockchain or network dependencies  
-✅ **Mobile-Optimized Performance**: 850ms proof generation and 12ms verification on standard smartphones  
-✅ **Quantum-Resistant Architecture**: BLS12-381 curve and zero-knowledge proofs provide future security  
+## 🎯 Why This Matters
 
-### **Technical Distinctions**
-Unlike blockchain systems (BioZero) that require network connectivity and gas fees, or deterministic reconstruction methods that create vulnerabilities, SABLE uses:
+### **The Privacy Problem**
+- **Traditional systems**: Store your fingerprints/face scans in databases that can be hacked, misused, or accessed by governments
+- **Blockchain solutions**: Require internet, cost money for each verification, and often still expose data
+- **Current mobile auth**: Only works on your own device, can't prove identity to others
 
-- **Non-reconstructive Pedersen commitments** over BLS12-381 for mobile optimization
-- **Poseidon hash functions** providing 10x performance improvement over SHA-256 in zero-knowledge circuits  
-- **Mobile-first architecture** with 128MB memory footprint and offline operation
-- **Privacy-preserving PKI integration** enabling government attestation without biometric exposure
+### **SABLE's Solution**
+✅ **Complete Privacy**: Your biometric data never leaves your phone  
+✅ **Works Offline**: No internet, servers, or blockchain needed  
+✅ **Government Verification**: Officials can certify you without accessing your biometrics  
+✅ **Mobile-First**: Designed specifically for smartphones - fast and efficient  
+✅ **Future-Proof**: Uses advanced cryptography that even quantum computers can't break
 
 ---
 
-## 📋 Mission
-- Build a cross-platform library for Android/iOS that:
-  - Generates Pedersen commitments over BLS12-381 from biometric feature vectors using Poseidon hashing
-  - Produces Groth16 zk-SNARK proofs in ~850 ms on modern ARM mobile devices with ~128 MB peak memory
-  - Verifies proofs locally in ~12 ms
-  - Operates peer-to-peer over NFC/BLE/Wi‑Fi Direct/QR (offline)
-  - Integrates government PKI attestation without exposing biometrics
-  - Manages a trust network with exponential decay and revocation gossip
+## 🎯 Real-World Use Cases
+
+**🏢 Building Access**: Tap your phone to enter secure facilities without cards that can be lost or copied
+
+**🍺 Age Verification**: Prove you're over 18 without showing your ID or birth date to strangers
+
+**🏛️ Government Services**: Access benefits or services with official verification while keeping your biometrics private
+
+**🤝 Peer-to-Peer Trust**: Verify someone's identity in person without needing internet or a central authority
+
+**🔒 High-Security Access**: Two-factor authentication for critical systems using something you are, not something you know
+
+## 🔧 Technical Implementation
+*For developers and technical users*
+
+SABLE achieves this through:
+- **Pedersen commitments** over BLS12-381 elliptic curve for mobile-optimized cryptography
+- **Zero-knowledge proofs** (zk-SNARKs) that prove identity without revealing biometric data  
+- **Poseidon hash functions** providing 10x performance improvement for mobile devices
+- **Peer-to-peer protocols** over NFC/Bluetooth/WiFi Direct (no internet required)
+- **Government PKI integration** that preserves citizen privacy
+- **Trust networks** with mathematical decay functions for relationship management
+
+**Performance**: 850ms proof generation, 12ms verification, 128MB memory usage
 
 ---
 
