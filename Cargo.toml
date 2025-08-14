@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Hugo O'Connor <hugo@anunaresearch.com>"]
+repository = "https://github.com/anunaresearch/sable"
+
+[workspace.dependencies]
+# BLS12-381 and elliptic curve operations
+blstrs = "0.7"
+group = "0.13"
+ff = "0.13"
+
+# Arkworks ecosystem for zk-SNARKs  
+ark-ff = "0.3"
+ark-ec = "0.3"
+ark-std = "0.3"
+ark-relations = "0.3"
+ark-groth16 = "0.3"
+ark-snark = "0.3"
+ark-sponge = "0.3"
+ark-bls12-381 = "0.3"
+
+# Cryptographic primitives
+getrandom = "0.2"
+rand_core = "0.6"
+zeroize = "1.7"
+subtle = "2.5"
+
+# Serialization and error handling
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+prost = "0.12"
+prost-types = "0.12"
+thiserror = "1.0"
+
+# Parallelization
+rayon = "1.8"
+
+# Testing and benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.4"
+
+# FFI
+cbindgen = "0.26"
+
+# No-std compatibility
+heapless = "0.8"

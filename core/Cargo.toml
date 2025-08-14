@@ -1,0 +1,56 @@
+[package]
+name = "sable-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "SABLE: Secure Attested Biometric Library for Edge - Core cryptographic library"
+
+[features]
+default = ["std"]
+std = []
+zk = ["ark-relations", "ark-groth16", "ark-snark"]
+
+[dependencies]
+# Core BLS12-381 operations
+blstrs = { workspace = true }
+group = { workspace = true }
+ff = { workspace = true }
+
+# Arkworks for zk functionality and Poseidon
+ark-ff = { workspace = true }
+ark-ec = { workspace = true }
+ark-std = { workspace = true }
+ark-relations = { workspace = true, optional = true }
+ark-groth16 = { workspace = true, optional = true }
+ark-snark = { workspace = true, optional = true }
+ark-sponge = { workspace = true }
+ark-bls12-381 = { workspace = true }
+
+# Cryptographic utilities
+getrandom = { workspace = true }
+rand_core = { workspace = true }
+zeroize = { workspace = true }
+subtle = { workspace = true }
+
+# Serialization and error handling
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+# No-std compatibility
+heapless = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+hex-literal = "0.4"
+
+[[bench]]
+name = "crypto"
+harness = false
+
+[[bench]]
+name = "zk_performance"
+harness = false
+required-features = ["zk"]
