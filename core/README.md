@@ -179,7 +179,7 @@ cargo bench -- --save-baseline main
 
 ### Code Quality
 
-```bash
+```bash~
 # Security audit
 cargo audit
 

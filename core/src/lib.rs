@@ -22,6 +22,7 @@ pub mod types;
 
 #[cfg(feature = "mobile")]
 pub mod mobile;
+pub mod biometric;
 
 // FFI requires unsafe operations, so we conditionally allow it
 #[cfg(feature = "mobile")]
