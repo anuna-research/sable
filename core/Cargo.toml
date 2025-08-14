@@ -11,6 +11,7 @@ description = "SABLE: Secure Attested Biometric Library for Edge - Core cryptogr
 default = ["std"]
 std = []
 zk = ["ark-relations", "ark-groth16", "ark-snark"]
+mobile = ["bincode", "serde_json", "zk"]
 
 [dependencies]
 # Core BLS12-381 operations
@@ -36,6 +37,8 @@ subtle = { workspace = true }
 
 # Serialization and error handling
 serde = { workspace = true }
+serde_json = { workspace = true, optional = true }
+bincode = { workspace = true, optional = true }
 thiserror = { workspace = true }
 
 # No-std compatibility
@@ -54,3 +57,8 @@ harness = false
 name = "zk_performance"
 harness = false
 required-features = ["zk"]
+
+# Mobile library targets
+[lib]
+name = "sable_core"
+crate-type = ["cdylib", "staticlib", "rlib"]

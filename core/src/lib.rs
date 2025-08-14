@@ -20,6 +20,16 @@ pub mod crypto;
 pub mod error;
 pub mod types;
 
+#[cfg(feature = "mobile")]
+pub mod mobile;
+
+// FFI requires unsafe operations, so we conditionally allow it
+#[cfg(feature = "mobile")]
+mod mobile_ffi {
+    #![allow(unsafe_code)]
+    pub use crate::mobile::ffi::*;
+}
+
 // Re-export commonly used types
 pub use error::{Result, SableError};
 pub use types::*;
