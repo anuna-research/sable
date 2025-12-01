@@ -1,10 +1,94 @@
 # SABLE Implementation TODO
 
-Code review findings from implementation analysis. All issues have been addressed.
+Code review findings from implementation analysis.
 
 ---
 
-## Critical Security Issues
+## New Issues Found (Code Review 2025-12-01)
+
+### Critical Security Issues
+
+### 18. ⚠️ OPEN: Circuit Witness Values Not Computed
+- **File:** `core/src/crypto/groth16.rs:351-374, 467-491, 500-521, 571-593`
+- **Issue:** Circuit witness variables are allocated with `Ok(Fr::zero())` placeholder values instead of being computed from actual witness data. This affects:
+  - Poseidon state variables in `constrain_poseidon_hash`
+  - S-box intermediate values (x², x⁴, x⁵) in `sbox_constraint`
+  - MDS matrix output variables in `mds_mix`
+  - Distance difference variables in `constrain_euclidean_distance`
+- **Impact:** The circuit constraints are syntactically correct but semantically incorrect - proofs may not verify correctly with real witness data
+- **Fix Required:** Implement proper witness computation that evaluates the actual values based on the circuit inputs
+
+### 19. ⚠️ OPEN: Commitment Binding Constraint is Reflexive (No-op)
+- **File:** `core/src/crypto/groth16.rs:304-308`
+- **Issue:** The constraint `binding + commitment_derived = binding + commitment_derived` is always satisfied (tautology). This does not actually bind the commitment to the computed hash.
+- **Impact:** The commitment verification in-circuit provides no security guarantee
+- **Fix Required:** Implement proper commitment binding that actually constrains the relationship between the hash, salt, and public commitment
+
+---
+
+### High Priority Issues
+
+### 20. ⚠️ OPEN: Poseidon Round Constants Use Non-Cryptographic Hash
+- **File:** `core/src/crypto/poseidon.rs:122-159`
+- **Issue:** `get_round_constants` uses `std::collections::hash_map::DefaultHasher` (SipHash) which is not cryptographically secure. Round constants should be derived using SHA-256 or another cryptographic hash per the Poseidon specification.
+- **Impact:** May weaken the collision resistance of the Poseidon hash
+
+### 21. ⚠️ OPEN: Groth16 Round Constants Use Weak Derivation
+- **File:** `core/src/crypto/groth16.rs:526-534`
+- **Issue:** The `get_round_constant` function uses simple wrapping arithmetic (`wrapping_mul`, `wrapping_add`) which is not cryptographically secure. Should use proper Poseidon specification constants.
+- **Impact:** May weaken the security of the in-circuit Poseidon computation
+
+### 22. ⚠️ OPEN: MobileSable Ignores Salt Parameter
+- **File:** `core/src/mobile/mod.rs:86-88`
+- **Issue:** The `generate_commitment` function accepts `salt_bytes` but generates a new random `randomness` value instead. The provided salt is not used for the commitment.
+- **Impact:** Callers cannot control commitment randomness, breaking expected API behavior
+
+### 23. ⚠️ OPEN: FFI References Non-existent Type
+- **File:** `core/src/mobile/ffi.rs:199`
+- **Issue:** References `crate::crypto::pedersen::PedersenCommitment::from_bytes` but the type in `pedersen.rs` is `Commitment`, not `PedersenCommitment`
+- **Impact:** Compilation error if this code path is exercised
+
+---
+
+### Medium Priority Issues
+
+### 24. ⚠️ OPEN: MDS Inverse Fallback Breaks Security
+- **File:** `core/src/crypto/groth16.rs:551`
+- **Issue:** If modular inverse fails, `unwrap_or(Fr::from(1u64))` is used. While this shouldn't happen with valid inputs, the fallback value would break the MDS property.
+- **Fix:** Use `expect()` to panic on impossible case, or prove the inverse always exists
+
+### 25. ⚠️ OPEN: Feature Type Precision Loss
+- **File:** `core/src/mobile/mod.rs:76`
+- **Issue:** Features are converted from `f64` to `f32` which may lose precision for biometric applications requiring high accuracy
+- **Fix:** Consider keeping f64 precision or documenting the precision requirements
+
+### 26. ⚠️ OPEN: Temporal Validity Witness Not Computed
+- **File:** `core/src/crypto/groth16.rs:728`
+- **Issue:** The `time_diff` variable is allocated as `Fr::zero()` rather than computed from `current_time - timestamp`
+- **Impact:** Temporal validity constraints don't function correctly
+
+---
+
+### Low Priority Issues
+
+### 27. ⚠️ OPEN: Inconsistent Error Type Naming
+- **File:** `core/src/error.rs`
+- **Issue:** Both `CryptoError(String)` and `Cryptographic(String)` exist as error variants. Should consolidate to one.
+
+### 28. ⚠️ OPEN: BiometricFeature::from Redundant Operation
+- **File:** `core/src/types.rs:21-23`
+- **Issue:** `(value as u16).min(65535)` - the `.min(65535)` is redundant since `as u16` already truncates to u16 range
+
+### 29. ⚠️ OPEN: Test Acknowledges Unsatisfied Constraints
+- **File:** `core/src/crypto/groth16.rs:1170-1174`
+- **Issue:** Test comment says "In the simplified implementation, constraints may not be fully satisfied but they should at least compile and run without panicking" - this should be a test failure in production
+- **Fix:** Either fix the circuit to be satisfiable or mark test as expected failure with clear documentation
+
+---
+
+## Previously Fixed Issues
+
+### Critical Security Issues
 
 ### 1. ✅ FIXED: Entropy Loss in Scalar Conversion
 - **File:** `core/src/crypto/groth16.rs:626-634`
@@ -33,7 +117,7 @@ Code review findings from implementation analysis. All issues have been addresse
 
 ---
 
-## High Priority Issues
+### High Priority Issues
 
 ### 5. ✅ FIXED: Missing Zeroization of Sensitive Data
 - **File:** `core/src/crypto/pedersen.rs:114-138`
@@ -62,7 +146,7 @@ Code review findings from implementation analysis. All issues have been addresse
 
 ---
 
-## Medium Priority Issues
+### Medium Priority Issues
 
 ### 10. ✅ FIXED: Mobile Module Type Mismatches
 - **File:** `core/src/mobile/mod.rs`
@@ -100,7 +184,7 @@ Code review findings from implementation analysis. All issues have been addresse
 
 ---
 
-## Low Priority Issues
+### Low Priority Issues
 
 ### 15. ✅ FIXED: Square Image Assumption
 - **File:** `core/src/biometric/feature_extraction.rs:168-216`
@@ -124,17 +208,29 @@ Code review findings from implementation analysis. All issues have been addresse
 
 ## Summary
 
-| Severity | Count | Status |
-|----------|-------|--------|
-| Critical | 4 | ✅ Fixed |
-| High | 5 | ✅ Fixed |
-| Medium | 4 | ✅ Fixed |
-| Low | 4 | ✅ Fixed |
-| **Total** | **17** | **✅ All Fixed** |
+| Severity | Total | Fixed | Open |
+|----------|-------|-------|------|
+| Critical | 6 | 4 | 2 |
+| High | 9 | 5 | 4 |
+| Medium | 7 | 4 | 3 |
+| Low | 7 | 4 | 3 |
+| **Total** | **29** | **17** | **12** |
 
-All issues identified in the code review have been addressed. The implementation now includes:
-- Proper cryptographic primitives with full entropy usage
-- Functional ZK circuit with correct Poseidon, Pedersen, and range proof constraints
-- Memory-safe FFI layer with no leaks
-- Complete biometric feature extraction using standard CV techniques
-- Comprehensive test coverage for critical functions
+### Key Findings from Latest Review:
+
+The most significant issues are:
+
+1. **Circuit Witness Computation (Critical):** The ZK circuit has correct constraint structure but witness values are placeholders. This means proofs cannot be generated correctly with real biometric data.
+
+2. **Commitment Binding (Critical):** The in-circuit commitment verification is a no-op tautology that provides no security.
+
+3. **Round Constants (High):** Both the standalone Poseidon hash and the in-circuit Poseidon use weak/non-cryptographic derivation for round constants.
+
+4. **Mobile API Issues (High):** The FFI layer has type mismatches and the salt parameter is ignored in `generate_commitment`.
+
+### Recommendations:
+
+1. **Priority 1:** Fix witness computation in `groth16.rs` - the circuit needs to actually compute intermediate values
+2. **Priority 2:** Implement proper commitment binding constraint
+3. **Priority 3:** Use cryptographically secure round constant derivation (SHA-256 based)
+4. **Priority 4:** Fix mobile API type mismatches and salt usage
