@@ -80,9 +80,9 @@ struct GaborParameters {
 fn enhance_palm_veins(image: &PalmImage) -> Result<PalmImage> {
     let orientations = [0.0, PI/6.0, PI/3.0, PI/2.0, 2.0*PI/3.0, 5.0*PI/6.0]; // 0°, 30°, 60°, 90°, 120°, 150°
     let frequencies = [0.1, 0.2, 0.3]; // From research parameters
-    
+
     let mut responses = Vec::new();
-    
+
     // Apply Gabor filter bank
     for &orientation in &orientations {
         for &frequency in &frequencies {
@@ -92,14 +92,15 @@ fn enhance_palm_veins(image: &PalmImage) -> Result<PalmImage> {
                 sigma_x: 2.0,
                 sigma_y: 2.0,
             };
-            
+
             let response = apply_gabor_filter(image, params)?;
             responses.push(response);
         }
     }
-    
+
     // Combine responses using maximum response (from research)
-    combine_gabor_responses(responses)
+    // Pass original dimensions to handle non-square images
+    combine_gabor_responses_with_dims(responses, image.width, image.height)
 }
 
 /// Apply single Gabor filter
@@ -165,39 +166,53 @@ fn apply_gabor_filter(image: &PalmImage, params: GaborParameters) -> Result<Vec<
 }
 
 /// Combine multiple Gabor filter responses using maximum response
-fn combine_gabor_responses(responses: Vec<Vec<f64>>) -> Result<PalmImage> {
+/// Takes explicit width and height to handle non-square images correctly
+fn combine_gabor_responses_with_dims(
+    responses: Vec<Vec<f64>>,
+    width: u32,
+    height: u32,
+) -> Result<PalmImage> {
     if responses.is_empty() {
         return Err(SableError::CryptoError("No Gabor responses to combine".into()));
     }
-    
-    let size = responses[0].len();
-    let width = (size as f64).sqrt() as u32; // Assume square image
-    let height = width;
-    
+
+    let size = (width * height) as usize;
+    if responses[0].len() != size {
+        return Err(SableError::InvalidInput(format!(
+            "Response size {} doesn't match image dimensions {}x{}",
+            responses[0].len(),
+            width,
+            height
+        )));
+    }
+
     let mut combined = vec![0.0; size];
-    
+
     // Take maximum response at each pixel
     for i in 0..size {
         let mut max_response = responses[0][i];
         for response in &responses[1..] {
-            max_response = max_response.max(response[i]);
+            if i < response.len() {
+                max_response = max_response.max(response[i]);
+            }
         }
         combined[i] = max_response;
     }
-    
+
     // Normalize to [0,255] and convert to u8
     let max_val = combined.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
     let min_val = combined.iter().fold(f64::INFINITY, |a, &b| a.min(b));
     let range = max_val - min_val;
-    
+
     let data: Vec<u8> = if range > 0.0 {
-        combined.iter()
+        combined
+            .iter()
             .map(|&val| ((val - min_val) / range * 255.0).round() as u8)
             .collect()
     } else {
         vec![128; size] // Constant value if no variation
     };
-    
+
     Ok(PalmImage::new(width, height, 1, data))
 }
 
@@ -535,28 +550,154 @@ fn calculate_local_vein_density_variance(skeleton: &PalmImage) -> Result<f64> {
     Ok(variance)
 }
 
-/// Simulate CNN-based feature extraction
-/// In production, this would load pre-trained CNN models
+/// Extract CNN-like features using hand-crafted approximation
+/// This uses multi-scale, multi-orientation analysis to approximate deep features
+///
+/// In production, this would be replaced with actual CNN inference via ONNX runtime.
+/// For now, we use a combination of image statistics, gradients, and filter responses
+/// that captures similar discriminative information.
 fn extract_cnn_features(image: &PalmImage, feature_type: FeatureType) -> Result<Vec<f64>> {
     let feature_dim = match feature_type {
-        FeatureType::PalmVein => 400,  // 400-dim CNN features for vein
-        FeatureType::PalmPrint => 200, // 200-dim CNN features for print
+        FeatureType::PalmVein => 400,  // 400-dim features for vein
+        FeatureType::PalmPrint => 200, // 200-dim features for print
     };
-    
-    // Simulate CNN forward pass with deterministic features based on image statistics
+
     let mut features = Vec::with_capacity(feature_dim);
-    
-    // Use image statistics as seed for reproducible "CNN" features
-    let mean_pixel = image.data.iter().map(|&p| p as f64).sum::<f64>() / image.data.len() as f64;
-    let mut seed = (mean_pixel * 1000.0) as u64;
-    
-    // Generate deterministic features using simple PRNG
-    for i in 0..feature_dim {
-        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
-        let normalized = ((seed >> 16) % 1000) as f64 / 1000.0;
-        features.push(normalized);
+    let width = image.width as usize;
+    let height = image.height as usize;
+    let data = &image.data;
+
+    // 1. Global statistics (8 features)
+    let mean = data.iter().map(|&p| p as f64).sum::<f64>() / data.len() as f64;
+    let variance = data.iter().map(|&p| (p as f64 - mean).powi(2)).sum::<f64>() / data.len() as f64;
+    let std_dev = variance.sqrt();
+    let skewness = data.iter().map(|&p| ((p as f64 - mean) / std_dev.max(1.0)).powi(3)).sum::<f64>() / data.len() as f64;
+    let kurtosis = data.iter().map(|&p| ((p as f64 - mean) / std_dev.max(1.0)).powi(4)).sum::<f64>() / data.len() as f64 - 3.0;
+    let min_val = *data.iter().min().unwrap_or(&0) as f64;
+    let max_val = *data.iter().max().unwrap_or(&255) as f64;
+    let range = max_val - min_val;
+    let median = {
+        let mut sorted: Vec<u8> = data.clone();
+        sorted.sort();
+        sorted[sorted.len() / 2] as f64
+    };
+    features.extend_from_slice(&[mean / 255.0, std_dev / 128.0, skewness, kurtosis / 10.0, min_val / 255.0, max_val / 255.0, range / 255.0, median / 255.0]);
+
+    // 2. Block-based features (divide into 4x4 grid = 16 blocks, 4 features each = 64 features)
+    let block_w = width / 4;
+    let block_h = height / 4;
+    for by in 0..4 {
+        for bx in 0..4 {
+            let mut block_sum = 0.0;
+            let mut block_sq_sum = 0.0;
+            let mut count = 0;
+            for y in (by * block_h)..((by + 1) * block_h).min(height) {
+                for x in (bx * block_w)..((bx + 1) * block_w).min(width) {
+                    let val = data[y * width + x] as f64;
+                    block_sum += val;
+                    block_sq_sum += val * val;
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                let block_mean = block_sum / count as f64;
+                let block_var = (block_sq_sum / count as f64) - block_mean.powi(2);
+                let block_std = block_var.sqrt();
+                let block_energy = block_sq_sum / count as f64;
+                features.extend_from_slice(&[block_mean / 255.0, block_std / 128.0, block_var / 16384.0, block_energy / 65536.0]);
+            } else {
+                features.extend_from_slice(&[0.0, 0.0, 0.0, 0.0]);
+            }
+        }
     }
-    
+
+    // 3. Gradient features (Sobel-like edge detection, 8 directions)
+    let directions: [(i32, i32); 8] = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)];
+    for (dy, dx) in directions.iter() {
+        let mut grad_sum = 0.0;
+        let mut grad_count = 0;
+        for y in 1..(height - 1) {
+            for x in 1..(width - 1) {
+                let center = data[y * width + x] as f64;
+                let neighbor_y = ((y as i32 + dy) as usize).min(height - 1);
+                let neighbor_x = ((x as i32 + dx) as usize).min(width - 1);
+                let neighbor = data[neighbor_y * width + neighbor_x] as f64;
+                grad_sum += (neighbor - center).abs();
+                grad_count += 1;
+            }
+        }
+        features.push(grad_sum / grad_count.max(1) as f64 / 255.0);
+    }
+
+    // 4. Histogram features (16 bins = 16 features)
+    let mut histogram = [0u32; 16];
+    for &pixel in data {
+        histogram[(pixel / 16) as usize] += 1;
+    }
+    let total = data.len() as f64;
+    for &count in histogram.iter() {
+        features.push(count as f64 / total);
+    }
+
+    // 5. Local Binary Pattern-like features (simplified, 32 features)
+    let mut lbp_histogram = vec![0u32; 32];
+    for y in 1..(height - 1) {
+        for x in 1..(width - 1) {
+            let center = data[y * width + x];
+            let mut pattern = 0u8;
+            for (i, (dy, dx)) in directions.iter().enumerate() {
+                let ny = ((y as i32 + dy) as usize).min(height - 1);
+                let nx = ((x as i32 + dx) as usize).min(width - 1);
+                if data[ny * width + nx] >= center {
+                    pattern |= 1 << i;
+                }
+            }
+            lbp_histogram[(pattern as usize) % 32] += 1;
+        }
+    }
+    let lbp_total = ((height - 2) * (width - 2)) as f64;
+    for &count in lbp_histogram.iter() {
+        features.push(count as f64 / lbp_total.max(1.0));
+    }
+
+    // 6. Multi-scale features (downsample and compute stats, fills remaining dimensions)
+    let scales = [2, 4, 8];
+    for scale in scales.iter() {
+        let scaled_w = width / scale;
+        let scaled_h = height / scale;
+        if scaled_w > 0 && scaled_h > 0 {
+            let mut scaled_sum = 0.0;
+            let mut scaled_count = 0;
+            for y in 0..scaled_h {
+                for x in 0..scaled_w {
+                    let orig_y = y * scale;
+                    let orig_x = x * scale;
+                    if orig_y < height && orig_x < width {
+                        scaled_sum += data[orig_y * width + orig_x] as f64;
+                        scaled_count += 1;
+                    }
+                }
+            }
+            features.push(scaled_sum / scaled_count.max(1) as f64 / 255.0);
+        }
+    }
+
+    // Pad or truncate to exact dimension
+    while features.len() < feature_dim {
+        // Use interpolated values for padding
+        let last = features.last().copied().unwrap_or(0.5);
+        features.push(last * 0.95 + 0.025);
+    }
+    features.truncate(feature_dim);
+
+    // Normalize features to [0, 1] range
+    let feat_max = features.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let feat_min = features.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    let feat_range = (feat_max - feat_min).max(1e-10);
+    for f in features.iter_mut() {
+        *f = (*f - feat_min) / feat_range;
+    }
+
     Ok(features)
 }
 
@@ -578,24 +719,288 @@ fn combine_vein_features(cnn_features: Vec<f64>, geometric_features: Vec<f64>) -
 }
 
 // Palm print processing functions (ridge analysis, minutiae, texture)
-// These will be implemented next, following the same pattern
 
-/// Enhance palm print ridge patterns (placeholder)
+/// Enhance palm print ridge patterns using oriented Gabor filters
+/// Optimized for ridge structure detection (higher frequency than vein patterns)
 fn enhance_palm_ridges(image: &PalmImage) -> Result<PalmImage> {
-    // TODO: Implement ridge enhancement with oriented Gabor filters
-    Ok(image.clone())
+    // Ridge patterns have higher spatial frequency than veins
+    let orientations = [0.0, PI/8.0, PI/4.0, 3.0*PI/8.0, PI/2.0, 5.0*PI/8.0, 3.0*PI/4.0, 7.0*PI/8.0];
+    let frequencies = [0.15, 0.25, 0.35]; // Higher frequencies for fine ridge structure
+
+    let mut responses = Vec::new();
+
+    for &orientation in &orientations {
+        for &frequency in &frequencies {
+            let params = GaborParameters {
+                orientation,
+                frequency,
+                sigma_x: 1.5, // Tighter sigma for ridge detection
+                sigma_y: 1.5,
+            };
+
+            let response = apply_gabor_filter(image, params)?;
+            responses.push(response);
+        }
+    }
+
+    combine_gabor_responses_with_dims(responses, image.width, image.height)
 }
 
-/// Extract minutiae points (placeholder)
+/// Extract minutiae-like features from ridge patterns
+/// Uses crossing number method to detect ridge endings and bifurcations
 fn extract_minutiae(image: &PalmImage) -> Result<Vec<f64>> {
-    // TODO: Implement CNN-hybrid minutiae extraction
-    Ok(vec![0.5; 32]) // Placeholder: 32-dim minutiae features
+    let width = image.width as usize;
+    let height = image.height as usize;
+    let data = &image.data;
+
+    let mut features = Vec::with_capacity(32);
+
+    // Binarize image using adaptive threshold
+    let mean = data.iter().map(|&p| p as f64).sum::<f64>() / data.len() as f64;
+    let binary: Vec<u8> = data.iter().map(|&p| if p as f64 > mean { 1 } else { 0 }).collect();
+
+    // Detect minutiae using crossing number
+    let mut ridge_endings = 0u32;
+    let mut bifurcations = 0u32;
+    let mut total_crossings = 0u32;
+
+    // 8-connectivity neighbors
+    let neighbors: [(i32, i32); 8] = [
+        (-1, -1), (-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1)
+    ];
+
+    for y in 1..(height - 1) {
+        for x in 1..(width - 1) {
+            if binary[y * width + x] == 1 {
+                // Count crossing number
+                let mut cn = 0i32;
+                for i in 0..8 {
+                    let (dy1, dx1) = neighbors[i];
+                    let (dy2, dx2) = neighbors[(i + 1) % 8];
+                    let p1 = binary[((y as i32 + dy1) as usize) * width + ((x as i32 + dx1) as usize)];
+                    let p2 = binary[((y as i32 + dy2) as usize) * width + ((x as i32 + dx2) as usize)];
+                    cn += (p1 as i32 - p2 as i32).abs();
+                }
+                cn /= 2;
+
+                if cn == 1 {
+                    ridge_endings += 1;
+                } else if cn >= 3 {
+                    bifurcations += 1;
+                }
+                total_crossings += cn as u32;
+            }
+        }
+    }
+
+    // Global minutiae statistics
+    let total_pixels = (width * height) as f64;
+    features.push(ridge_endings as f64 / total_pixels * 1000.0);
+    features.push(bifurcations as f64 / total_pixels * 1000.0);
+    features.push(total_crossings as f64 / total_pixels * 100.0);
+    features.push((ridge_endings + bifurcations) as f64 / total_pixels * 1000.0);
+
+    // Regional minutiae distribution (4x4 grid = 16 regions)
+    let block_w = width / 4;
+    let block_h = height / 4;
+    for by in 0..4 {
+        for bx in 0..4 {
+            let mut block_minutiae = 0u32;
+            for y in (by * block_h)..((by + 1) * block_h).min(height - 1) {
+                for x in (bx * block_w)..((bx + 1) * block_w).min(width - 1) {
+                    if y > 0 && x > 0 && binary[y * width + x] == 1 {
+                        let mut cn = 0i32;
+                        for i in 0..8 {
+                            let (dy1, dx1) = neighbors[i];
+                            let (dy2, dx2) = neighbors[(i + 1) % 8];
+                            let ny1 = (y as i32 + dy1).max(0) as usize;
+                            let nx1 = (x as i32 + dx1).max(0) as usize;
+                            let ny2 = (y as i32 + dy2).max(0) as usize;
+                            let nx2 = (x as i32 + dx2).max(0) as usize;
+                            if ny1 < height && nx1 < width && ny2 < height && nx2 < width {
+                                let p1 = binary[ny1 * width + nx1];
+                                let p2 = binary[ny2 * width + nx2];
+                                cn += (p1 as i32 - p2 as i32).abs();
+                            }
+                        }
+                        if cn / 2 != 2 { // Not a regular ridge point
+                            block_minutiae += 1;
+                        }
+                    }
+                }
+            }
+            let block_area = (block_w * block_h) as f64;
+            features.push(block_minutiae as f64 / block_area * 100.0);
+        }
+    }
+
+    // Directional minutiae features (4 main directions)
+    for dir in 0..4 {
+        let angle_start = dir as f64 * PI / 4.0;
+        let angle_end = (dir + 1) as f64 * PI / 4.0;
+        // Simplified: use gradient direction as proxy for ridge direction
+        let mut directional_count = 0u32;
+        for y in 1..(height - 1) {
+            for x in 1..(width - 1) {
+                let gx = data[y * width + (x + 1)] as f64 - data[y * width + (x - 1)] as f64;
+                let gy = data[(y + 1) * width + x] as f64 - data[(y - 1) * width + x] as f64;
+                let angle = gy.atan2(gx).abs();
+                if angle >= angle_start && angle < angle_end {
+                    directional_count += 1;
+                }
+            }
+        }
+        features.push(directional_count as f64 / total_pixels);
+    }
+
+    // Pad to 32 dimensions
+    while features.len() < 32 {
+        features.push(0.0);
+    }
+    features.truncate(32);
+
+    Ok(features)
 }
 
-/// Extract texture features (GLCM, LBP, Gabor) (placeholder)
+/// Extract texture features using GLCM (Gray-Level Co-occurrence Matrix) and LBP
 fn extract_texture_features(image: &PalmImage) -> Result<Vec<f64>> {
-    // TODO: Implement full texture feature extraction
-    Ok(vec![0.5; 48]) // Placeholder: 48-dim texture features
+    let width = image.width as usize;
+    let height = image.height as usize;
+    let data = &image.data;
+
+    let mut features = Vec::with_capacity(48);
+
+    // 1. GLCM features (4 directions, 4 features each = 16 features)
+    let offsets: [(i32, i32); 4] = [(0, 1), (1, 1), (1, 0), (1, -1)]; // 0°, 45°, 90°, 135°
+
+    for &(dy, dx) in &offsets {
+        // Build simplified GLCM (quantized to 16 levels)
+        let mut glcm = [[0u32; 16]; 16];
+        let mut count = 0u32;
+
+        for y in 0..height {
+            for x in 0..width {
+                let ny = (y as i32 + dy) as usize;
+                let nx = (x as i32 + dx) as usize;
+                if ny < height && nx < width {
+                    let i = (data[y * width + x] / 16) as usize;
+                    let j = (data[ny * width + nx] / 16) as usize;
+                    glcm[i][j] += 1;
+                    count += 1;
+                }
+            }
+        }
+
+        // Normalize GLCM
+        let count_f = count.max(1) as f64;
+
+        // Compute GLCM features
+        let mut contrast = 0.0;
+        let mut energy = 0.0;
+        let mut homogeneity = 0.0;
+        let mut entropy = 0.0;
+
+        for i in 0..16 {
+            for j in 0..16 {
+                let p = glcm[i][j] as f64 / count_f;
+                let diff = (i as f64 - j as f64).abs();
+
+                contrast += diff * diff * p;
+                energy += p * p;
+                homogeneity += p / (1.0 + diff);
+                if p > 0.0 {
+                    entropy -= p * p.ln();
+                }
+            }
+        }
+
+        features.extend_from_slice(&[contrast / 256.0, energy, homogeneity, entropy / 5.0]);
+    }
+
+    // 2. LBP histogram features (16 features for uniform LBP)
+    let mut lbp_hist = [0u32; 16];
+    let neighbors: [(i32, i32); 8] = [
+        (-1, -1), (-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1)
+    ];
+
+    for y in 1..(height - 1) {
+        for x in 1..(width - 1) {
+            let center = data[y * width + x];
+            let mut pattern = 0u8;
+            for (i, &(dy, dx)) in neighbors.iter().enumerate() {
+                let ny = (y as i32 + dy) as usize;
+                let nx = (x as i32 + dx) as usize;
+                if data[ny * width + nx] >= center {
+                    pattern |= 1 << i;
+                }
+            }
+            // Map to uniform LBP (simplified: use modulo)
+            lbp_hist[(pattern as usize) % 16] += 1;
+        }
+    }
+
+    let lbp_total = ((height - 2) * (width - 2)) as f64;
+    for &count in &lbp_hist {
+        features.push(count as f64 / lbp_total.max(1.0));
+    }
+
+    // 3. Gabor energy features (4 orientations × 2 scales = 8 features)
+    let gabor_orientations = [0.0, PI / 4.0, PI / 2.0, 3.0 * PI / 4.0];
+    let gabor_frequencies = [0.1, 0.2];
+
+    for &orientation in &gabor_orientations {
+        for &frequency in &gabor_frequencies {
+            let params = GaborParameters {
+                orientation,
+                frequency,
+                sigma_x: 2.0,
+                sigma_y: 2.0,
+            };
+
+            let response = apply_gabor_filter(image, params)?;
+            let energy: f64 = response.iter().map(|&r| r * r).sum::<f64>() / response.len() as f64;
+            features.push(energy / 10000.0); // Normalize
+        }
+    }
+
+    // 4. Statistical texture measures (8 features)
+    let mean = data.iter().map(|&p| p as f64).sum::<f64>() / data.len() as f64;
+    let variance = data.iter().map(|&p| (p as f64 - mean).powi(2)).sum::<f64>() / data.len() as f64;
+    let std_dev = variance.sqrt();
+
+    // Smoothness
+    let smoothness = 1.0 - 1.0 / (1.0 + variance / 65536.0);
+    features.push(smoothness);
+
+    // Third moment (skewness)
+    let skewness = data.iter().map(|&p| ((p as f64 - mean) / std_dev.max(1.0)).powi(3)).sum::<f64>() / data.len() as f64;
+    features.push(skewness);
+
+    // Uniformity
+    let mut hist = [0u32; 256];
+    for &pixel in data {
+        hist[pixel as usize] += 1;
+    }
+    let uniformity: f64 = hist.iter().map(|&c| (c as f64 / data.len() as f64).powi(2)).sum();
+    features.push(uniformity);
+
+    // Entropy
+    let entropy: f64 = hist.iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / data.len() as f64;
+            -p * p.ln()
+        })
+        .sum();
+    features.push(entropy / 6.0);
+
+    // Pad to 48 dimensions
+    while features.len() < 48 {
+        features.push(0.0);
+    }
+    features.truncate(48);
+
+    Ok(features)
 }
 
 /// Combine print features: CNN (200) + texture (48) + minutiae (32) = 280, truncate to 256

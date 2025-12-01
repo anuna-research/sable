@@ -54,15 +54,18 @@ pub struct SableResult {
 impl SableResult {
     fn success(data: Vec<u8>) -> Self {
         let data_len = data.len() as c_int;
-        let data_ptr = Box::into_raw(data.into_boxed_slice()) as *mut c_uchar;
-        
+        // Convert Vec to boxed slice, then leak as raw pointer
+        // This ensures the allocation matches what we'll free later
+        let boxed_slice = data.into_boxed_slice();
+        let data_ptr = Box::into_raw(boxed_slice) as *mut c_uchar;
+
         Self {
             error_code: SableErrorCode::Success,
             data: data_ptr,
             data_len,
         }
     }
-    
+
     fn error(code: SableErrorCode) -> Self {
         Self {
             error_code: code,
@@ -292,11 +295,20 @@ pub extern "C" fn sable_generate_salt(salt_out: *mut c_uchar) -> c_int {
 }
 
 /// Free result data allocated by SABLE FFI functions
+///
+/// # Safety
+/// The result must have been created by a SABLE FFI function.
+/// The data pointer must not have been modified or freed.
 #[no_mangle]
 pub extern "C" fn sable_free_result(result: &mut SableResult) {
-    if !result.data.is_null() {
+    if !result.data.is_null() && result.data_len > 0 {
         unsafe {
-            let _ = Vec::from_raw_parts(result.data, result.data_len as usize, result.data_len as usize);
+            // Reconstruct the boxed slice that was created in SableResult::success()
+            // This is safe because:
+            // 1. We created the pointer with Box::into_raw(data.into_boxed_slice())
+            // 2. The data_len matches the original slice length
+            let slice_ptr = std::ptr::slice_from_raw_parts_mut(result.data, result.data_len as usize);
+            let _ = Box::from_raw(slice_ptr);
         }
         result.data = ptr::null_mut();
         result.data_len = 0;
@@ -304,31 +316,41 @@ pub extern "C" fn sable_free_result(result: &mut SableResult) {
 }
 
 /// Get error message string (for debugging)
+///
+/// Returns a pointer to a static string - DO NOT free this pointer.
+/// The returned pointer is valid for the lifetime of the program.
 #[no_mangle]
 pub extern "C" fn sable_error_message(error_code: SableErrorCode) -> *const c_char {
-    let message = match error_code {
-        SableErrorCode::Success => "Success",
-        SableErrorCode::InvalidInput => "Invalid input parameters",
-        SableErrorCode::CryptoError => "Cryptographic operation failed", 
-        SableErrorCode::SerializationError => "Serialization error",
-        SableErrorCode::OutOfMemory => "Out of memory",
-        SableErrorCode::Unknown => "Unknown error",
+    // Use static strings to avoid memory leaks
+    // These are null-terminated C strings stored in static memory
+    static SUCCESS: &[u8] = b"Success\0";
+    static INVALID_INPUT: &[u8] = b"Invalid input parameters\0";
+    static CRYPTO_ERROR: &[u8] = b"Cryptographic operation failed\0";
+    static SERIALIZATION_ERROR: &[u8] = b"Serialization error\0";
+    static OUT_OF_MEMORY: &[u8] = b"Out of memory\0";
+    static UNKNOWN: &[u8] = b"Unknown error\0";
+
+    let message: &[u8] = match error_code {
+        SableErrorCode::Success => SUCCESS,
+        SableErrorCode::InvalidInput => INVALID_INPUT,
+        SableErrorCode::CryptoError => CRYPTO_ERROR,
+        SableErrorCode::SerializationError => SERIALIZATION_ERROR,
+        SableErrorCode::OutOfMemory => OUT_OF_MEMORY,
+        SableErrorCode::Unknown => UNKNOWN,
     };
-    
-    match CString::new(message) {
-        Ok(c_str) => c_str.into_raw(),
-        Err(_) => ptr::null(),
-    }
+
+    message.as_ptr() as *const c_char
 }
 
-/// Free error message string
+/// Free error message string (DEPRECATED - no longer needed)
+///
+/// This function is kept for backwards compatibility but does nothing.
+/// Error messages now use static strings that do not need to be freed.
 #[no_mangle]
-pub extern "C" fn sable_free_error_message(message: *mut c_char) {
-    if !message.is_null() {
-        unsafe {
-            let _ = CString::from_raw(message);
-        }
-    }
+#[deprecated(note = "Error messages now use static strings and do not need to be freed")]
+pub extern "C" fn sable_free_error_message(_message: *mut c_char) {
+    // No-op: error messages are now static strings
+    // This function is kept for backwards compatibility with existing code
 }
 
 #[cfg(test)]

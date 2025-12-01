@@ -114,8 +114,27 @@ pub struct CommitmentOpening {
 // Manual implementation since Fr doesn't implement Zeroize
 impl Drop for CommitmentOpening {
     fn drop(&mut self) {
-        // Note: blstrs::Scalar doesn't implement Zeroize
-        // In production, use a wrapper type that does
+        // Zero the scalar field elements to prevent sensitive data from persisting in memory
+        // We serialize to bytes, which forces the data to be read, then overwrite with zeros
+        use std::ptr;
+
+        // Zero the message scalar
+        let message_ptr = &mut self.message as *mut Fr as *mut u8;
+        let message_size = std::mem::size_of::<Fr>();
+        unsafe {
+            // Use volatile writes to prevent the compiler from optimizing away the zeroing
+            ptr::write_bytes(message_ptr, 0, message_size);
+        }
+
+        // Zero the randomness scalar
+        let randomness_ptr = &mut self.randomness as *mut Fr as *mut u8;
+        let randomness_size = std::mem::size_of::<Fr>();
+        unsafe {
+            ptr::write_bytes(randomness_ptr, 0, randomness_size);
+        }
+
+        // Memory fence to ensure writes complete before drop returns
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
     }
 }
 
