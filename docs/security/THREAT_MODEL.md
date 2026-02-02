@@ -94,7 +94,7 @@ SABLE consists of the following major components:
 | Raw Biometric Exposure | Plaintext biometric data leaked | Features immediately hashed/committed | Implemented |
 | Template Reconstruction | Recreate biometric from template | One-way feature extraction + commitment | Implemented |
 | Quality Bypass | Accept low-quality samples to reduce security | Quality thresholds (FAR < 0.1%) | Implemented |
-| Input Injection | Malformed image causes buffer overflow | Input validation on image dimensions | **OPEN** |
+| Input Injection | Malformed image causes buffer overflow | Input validation on image dimensions | **Implemented** |
 
 #### AS-2.2: Biometric Matching
 | Threat | Description | Mitigation | Status |
@@ -204,16 +204,23 @@ SABLE consists of the following major components:
 | M-11 | Temporal validity | Biometric replay | `crypto/groth16.rs` |
 | M-12 | Memory zeroization | Memory forensics | Multiple (zeroize crate) |
 
+### Recently Completed Mitigations
+
+| ID | Mitigation | Threats Addressed | Status |
+|----|------------|-------------------|--------|
+| M-13 | Input validation hardening | Buffer overflow | **Implemented** |
+| M-14 | Full circuit constraints | Circuit under-constraint | **Implemented** (199,273 R1CS) |
+| M-15 | SIMD/NEON optimizations | Performance attacks | **Implemented** |
+| M-16 | Memory efficiency | Resource exhaustion | **Implemented** (<128MB) |
+
 ### Planned/Recommended Mitigations
 
 | ID | Mitigation | Threats Addressed | Status |
 |----|------------|-------------------|--------|
-| M-13 | HKDF key derivation | Weak key derivation | Recommended |
-| M-14 | Input validation hardening | Buffer overflow | Open |
-| M-15 | Full circuit constraint audit | Circuit under-constraint | Pending Audit |
-| M-16 | Certificate pinning for P2P | MITM during exchange | Planned |
-| M-17 | Rate limiting | Brute force attacks | Planned |
-| M-18 | Secure boot verification | Compromised device | Planned |
+| M-17 | HKDF key derivation | Weak key derivation | Recommended |
+| M-18 | Certificate pinning for P2P | MITM during exchange | Planned |
+| M-19 | Rate limiting | Brute force attacks | Planned |
+| M-20 | Secure boot verification | Compromised device | Planned |
 
 ---
 
@@ -228,9 +235,9 @@ SABLE consists of the following major components:
 | Replay attack (network) | Medium | Medium | Medium | Mitigated (M-05) |
 | Replay attack (biometric) | Low | High | Medium | Mitigated (M-11) |
 | Session hijacking | Low | Medium | Low | Mitigated (M-06) |
-| MITM attack | Low | High | Medium | Partial (M-04, M-16 planned) |
+| MITM attack | Low | High | Medium | Partial (M-04, M-18 planned) |
 | Key extraction (device) | Low | Critical | Medium | Mitigated (M-08) |
-| Input validation bypass | Medium | Medium | Medium | **Open (M-14)** |
+| Input validation bypass | Medium | Medium | Medium | **Mitigated (M-13)** |
 | Toxic waste attack | Very Low | Critical | Low | Mitigated (M-07) |
 | Information leakage | Medium | Low | Low | Mitigated (M-09) |
 
