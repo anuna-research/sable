@@ -2,6 +2,10 @@
 //
 // C-compatible Foreign Function Interface for mobile platforms.
 // Provides memory-safe bindings for Android JNI and iOS Swift integration.
+//
+// REQ-005: Error messages are sanitized to prevent information leakage.
+// Only generic error codes are exposed to external callers.
+// Detailed errors should be logged internally before conversion.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double, c_int, c_uchar};
@@ -10,36 +14,77 @@ use std::slice;
 
 use super::MobileSable;
 use crate::crypto::rng::SecureRng;
+use crate::error::{PublicErrorCode, SableError};
 use crate::types::{Distance, Salt, Timestamp};
 
 // Opaque handles for mobile platforms
 pub type SableHandle = *mut MobileSable;
 
-/// Error codes for mobile FFI
+/// Error codes for mobile FFI (REQ-005: Sanitized for external exposure)
+///
+/// These error codes do not reveal implementation details, file paths,
+/// internal state, timing information, or algorithm details.
 #[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SableErrorCode {
+    /// Operation completed successfully
     Success = 0,
+    /// Invalid input parameters or data format
     InvalidInput = 1,
-    CryptoError = 2,
-    SerializationError = 3,
-    OutOfMemory = 4,
-    Unknown = 99,
+    /// Processing operation failed
+    ProcessingFailed = 2,
+    /// Internal system error
+    SystemError = 3,
 }
 
-impl From<crate::error::SableError> for SableErrorCode {
-    fn from(error: crate::error::SableError) -> Self {
-        match error {
-            crate::error::SableError::InvalidFeature => SableErrorCode::InvalidInput,
-            crate::error::SableError::CryptoError(_) => SableErrorCode::CryptoError,
-            crate::error::SableError::SerializationError(_) => SableErrorCode::SerializationError,
-            crate::error::SableError::InvalidCommitment(_) => SableErrorCode::CryptoError,
-            crate::error::SableError::ProofGeneration(_) => SableErrorCode::CryptoError,
-            crate::error::SableError::ProofVerification(_) => SableErrorCode::CryptoError,
-            crate::error::SableError::Cryptographic(_) => SableErrorCode::CryptoError,
-            crate::error::SableError::InvalidInput(_) => SableErrorCode::InvalidInput,
-            crate::error::SableError::RandomGeneration => SableErrorCode::CryptoError,
+impl From<SableError> for SableErrorCode {
+    /// Convert internal SableError to sanitized FFI error code (REQ-005)
+    ///
+    /// NOTE: The original error should be logged internally before this conversion
+    /// for administrator access to detailed error information.
+    fn from(error: SableError) -> Self {
+        // Map using PublicError to ensure consistent sanitization
+        match error.to_public_error().code {
+            PublicErrorCode::InvalidInput => SableErrorCode::InvalidInput,
+            PublicErrorCode::ProcessingFailed => SableErrorCode::ProcessingFailed,
+            PublicErrorCode::SystemError => SableErrorCode::SystemError,
         }
     }
+}
+
+impl From<PublicErrorCode> for SableErrorCode {
+    fn from(code: PublicErrorCode) -> Self {
+        match code {
+            PublicErrorCode::InvalidInput => SableErrorCode::InvalidInput,
+            PublicErrorCode::ProcessingFailed => SableErrorCode::ProcessingFailed,
+            PublicErrorCode::SystemError => SableErrorCode::SystemError,
+        }
+    }
+}
+
+/// Internal helper to log error details before sanitization (REQ-005)
+///
+/// This function logs the detailed error information for administrator access
+/// before converting to a sanitized error code for external exposure.
+///
+/// In production, this should integrate with a secure logging framework
+/// that is only accessible to authorized administrators.
+#[cfg(feature = "internal-logging")]
+fn log_internal_error(error: &SableError, context: &str) {
+    // Log detailed error for administrators
+    // This log should only be accessible to authorized personnel
+    eprintln!("[INTERNAL] {} - Error: {:?}", context, error);
+}
+
+#[cfg(not(feature = "internal-logging"))]
+fn log_internal_error(_error: &SableError, _context: &str) {
+    // Logging disabled - errors are silently sanitized
+}
+
+/// Convert SableError to FFI error code with internal logging (REQ-005)
+fn sanitize_error(error: SableError, context: &str) -> SableErrorCode {
+    log_internal_error(&error, context);
+    error.into()
 }
 
 /// FFI result structure (for internal use only)
@@ -138,10 +183,10 @@ pub extern "C" fn sable_generate_commitment(
             // Serialize commitment to 48-byte format
             match commitment.to_bytes() {
                 Ok(bytes) => SableResult::success(bytes),
-                Err(e) => SableResult::error(e.into()),
+                Err(e) => SableResult::error(sanitize_error(e, "commitment_serialization")),
             }
         }
-        Err(e) => SableResult::error(e.into()),
+        Err(e) => SableResult::error(sanitize_error(e, "generate_commitment")),
     }
 }
 
@@ -195,16 +240,16 @@ pub extern "C" fn sable_generate_proof(
     
     let commitment = match crate::crypto::pedersen::PedersenCommitment::from_bytes(commitment_slice) {
         Ok(c) => c,
-        Err(e) => return SableResult::error(e.into()),
+        Err(e) => return SableResult::error(sanitize_error(e, "parse_commitment")),
     };
-    
+
     let threshold = Distance::new(threshold);
     let timestamp = Timestamp::from_unix(current_time);
-    
+
     // Generate proof
     match sable.generate_proof(features_slice, &salt, &commitment, threshold, timestamp) {
         Ok(proof_bytes) => SableResult::success(proof_bytes),
-        Err(e) => SableResult::error(e.into()),
+        Err(e) => SableResult::error(sanitize_error(e, "generate_proof")),
     }
 }
 
@@ -303,18 +348,20 @@ pub extern "C" fn sable_free_result(result: &mut SableResult) {
     }
 }
 
-/// Get error message string (for debugging)
+/// Get error message string (REQ-005: Sanitized for external exposure)
+///
+/// Returns generic error messages that do not reveal implementation details,
+/// file paths, internal state, timing information, or algorithm details.
 #[no_mangle]
 pub extern "C" fn sable_error_message(error_code: SableErrorCode) -> *const c_char {
+    // REQ-005: Use generic messages that don't leak implementation details
     let message = match error_code {
         SableErrorCode::Success => "Success",
-        SableErrorCode::InvalidInput => "Invalid input parameters",
-        SableErrorCode::CryptoError => "Cryptographic operation failed", 
-        SableErrorCode::SerializationError => "Serialization error",
-        SableErrorCode::OutOfMemory => "Out of memory",
-        SableErrorCode::Unknown => "Unknown error",
+        SableErrorCode::InvalidInput => "Invalid input provided",
+        SableErrorCode::ProcessingFailed => "Operation could not be completed",
+        SableErrorCode::SystemError => "An internal error occurred",
     };
-    
+
     match CString::new(message) {
         Ok(c_str) => c_str.into_raw(),
         Err(_) => ptr::null(),

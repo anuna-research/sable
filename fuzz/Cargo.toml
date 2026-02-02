@@ -1,0 +1,73 @@
+[package]
+name = "sable-fuzz"
+version = "0.0.0"
+authors = ["Automatically generated"]
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.sable-core]
+path = "../core"
+features = ["std"]
+
+# BLS12-381 and field operations for direct fuzzing
+[dependencies.blstrs]
+version = "0.7"
+
+[dependencies.ff]
+version = "0.13"
+
+[dependencies.group]
+version = "0.13"
+
+[workspace]
+members = ["."]
+
+# Fuzz targets
+[[bin]]
+name = "fuzz_poseidon_hash"
+path = "fuzz_targets/fuzz_poseidon_hash.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pedersen_commit"
+path = "fuzz_targets/fuzz_pedersen_commit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_feature_extraction"
+path = "fuzz_targets/fuzz_feature_extraction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_feature_normalization"
+path = "fuzz_targets/fuzz_feature_normalization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_fusion"
+path = "fuzz_targets/fuzz_fusion.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ffi_api"
+path = "fuzz_targets/fuzz_ffi_api.rs"
+test = false
+doc = false
+bench = false

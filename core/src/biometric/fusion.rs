@@ -5,38 +5,143 @@
 // Based on research configuration: 0.6 vein weight + 0.4 print weight
 
 use super::{ModalityFeatureVector, BiometricModality};
+use super::constant_time::constant_time_distance_to_similarity;
+use super::thresholds::{
+    GLOBAL_MATCH_THRESHOLD, VEIN_FUSION_WEIGHT, PRINT_FUSION_WEIGHT
+};
 use crate::error::{Result, SableError};
 
+/// Tolerance for floating-point comparison when validating fusion weights
+const EPSILON: f64 = 1e-6;
+
+/// REQ-008: Validate that fusion weights sum to 1.0
+///
+/// Verifies that multi-modal fusion weights sum to 1.0 within floating-point tolerance.
+/// This validation is performed at configuration time and before fusion operations.
+///
+/// # Arguments
+/// * `weights` - Slice of fusion weights to validate
+///
+/// # Returns
+/// * `Ok(())` if weights are valid (sum to 1.0, all non-negative, non-empty)
+/// * `Err(SableError::InvalidInput)` if validation fails
+///
+/// # Examples
+/// ```
+/// use sable_core::biometric::fusion::validate_fusion_weights;
+///
+/// // Valid weights
+/// assert!(validate_fusion_weights(&[0.6, 0.4]).is_ok());
+/// assert!(validate_fusion_weights(&[0.5, 0.3, 0.2]).is_ok());
+///
+/// // Invalid weights
+/// assert!(validate_fusion_weights(&[0.5, 0.3]).is_err()); // Sum != 1.0
+/// assert!(validate_fusion_weights(&[-0.1, 1.1]).is_err()); // Negative weight
+/// assert!(validate_fusion_weights(&[]).is_err()); // Empty
+/// ```
+pub fn validate_fusion_weights(weights: &[f64]) -> Result<()> {
+    // Check for empty weights
+    if weights.is_empty() {
+        return Err(SableError::InvalidInput(
+            "Fusion weights must sum to 1.0".into()
+        ));
+    }
+
+    // Check for negative weights
+    for &weight in weights {
+        if weight < 0.0 {
+            return Err(SableError::InvalidInput(
+                "Fusion weights must sum to 1.0".into()
+            ));
+        }
+    }
+
+    // Check that weights sum to 1.0
+    let sum: f64 = weights.iter().sum();
+    if (sum - 1.0).abs() > EPSILON {
+        return Err(SableError::InvalidInput(
+            "Fusion weights must sum to 1.0".into()
+        ));
+    }
+
+    Ok(())
+}
+
 /// Fusion configuration from research
+///
+/// REQ-009: Uses centralized threshold constants for consistency.
+/// See thresholds module for ADR-001 explaining threshold relationships.
 pub struct FusionConfig {
-    /// Weight for palm vein modality (research: 0.6)
+    /// Weight for palm vein modality (from thresholds::VEIN_FUSION_WEIGHT)
     pub vein_weight: f64,
-    /// Weight for palm print modality (research: 0.4)  
+    /// Weight for palm print modality (from thresholds::PRINT_FUSION_WEIGHT)
     pub print_weight: f64,
-    /// Final verification threshold (research: 0.77)
+    /// Final verification threshold (from thresholds::GLOBAL_MATCH_THRESHOLD)
+    /// REQ-009: This is max(modality_thresholds) for consistent security
     pub threshold: f64,
     /// Fusion method
     pub method: FusionMethod,
 }
 
+impl FusionConfig {
+    /// REQ-008: Create a new FusionConfig with validated weights
+    ///
+    /// # Arguments
+    /// * `vein_weight` - Weight for palm vein modality
+    /// * `print_weight` - Weight for palm print modality
+    /// * `threshold` - Verification threshold
+    /// * `method` - Fusion method to use
+    ///
+    /// # Returns
+    /// * `Ok(FusionConfig)` if weights are valid
+    /// * `Err(SableError::InvalidInput)` if weights don't sum to 1.0
+    pub fn new(
+        vein_weight: f64,
+        print_weight: f64,
+        threshold: f64,
+        method: FusionMethod,
+    ) -> Result<Self> {
+        // REQ-008: Validate weights at configuration time
+        validate_fusion_weights(&[vein_weight, print_weight])?;
+
+        Ok(Self {
+            vein_weight,
+            print_weight,
+            threshold,
+            method,
+        })
+    }
+
+    /// Get the weights as a slice for validation
+    pub fn weights(&self) -> [f64; 2] {
+        [self.vein_weight, self.print_weight]
+    }
+}
+
 impl Default for FusionConfig {
     fn default() -> Self {
-        // Research-proven parameters from Scheme implementation
+        // REQ-009: Use centralized threshold constants for consistency
+        // These weights are validated at compile-time via the constant values
         Self {
-            vein_weight: 0.6,
-            print_weight: 0.4,
-            threshold: 0.77,
+            vein_weight: VEIN_FUSION_WEIGHT,
+            print_weight: PRINT_FUSION_WEIGHT,
+            threshold: GLOBAL_MATCH_THRESHOLD,
             method: FusionMethod::WeightedScore,
         }
     }
 }
 
+/// Fusion method for combining multi-modal biometric scores.
 #[derive(Debug, Clone, Copy)]
 pub enum FusionMethod {
-    WeightedScore,      // Weighted score-level fusion (research method)
-    MaxScore,          // Maximum score
-    MinScore,          // Minimum score  
-    ProductScore,      // Product rule
+    /// Weighted score-level fusion (research method)
+    WeightedScore,
+    /// Maximum score fusion
+    MaxScore,
+    /// Minimum score fusion
+    MinScore,
+    /// Product rule fusion
+    ProductScore,
 }
 
 /// Fuse palm vein and palm print features into unified 512-dim vector for SABLE
@@ -84,7 +189,8 @@ pub fn fuse_modalities(
             ))
         },
         (None, None) => {
-            Err(SableError::CryptoError("No biometric features to fuse".into()))
+            // REQ-005: Generic error message
+            Err(SableError::InvalidInput("Insufficient biometric data".into()))
         }
     }
 }
@@ -95,7 +201,10 @@ fn fuse_feature_vectors(
     print: &ModalityFeatureVector,
 ) -> Result<Vec<f64>> {
     let config = FusionConfig::default();
-    
+
+    // REQ-008: Runtime validation of fusion weights before operation
+    validate_fusion_weights(&config.weights())?;
+
     match config.method {
         FusionMethod::WeightedScore => {
             weighted_feature_fusion(vein, print, config.vein_weight, config.print_weight)
@@ -109,13 +218,16 @@ fn fuse_feature_vectors(
 /// Weighted score-level fusion (primary research method)
 /// Creates 512-dim vector: [vein_features * 0.6] ⊕ [print_features * 0.4]
 fn weighted_feature_fusion(
-    vein: &ModalityFeatureVector, 
+    vein: &ModalityFeatureVector,
     print: &ModalityFeatureVector,
     vein_weight: f64,
     print_weight: f64,
 ) -> Result<Vec<f64>> {
+    // REQ-008: Runtime validation of fusion weights before operation
+    validate_fusion_weights(&[vein_weight, print_weight])?;
+
     let mut fused = Vec::with_capacity(512);
-    
+
     // Strategy: Interleave weighted features to preserve both modalities
     let vein_len = vein.features.len();
     let print_len = print.features.len();
@@ -197,12 +309,15 @@ fn product_feature_fusion(
 /// Returns weighted score using research-based fusion
 pub fn compute_verification_score(
     enrolled_vein: Option<&ModalityFeatureVector>,
-    enrolled_print: Option<&ModalityFeatureVector>, 
+    enrolled_print: Option<&ModalityFeatureVector>,
     live_vein: Option<&ModalityFeatureVector>,
     live_print: Option<&ModalityFeatureVector>,
 ) -> Result<f64> {
     let config = FusionConfig::default();
-    
+
+    // REQ-008: Runtime validation of fusion weights before operation
+    validate_fusion_weights(&config.weights())?;
+
     let mut scores = Vec::new();
     let mut weights = Vec::new();
     
@@ -221,7 +336,8 @@ pub fn compute_verification_score(
     }
     
     if scores.is_empty() {
-        return Err(SableError::CryptoError("No matching modalities for verification".into()));
+        // REQ-005: Generic error message
+        return Err(SableError::InvalidInput("Insufficient biometric data for verification".into()));
     }
     
     // Weighted score fusion
@@ -233,28 +349,31 @@ pub fn compute_verification_score(
     Ok(weighted_sum / weight_sum)
 }
 
-/// Compute similarity score between two feature vectors of same modality
+/// Compute similarity score between two feature vectors of same modality.
+///
+/// REQ-004: Uses constant-time distance calculation and similarity conversion
+/// to prevent timing side-channel attacks during biometric matching.
 fn compute_modality_score(
     enrolled: &ModalityFeatureVector,
     live: &ModalityFeatureVector,
 ) -> Result<f64> {
     if enrolled.modality != live.modality {
-        return Err(SableError::CryptoError("Modality mismatch in score computation".into()));
+        // REQ-005: Generic error message - doesn't reveal modality types
+        return Err(SableError::InvalidInput("Incompatible biometric data".into()));
     }
-    
-    // Use normalized Euclidean distance converted to similarity score
+
+    // Use constant-time Euclidean distance (REQ-004)
     let distance = enrolled.euclidean_distance(live)?;
-    
-    // Convert distance to similarity score [0,1]
+
     // Research threshold-based normalization
     let max_distance = match enrolled.modality {
         BiometricModality::PalmVein => 2.0,      // Research-calibrated max distance
         BiometricModality::PalmPrint => 1.5,     // Research-calibrated max distance
         BiometricModality::PalmMultiModal => 2.5, // Research-calibrated max distance
     };
-    
-    let similarity = (max_distance - distance.min(max_distance)) / max_distance;
-    Ok(similarity.max(0.0))
+
+    // Use constant-time distance-to-similarity conversion (REQ-004)
+    Ok(constant_time_distance_to_similarity(distance, max_distance))
 }
 
 /// Advanced fusion with adaptive weighting based on quality
@@ -268,7 +387,12 @@ pub fn adaptive_weighted_fusion(
             let total_confidence = vein.confidence + print.confidence;
             let vein_weight = vein.confidence / total_confidence;
             let print_weight = print.confidence / total_confidence;
-            
+
+            // REQ-008: Runtime validation of adaptive fusion weights
+            // Note: weighted_feature_fusion also validates, but we validate here
+            // for early failure with clear context
+            validate_fusion_weights(&[vein_weight, print_weight])?;
+
             let fused_features = weighted_feature_fusion(vein, print, vein_weight, print_weight)?;
             
             Ok(ModalityFeatureVector::new(
@@ -301,29 +425,35 @@ pub fn assess_feature_quality(features: &ModalityFeatureVector) -> f64 {
 }
 
 /// Decision-level fusion for final verification
+///
+/// REQ-008: This function uses validated fusion weights from FusionConfig.
+/// The weights are validated at configuration time.
 pub fn decision_level_fusion(
     vein_decision: Option<bool>,
     print_decision: Option<bool>,
     vein_score: Option<f64>,
     print_score: Option<f64>,
-) -> (bool, f64) {
+) -> Result<(bool, f64)> {
     let config = FusionConfig::default();
-    
+
+    // REQ-008: Runtime validation of fusion weights
+    validate_fusion_weights(&config.weights())?;
+
     match (vein_decision, print_decision, vein_score, print_score) {
         (Some(vein_ok), Some(print_ok), Some(v_score), Some(p_score)) => {
             // Both modalities available
             let combined_score = v_score * config.vein_weight + p_score * config.print_weight;
             let decision = vein_ok || print_ok; // OR rule for leniency
-            (decision, combined_score)
+            Ok((decision, combined_score))
         },
-        (Some(decision), None, Some(score), None) | 
+        (Some(decision), None, Some(score), None) |
         (None, Some(decision), None, Some(score)) => {
             // Single modality
-            (decision, score * 0.8) // Reduced confidence for single modality
+            Ok((decision, score * 0.8)) // Reduced confidence for single modality
         },
         _ => {
             // No valid data
-            (false, 0.0)
+            Ok((false, 0.0))
         }
     }
 }
@@ -348,9 +478,13 @@ fn normalize_features(features: &mut [f64]) {
 /// Performance metrics for fusion evaluation
 #[derive(Debug, Clone)]
 pub struct FusionMetrics {
+    /// Overall accuracy (1 - error rate)
     pub accuracy: f64,
+    /// False accept rate (FAR)
     pub false_accept_rate: f64,
+    /// False reject rate (FRR)
     pub false_reject_rate: f64,
+    /// Equal error rate (EER)
     pub equal_error_rate: f64,
 }
 
@@ -452,11 +586,11 @@ mod tests {
     fn test_decision_level_fusion() {
         let (decision, score) = decision_level_fusion(
             Some(true),
-            Some(false), 
+            Some(false),
             Some(0.8),
             Some(0.6)
-        );
-        
+        ).unwrap();
+
         assert_eq!(decision, true); // OR rule
         assert!(score > 0.6);
         assert!(score < 0.8);
@@ -475,9 +609,124 @@ mod tests {
     #[test]
     fn test_fusion_config() {
         let config = FusionConfig::default();
-        
+
+        // REQ-009: Verify config uses centralized threshold constants
+        assert_eq!(config.vein_weight, VEIN_FUSION_WEIGHT);
+        assert_eq!(config.print_weight, PRINT_FUSION_WEIGHT);
+        assert_eq!(config.threshold, GLOBAL_MATCH_THRESHOLD);
+    }
+
+    #[test]
+    fn test_fusion_config_uses_consistent_thresholds() {
+        // REQ-009: Verify FusionConfig uses the centralized constants
+        let config = FusionConfig::default();
+
+        // Weights should match the module constants
+        assert_eq!(config.vein_weight, 0.6, "Vein weight should be 0.6");
+        assert_eq!(config.print_weight, 0.4, "Print weight should be 0.4");
+
+        // Threshold should be the global threshold (max of modality thresholds)
+        assert_eq!(config.threshold, 0.80, "Threshold should be 0.80 (GLOBAL_MATCH_THRESHOLD)");
+    }
+
+    // REQ-008: Tests for fusion weight validation
+
+    #[test]
+    fn test_validate_fusion_weights_valid_research_weights() {
+        // Research-defined weights: 0.6 vein + 0.4 print = 1.0
+        assert!(validate_fusion_weights(&[0.6, 0.4]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_fusion_weights_valid_equal_weights() {
+        // Equal weights: 0.5 + 0.5 = 1.0
+        assert!(validate_fusion_weights(&[0.5, 0.5]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_fusion_weights_valid_three_modalities() {
+        // Three modalities: 0.5 + 0.3 + 0.2 = 1.0
+        assert!(validate_fusion_weights(&[0.5, 0.3, 0.2]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_fusion_weights_valid_single_modality() {
+        // Single modality with full weight
+        assert!(validate_fusion_weights(&[1.0]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_fusion_weights_valid_within_epsilon() {
+        // Weights that sum to 1.0 within floating-point tolerance
+        let weights = [0.333333333, 0.333333333, 0.333333334];
+        assert!(validate_fusion_weights(&weights).is_ok());
+    }
+
+    #[test]
+    fn test_validate_fusion_weights_invalid_sum_too_low() {
+        // Sum = 0.8, should fail
+        let result = validate_fusion_weights(&[0.5, 0.3]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Fusion weights must sum to 1.0"));
+    }
+
+    #[test]
+    fn test_validate_fusion_weights_invalid_sum_too_high() {
+        // Sum = 1.2, should fail
+        let result = validate_fusion_weights(&[0.7, 0.5]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Fusion weights must sum to 1.0"));
+    }
+
+    #[test]
+    fn test_validate_fusion_weights_invalid_empty() {
+        // Empty weights should fail
+        let result = validate_fusion_weights(&[]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Fusion weights must sum to 1.0"));
+    }
+
+    #[test]
+    fn test_validate_fusion_weights_invalid_negative() {
+        // Negative weight should fail (even if sum is 1.0)
+        let result = validate_fusion_weights(&[-0.1, 1.1]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Fusion weights must sum to 1.0"));
+    }
+
+    #[test]
+    fn test_validate_fusion_weights_invalid_all_zeros() {
+        // All zeros don't sum to 1.0
+        let result = validate_fusion_weights(&[0.0, 0.0]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_fusion_config_new_valid() {
+        // Valid configuration should succeed
+        let config = FusionConfig::new(0.6, 0.4, 0.77, FusionMethod::WeightedScore);
+        assert!(config.is_ok());
+        let config = config.unwrap();
         assert_eq!(config.vein_weight, 0.6);
         assert_eq!(config.print_weight, 0.4);
-        assert_eq!(config.threshold, 0.77);
+    }
+
+    #[test]
+    fn test_fusion_config_new_invalid_weights() {
+        // Invalid weights should fail at configuration time
+        let config = FusionConfig::new(0.7, 0.5, 0.77, FusionMethod::WeightedScore);
+        assert!(config.is_err());
+    }
+
+    #[test]
+    fn test_fusion_config_weights_method() {
+        let config = FusionConfig::default();
+        let weights = config.weights();
+        assert_eq!(weights, [0.6, 0.4]);
+        assert!(validate_fusion_weights(&weights).is_ok());
     }
 }

@@ -1,0 +1,633 @@
+;; SABLE Improvement Plan - Defeasible Logic Specification
+;; Goal: Performant, correct implementation of SABLE
+;; Protocol: USDD Agent Protocol v1.0.0
+
+;; ============================================================================
+;; AGENTS
+;; ============================================================================
+
+(given agent-security-available)
+(given agent-crypto-available)
+(given agent-biometric-available)
+(given agent-mobile-available)
+(given agent-qa-available)
+
+;; ============================================================================
+;; PHASE 1: CRITICAL SECURITY HARDENING (REQ-001 to REQ-006)
+;; ============================================================================
+
+;; --- Task: Remove hardcoded confidence values ---
+(given task-req-001)
+(given security-sensitive-req-001)
+(given no-deps-req-001)
+(meta task-req-001
+  (id "REQ-001")
+  (title "Remove hardcoded confidence values")
+  (description "The system SHALL calculate biometric confidence dynamically based on actual quality metrics WITHIN the feature extraction pipeline FOR all capture sessions WITH confidence derived from SNR, contrast, and completeness measurements")
+  (file "core/src/biometric/feature_extraction.rs:35,60")
+  (severity "critical")
+  (type "security")
+  (trace "TEST-001, OBS-001"))
+
+;; --- Task: Input validation bounds checking ---
+(given task-req-002)
+(given security-sensitive-req-002)
+(given no-deps-req-002)
+(meta task-req-002
+  (id "REQ-002")
+  (title "Implement input validation with bounds checking")
+  (description "The system SHALL validate image dimensions (min 64x64, max 4096x4096) and feature vector sizes (exactly 512 elements) BEFORE processing FOR all biometric inputs WITH rejection of malformed inputs and secure error messages")
+  (file "core/src/biometric/")
+  (severity "critical")
+  (type "security")
+  (trace "TEST-002, OBS-002"))
+
+;; --- Task: Replace deterministic CNN simulation ---
+(given task-req-003)
+(given security-sensitive-req-003)
+(given no-deps-req-003)
+(meta task-req-003
+  (id "REQ-003")
+  (title "Replace PRNG-based CNN simulation with real feature extraction")
+  (description "The system SHALL extract CNN features using actual convolutional neural network inference OR validated algorithmic feature extraction INSTEAD OF PRNG-based simulation FOR production deployments WITH reproducible results from identical inputs")
+  (file "core/src/biometric/feature_extraction.rs:540")
+  (severity "critical")
+  (type "security")
+  (trace "TEST-003, OBS-003"))
+
+;; --- Task: Constant-time distance calculations ---
+(given task-req-004)
+(given security-sensitive-req-004)
+(given no-deps-req-004)
+(meta task-req-004
+  (id "REQ-004")
+  (title "Implement constant-time distance calculations")
+  (description "The system SHALL perform Euclidean distance calculations in constant time USING the subtle crate FOR all biometric matching operations WITH timing variance < 1 microsecond regardless of input values")
+  (file "core/src/biometric/")
+  (severity "critical")
+  (type "security")
+  (trace "TEST-004, OBS-004"))
+
+;; --- Task: Sanitize error messages ---
+(given task-req-005)
+(given security-sensitive-req-005)
+(given no-deps-req-005)
+(meta task-req-005
+  (id "REQ-005")
+  (title "Sanitize error messages to prevent information leakage")
+  (description "The system SHALL return generic error codes without revealing implementation details FOR all external-facing error conditions WITH internal detailed logging available only to authorized administrators")
+  (file "core/src/biometric/, core/src/mobile/ffi.rs")
+  (severity "critical")
+  (type "security")
+  (trace "TEST-005, OBS-005"))
+
+;; --- Task: Complete placeholder implementations ---
+(given task-req-006)
+(given security-sensitive-req-006)
+(given no-deps-req-006)
+(meta task-req-006
+  (id "REQ-006")
+  (title "Complete placeholder biometric implementations")
+  (description "The system SHALL implement production-quality ridge enhancement, minutiae extraction, and texture feature algorithms BASED ON peer-reviewed research papers FOR palm print processing WITH FAR < 0.001 and FRR < 0.05")
+  (file "core/src/biometric/")
+  (severity "critical")
+  (type "security")
+  (trace "TEST-006, OBS-006"))
+
+;; ============================================================================
+;; PHASE 2: CORRECTNESS FIXES (REQ-007 to REQ-010)
+;; ============================================================================
+
+;; --- Task: Statistical feature normalization ---
+(given task-req-007)
+(given correctness-req-007)
+(meta task-req-007
+  (id "REQ-007")
+  (title "Implement proper statistical feature normalization")
+  (description "The system SHALL normalize feature vectors using z-score normalization (mean=0, std=1) INSTEAD OF min-max scaling FOR all biometric features WITH unit tests validating statistical properties")
+  (file "core/src/biometric/feature_extraction.rs")
+  (severity "high")
+  (type "correctness")
+  (trace "TEST-007"))
+
+;; --- Task: Fusion weight validation ---
+(given task-req-008)
+(given correctness-req-008)
+(meta task-req-008
+  (id "REQ-008")
+  (title "Validate fusion weights sum to 1.0")
+  (description "The system SHALL verify that multi-modal fusion weights (vein: 0.6, print: 0.4) sum to 1.0 AT configuration time FOR all fusion operations WITH runtime validation and clear error if constraint violated")
+  (file "core/src/biometric/fusion.rs")
+  (severity "high")
+  (type "correctness")
+  (trace "TEST-008"))
+
+;; --- Task: Threshold consistency ---
+(given task-req-009)
+(given correctness-req-009)
+(meta task-req-009
+  (id "REQ-009")
+  (title "Resolve threshold inconsistency between global and modality thresholds")
+  (description "The system SHALL use a consistent threshold strategy WITH global threshold = max(modality_thresholds) OR document the relationship clearly FOR biometric matching WITH ADR documenting the design decision")
+  (file "core/src/biometric/")
+  (severity "high")
+  (type "correctness")
+  (trace "TEST-009, ADR-001"))
+
+;; --- Task: Research-validated quality thresholds ---
+(given task-req-010)
+(given correctness-req-010)
+(meta task-req-010
+  (id "REQ-010")
+  (title "Validate quality acceptance thresholds against research")
+  (description "The system SHALL validate quality thresholds (score >= 0.7, completeness >= 0.8, FAR < 0.001) AGAINST peer-reviewed biometric research FOR acceptance criteria WITH citations and benchmark results")
+  (file "core/src/biometric/preprocessing.rs")
+  (severity "high")
+  (type "correctness")
+  (trace "TEST-010, ADR-002"))
+
+;; ============================================================================
+;; PHASE 3: ZK-SNARK COMPLETION (REQ-011 to REQ-013)
+;; ============================================================================
+
+;; --- Task: Full constraint system ---
+(given task-req-011)
+(given crypto-sensitive-req-011)
+(meta task-req-011
+  (id "REQ-011")
+  (title "Complete full 14,000 constraint R1CS implementation")
+  (description "The system SHALL implement the complete Groth16 circuit WITH 14,000+ arithmetic constraints FOR production biometric verification WITH proof generation < 850ms on Snapdragon 8 Gen 2")
+  (file "core/src/crypto/groth16.rs")
+  (severity "high")
+  (type "feature")
+  (trace "TEST-011, NFR-001"))
+
+;; --- Task: Trusted setup ceremony ---
+(given task-req-012)
+(given crypto-sensitive-req-012)
+(meta task-req-012
+  (id "REQ-012")
+  (title "Implement secure trusted setup ceremony")
+  (description "The system SHALL provide a secure multi-party computation ceremony FOR trusted setup parameter generation WITH verifiable randomness and toxic waste disposal documentation")
+  (file "core/src/crypto/groth16.rs")
+  (severity "high")
+  (type "security")
+  (trace "TEST-012, ADR-003"))
+
+;; --- Task: Circuit witness generation optimization ---
+(given task-req-013)
+(given crypto-sensitive-req-013)
+(meta task-req-013
+  (id "REQ-013")
+  (title "Optimize circuit witness generation for mobile")
+  (description "The system SHALL generate witnesses using memory-efficient HeaplessVec WITH peak memory < 128MB FOR mobile devices WITH NEON/SIMD acceleration where available")
+  (file "core/src/crypto/groth16.rs")
+  (severity "medium")
+  (type "performance")
+  (trace "TEST-013, NFR-002"))
+
+;; ============================================================================
+;; PHASE 4: P2P PROTOCOL (REQ-014 to REQ-017) - Milestone 5
+;; ============================================================================
+
+;; --- Task: NFC transport ---
+(given task-req-014)
+(meta task-req-014
+  (id "REQ-014")
+  (title "Implement NFC peer-to-peer transport")
+  (description "The system SHALL support NFC peer-to-peer communication FOR offline biometric verification WITH message size < 424 bytes per NDEF record and automatic fragmentation")
+  (file "core/src/p2p/nfc.rs")
+  (severity "medium")
+  (type "feature")
+  (trace "TEST-014, CON-001"))
+
+;; --- Task: BLE transport ---
+(given task-req-015)
+(meta task-req-015
+  (id "REQ-015")
+  (title "Implement Bluetooth Low Energy transport")
+  (description "The system SHALL support BLE GATT-based communication FOR proximity-based verification WITH MTU negotiation and characteristic-based message exchange")
+  (file "core/src/p2p/ble.rs")
+  (severity "medium")
+  (type "feature")
+  (trace "TEST-015, CON-002"))
+
+;; --- Task: Session management ---
+(given task-req-016)
+(meta task-req-016
+  (id "REQ-016")
+  (title "Implement cryptographic session management")
+  (description "The system SHALL establish ECDH session keys FOR all P2P communications WITH 30-second timeout and nonce-based replay prevention")
+  (file "core/src/p2p/session.rs")
+  (severity "high")
+  (type "security")
+  (trace "TEST-016, CON-003"))
+
+;; --- Task: Message fragmentation ---
+(given task-req-017)
+(meta task-req-017
+  (id "REQ-017")
+  (title "Implement message fragmentation and reassembly")
+  (description "The system SHALL fragment proofs (192 bytes) across transport MTUs WITH reliable reassembly and integrity verification FOR all P2P transports")
+  (file "core/src/p2p/fragmentation.rs")
+  (severity "medium")
+  (type "feature")
+  (trace "TEST-017, CON-004"))
+
+;; ============================================================================
+;; PHASE 5: GOVERNMENT ATTESTATION (REQ-018 to REQ-020) - Milestone 6
+;; ============================================================================
+
+;; --- Task: X.509 certificate integration ---
+(given task-req-018)
+(meta task-req-018
+  (id "REQ-018")
+  (title "Implement X.509 certificate integration")
+  (description "The system SHALL support X.509v3 certificates FOR government attestation WITH custom OID extensions for SABLE commitment binding")
+  (file "core/src/attestation/x509.rs")
+  (severity "medium")
+  (type "feature")
+  (trace "TEST-018, CON-005"))
+
+;; --- Task: Certificate chain validation ---
+(given task-req-019)
+(meta task-req-019
+  (id "REQ-019")
+  (title "Implement certificate chain validation")
+  (description "The system SHALL validate certificate chains up to trusted root CAs FOR government-issued attestations WITH OCSP/CRL revocation checking")
+  (file "core/src/attestation/chain.rs")
+  (severity "high")
+  (type "security")
+  (trace "TEST-019"))
+
+;; --- Task: Trust store management ---
+(given task-req-020)
+(meta task-req-020
+  (id "REQ-020")
+  (title "Implement trust store management")
+  (description "The system SHALL manage trusted root certificates WITH secure updates and pin validation FOR government PKI integration")
+  (file "core/src/attestation/truststore.rs")
+  (severity "medium")
+  (type "security")
+  (trace "TEST-020"))
+
+;; ============================================================================
+;; PHASE 6: PRODUCTION READINESS (REQ-021 to REQ-025) - Milestone 7
+;; ============================================================================
+
+;; --- Task: Security audit ---
+(given task-req-021)
+(meta task-req-021
+  (id "REQ-021")
+  (title "Conduct formal security audit")
+  (description "The system SHALL undergo third-party security audit FOR all cryptographic and biometric components WITH remediation of all critical findings")
+  (severity "critical")
+  (type "security")
+  (trace "ADR-004"))
+
+;; --- Task: Performance optimization ---
+(given task-req-022)
+(meta task-req-022
+  (id "REQ-022")
+  (title "Implement SIMD/NEON optimizations")
+  (description "The system SHALL use ARM NEON intrinsics FOR Poseidon hash and feature extraction WITH 2x performance improvement target")
+  (file "core/src/crypto/poseidon.rs, core/src/biometric/")
+  (severity "medium")
+  (type "performance")
+  (trace "TEST-022, NFR-003"))
+
+;; --- Task: Energy profiling ---
+(given task-req-023)
+(meta task-req-023
+  (id "REQ-023")
+  (title "Implement energy consumption profiling")
+  (description "The system SHALL consume < 0.03% battery per verification ON reference devices FOR mobile deployment WITH power profiling benchmarks")
+  (severity "low")
+  (type "performance")
+  (trace "TEST-023, NFR-004"))
+
+;; --- Task: Fuzzing and property testing ---
+(given task-req-024)
+(meta task-req-024
+  (id "REQ-024")
+  (title "Implement comprehensive fuzzing suite")
+  (description "The system SHALL undergo fuzzing with cargo-fuzz FOR all public APIs WITH 100% edge case coverage for input validation")
+  (severity "high")
+  (type "quality")
+  (trace "TEST-024"))
+
+;; --- Task: Documentation and examples ---
+(given task-req-025)
+(meta task-req-025
+  (id "REQ-025")
+  (title "Complete API documentation and integration examples")
+  (description "The system SHALL provide complete rustdoc documentation WITH working integration examples for Android and iOS")
+  (severity "low")
+  (type "documentation")
+  (trace "TEST-025"))
+
+;; ============================================================================
+;; NON-FUNCTIONAL REQUIREMENTS
+;; ============================================================================
+
+(given nfr-001)
+(meta nfr-001
+  (id "NFR-001")
+  (title "Proof generation performance")
+  (description "Proof generation SHALL be <= 850ms UNDER standard mobile conditions WITH 95th percentile on Snapdragon 8 Gen 2"))
+
+(given nfr-002)
+(meta nfr-002
+  (id "NFR-002")
+  (title "Memory consumption")
+  (description "Peak memory usage SHALL be <= 128MB UNDER proof generation WITH graceful degradation on constrained devices"))
+
+(given nfr-003)
+(meta nfr-003
+  (id "NFR-003")
+  (title "Feature extraction performance")
+  (description "Palm feature extraction SHALL be <= 450ms UNDER standard image quality WITH 95th percentile"))
+
+(given nfr-004)
+(meta nfr-004
+  (id "NFR-004")
+  (title "Battery consumption")
+  (description "Battery drain SHALL be <= 0.03% per verification UNDER typical usage WITH measurement on reference devices"))
+
+;; ============================================================================
+;; DEPENDENCIES
+;; ============================================================================
+
+;; Phase 1 has no dependencies (critical security - do first)
+;; Phase 2 depends on Phase 1 security fixes
+
+(given depends-req-007-on-req-001)  ; Normalization after confidence fix
+(given depends-req-008-on-req-006)  ; Fusion after placeholder completion
+(given depends-req-009-on-req-006)  ; Thresholds after implementation complete
+(given depends-req-010-on-req-006)  ; Quality after implementation complete
+
+;; Phase 3 depends on Phase 1 completion
+(given depends-req-011-on-phase1)
+(given depends-req-012-on-req-011)  ; Setup ceremony after full circuit
+(given depends-req-013-on-req-011)  ; Optimization after full circuit
+
+;; Phase 4 depends on Phase 3 completion
+(given depends-req-014-on-req-011)
+(given depends-req-015-on-req-011)
+(given depends-req-016-on-req-011)
+(given depends-req-017-on-req-016)  ; Fragmentation after session
+
+;; Phase 5 depends on Phase 4 completion
+(given depends-req-018-on-req-016)
+(given depends-req-019-on-req-018)
+(given depends-req-020-on-req-018)
+
+;; Phase 6 depends on all previous phases
+(given depends-req-021-on-phase5)
+(given depends-req-022-on-req-011)
+(given depends-req-023-on-req-022)
+(given depends-req-024-on-phase1)
+(given depends-req-025-on-phase5)
+
+;; ============================================================================
+;; READINESS RULES
+;; ============================================================================
+
+;; Phase 1: Security tasks ready immediately
+(normally r-ready-req-001
+  (and task-req-001 no-deps-req-001)
+  ready-req-001)
+
+(normally r-ready-req-002
+  (and task-req-002 no-deps-req-002)
+  ready-req-002)
+
+(normally r-ready-req-003
+  (and task-req-003 no-deps-req-003)
+  ready-req-003)
+
+(normally r-ready-req-004
+  (and task-req-004 no-deps-req-004)
+  ready-req-004)
+
+(normally r-ready-req-005
+  (and task-req-005 no-deps-req-005)
+  ready-req-005)
+
+(normally r-ready-req-006
+  (and task-req-006 no-deps-req-006)
+  ready-req-006)
+
+;; Phase 2: Correctness tasks depend on security completion
+(normally r-ready-req-007
+  (and task-req-007 completed-req-001)
+  ready-req-007)
+
+(normally r-ready-req-008
+  (and task-req-008 completed-req-006)
+  ready-req-008)
+
+(normally r-ready-req-009
+  (and task-req-009 completed-req-006)
+  ready-req-009)
+
+(normally r-ready-req-010
+  (and task-req-010 completed-req-006)
+  ready-req-010)
+
+;; Phase 3: ZK-SNARK completion after Phase 1
+(normally r-ready-req-011
+  (and task-req-011 completed-phase1)
+  ready-req-011)
+
+(normally r-ready-req-012
+  (and task-req-012 completed-req-011)
+  ready-req-012)
+
+(normally r-ready-req-013
+  (and task-req-013 completed-req-011)
+  ready-req-013)
+
+;; Phase 4: P2P after Phase 3
+(normally r-ready-req-014
+  (and task-req-014 completed-req-011)
+  ready-req-014)
+
+(normally r-ready-req-015
+  (and task-req-015 completed-req-011)
+  ready-req-015)
+
+(normally r-ready-req-016
+  (and task-req-016 completed-req-011)
+  ready-req-016)
+
+(normally r-ready-req-017
+  (and task-req-017 completed-req-016)
+  ready-req-017)
+
+;; Phase 5: Attestation after P2P
+(normally r-ready-req-018
+  (and task-req-018 completed-req-016)
+  ready-req-018)
+
+(normally r-ready-req-019
+  (and task-req-019 completed-req-018)
+  ready-req-019)
+
+(normally r-ready-req-020
+  (and task-req-020 completed-req-018)
+  ready-req-020)
+
+;; Phase 6: Production readiness
+(normally r-ready-req-021
+  (and task-req-021 completed-phase5)
+  ready-req-021)
+
+(normally r-ready-req-022
+  (and task-req-022 completed-req-011)
+  ready-req-022)
+
+(normally r-ready-req-023
+  (and task-req-023 completed-req-022)
+  ready-req-023)
+
+(normally r-ready-req-024
+  (and task-req-024 completed-phase1)
+  ready-req-024)
+
+(normally r-ready-req-025
+  (and task-req-025 completed-phase5)
+  ready-req-025)
+
+;; ============================================================================
+;; PHASE COMPLETION RULES
+;; ============================================================================
+
+(normally r-phase1-complete
+  (and completed-req-001 completed-req-002 completed-req-003
+       completed-req-004 completed-req-005 completed-req-006)
+  completed-phase1)
+
+(normally r-phase2-complete
+  (and completed-req-007 completed-req-008 completed-req-009 completed-req-010)
+  completed-phase2)
+
+(normally r-phase3-complete
+  (and completed-req-011 completed-req-012 completed-req-013)
+  completed-phase3)
+
+(normally r-phase4-complete
+  (and completed-req-014 completed-req-015 completed-req-016 completed-req-017)
+  completed-phase4)
+
+(normally r-phase5-complete
+  (and completed-req-018 completed-req-019 completed-req-020)
+  completed-phase5)
+
+(normally r-phase6-complete
+  (and completed-req-021 completed-req-022 completed-req-023
+       completed-req-024 completed-req-025)
+  completed-phase6)
+
+(normally r-production-ready
+  (and completed-phase1 completed-phase2 completed-phase3
+       completed-phase4 completed-phase5 completed-phase6)
+  production-ready)
+
+;; ============================================================================
+;; ASSIGNMENT RULES
+;; ============================================================================
+
+;; Security-sensitive tasks require security agent
+(normally r-assign-security
+  (and ready-req-001 security-sensitive-req-001 agent-security-available)
+  assign-to-req-001-security)
+
+(normally r-assign-security-002
+  (and ready-req-002 security-sensitive-req-002 agent-security-available)
+  assign-to-req-002-security)
+
+(normally r-assign-security-003
+  (and ready-req-003 security-sensitive-req-003 agent-security-available)
+  assign-to-req-003-security)
+
+(normally r-assign-security-004
+  (and ready-req-004 security-sensitive-req-004 agent-security-available)
+  assign-to-req-004-security)
+
+(normally r-assign-security-005
+  (and ready-req-005 security-sensitive-req-005 agent-security-available)
+  assign-to-req-005-security)
+
+(normally r-assign-security-006
+  (and ready-req-006 security-sensitive-req-006 agent-security-available)
+  assign-to-req-006-security)
+
+;; Crypto-sensitive tasks require crypto agent
+(normally r-assign-crypto-011
+  (and ready-req-011 crypto-sensitive-req-011 agent-crypto-available)
+  assign-to-req-011-crypto)
+
+(normally r-assign-crypto-012
+  (and ready-req-012 crypto-sensitive-req-012 agent-crypto-available)
+  assign-to-req-012-crypto)
+
+(normally r-assign-crypto-013
+  (and ready-req-013 crypto-sensitive-req-013 agent-crypto-available)
+  assign-to-req-013-crypto)
+
+;; Biometric tasks can use biometric agent
+(normally r-assign-biometric-007
+  (and ready-req-007 agent-biometric-available)
+  assign-to-req-007-biometric)
+
+(normally r-assign-biometric-008
+  (and ready-req-008 agent-biometric-available)
+  assign-to-req-008-biometric)
+
+;; QA for testing tasks
+(normally r-assign-qa-024
+  (and ready-req-024 agent-qa-available)
+  assign-to-req-024-qa)
+
+;; ============================================================================
+;; DEFEATERS - Exceptional conditions that block progress
+;; ============================================================================
+
+;; Security audit findings block production readiness
+(except d-audit-findings
+  (and completed-req-021 found-critical-vulnerabilities)
+  production-ready)
+
+;; Missing research validation blocks quality threshold acceptance
+(except d-missing-research
+  (and ready-req-010 missing-peer-reviewed-citations)
+  completed-req-010)
+
+;; Failed performance benchmarks block NFR completion
+(except d-perf-failure
+  (and ready-req-022 benchmark-regression-detected)
+  completed-req-022)
+
+;; Trusted setup compromise blocks proof system
+(except d-setup-compromise
+  (and completed-req-012 toxic-waste-not-destroyed)
+  completed-phase3)
+
+;; ============================================================================
+;; SUPERIORITY RELATIONS
+;; ============================================================================
+
+;; Security agent takes priority for security-sensitive tasks
+(prefer r-assign-security r-assign-biometric-007)
+(prefer r-assign-crypto-011 r-assign-biometric-007)
+
+;; Defeaters take priority over completion rules
+(prefer d-audit-findings r-production-ready)
+(prefer d-missing-research r-ready-req-010)
+(prefer d-perf-failure r-ready-req-022)
+(prefer d-setup-compromise r-phase3-complete)
+
+(claims agent:system
+  :at "2026-20-20T13:34:10Z"
+  (given claimed-req-001))

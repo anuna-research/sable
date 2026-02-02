@@ -12,6 +12,9 @@ default = ["std"]
 std = []
 zk = ["ark-relations", "ark-groth16", "ark-snark"]
 mobile = ["bincode", "serde_json", "zk"]
+# REQ-022: SIMD/NEON optimizations for 2x performance improvement
+simd = []
+neon = ["simd"]
 
 [dependencies]
 # Core BLS12-381 operations
@@ -32,8 +35,12 @@ ark-bls12-381 = { workspace = true }
 # Cryptographic utilities
 getrandom = { workspace = true }
 rand_core = { workspace = true }
+rand_chacha = { workspace = true }
+sha2 = { workspace = true }
 zeroize = { workspace = true }
 subtle = { workspace = true }
+x25519-dalek = { workspace = true }
+chacha20poly1305 = { workspace = true }
 
 # Serialization and error handling
 serde = { workspace = true }
@@ -57,6 +64,11 @@ harness = false
 name = "zk_performance"
 harness = false
 required-features = ["zk"]
+
+[[bench]]
+name = "energy"
+harness = false
+required-features = ["mobile"]
 
 # Mobile library targets
 [lib]

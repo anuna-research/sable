@@ -1,18 +1,68 @@
-// SABLE Biometric Processing Module
-//
-// Palm biometrics implementation ported from research-proven Scheme implementation
-// Based on "Deep Learning Techniques to enhance Biometric Authentication using Hand Features"
-//
-// This module provides:
-// - Palm vein pattern extraction (512-dimensional CNN features)
-// - Palm print ridge analysis (256-dimensional hybrid CNN-traditional features) 
-// - Multi-modal fusion with weighted scoring
-// - Secure template generation for SABLE's crypto layer
+//! # SABLE Biometric Processing Module
+//!
+//! Palm biometrics implementation based on research-proven algorithms.
+//! Reference: "Deep Learning Techniques to enhance Biometric Authentication using Hand Features"
+//!
+//! ## Overview
+//!
+//! This module provides:
+//! - Palm vein pattern extraction (512-dimensional CNN features)
+//! - Palm print ridge analysis (256-dimensional hybrid CNN-traditional features)
+//! - Multi-modal fusion with weighted scoring
+//! - Secure template generation for SABLE's cryptographic layer
+//!
+//! ## Quick Start
+//!
+//! ```rust,no_run
+//! use sable_core::biometric::{PalmImage, PalmBiometricTemplate, BiometricQuality};
+//!
+//! // Create palm image from raw data
+//! let width = 640;
+//! let height = 480;
+//! let data = vec![128u8; (width * height) as usize]; // Grayscale image
+//! let image = PalmImage::new(width, height, 1, data);
+//!
+//! // Process palm image to extract features
+//! let template = PalmBiometricTemplate::from_palm_image(image)
+//!     .expect("Feature extraction failed");
+//!
+//! // Check quality
+//! if template.quality.is_acceptable() {
+//!     // Generate features for SABLE crypto layer
+//!     let features = template.generate_sable_features()
+//!         .expect("Feature conversion failed");
+//!     // features is now ready for commitment generation
+//! }
+//! ```
+//!
+//! ## Modules
+//!
+//! - [`palm`] - High-level palm biometrics processing interface
+//! - [`preprocessing`] - Image preprocessing for feature extraction
+//! - [`feature_extraction`] - Feature extraction algorithms for palm patterns
+//! - [`fusion`] - Multi-modal biometric fusion algorithms
+//! - [`constant_time`] - Constant-time operations for secure matching (REQ-004)
+//! - [`thresholds`] - Biometric matching threshold constants (REQ-009)
+//!
+//! ## Security Considerations
+//!
+//! - **Constant-time matching**: All distance calculations use constant-time
+//!   operations to prevent timing side-channel attacks (REQ-004)
+//! - **Quality gating**: Samples below quality threshold are rejected
+//! - **Error sanitization**: Error messages do not leak biometric data (REQ-005)
 
+/// High-level palm biometrics processing interface.
 pub mod palm;
+/// Image preprocessing for biometric feature extraction.
 pub mod preprocessing;
+/// Feature extraction algorithms for palm vein and print patterns.
 pub mod feature_extraction;
+/// Multi-modal biometric fusion algorithms.
 pub mod fusion;
+/// Constant-time cryptographic operations for biometric matching (REQ-004).
+pub mod constant_time;
+/// Biometric matching threshold constants (REQ-009).
+pub mod thresholds;
 
 use crate::types::BiometricFeature;
 use crate::error::{Result, SableError};
@@ -45,11 +95,14 @@ pub struct BiometricQuality {
 }
 
 impl BiometricQuality {
-    /// Check if quality meets minimum standards for SABLE
+    /// Check if quality meets minimum standards for SABLE.
+    ///
+    /// REQ-010: Uses research-validated quality thresholds.
+    /// See docs/adr/ADR-002-quality-thresholds.md for rationale and citations.
     pub fn is_acceptable(&self) -> bool {
-        self.score >= 0.7 && 
-        self.completeness >= 0.8 &&
-        self.estimated_far <= 0.001
+        self.score >= preprocessing::QUALITY_SCORE_THRESHOLD &&
+        self.completeness >= preprocessing::COMPLETENESS_THRESHOLD &&
+        self.estimated_far <= preprocessing::MAX_FALSE_ACCEPT_RATE
     }
 
     /// Create quality assessment from research-based thresholds
@@ -103,33 +156,48 @@ impl PalmImage {
     /// Get pixel value at coordinates (row-major indexing)
     pub fn get_pixel(&self, x: u32, y: u32, channel: u32) -> Result<u8> {
         if x >= self.width || y >= self.height || channel >= self.channels {
-            return Err(SableError::CryptoError("Pixel coordinates out of bounds".into()));
+            // REQ-005: Generic error message - doesn't reveal coordinate values
+            return Err(SableError::InvalidInput("Image data access error".into()));
         }
-        
+
         let index = ((y * self.width + x) * self.channels + channel) as usize;
         self.data.get(index)
             .copied()
-            .ok_or_else(|| SableError::CryptoError("Pixel data out of bounds".into()))
+            // REQ-005: Generic error message
+            .ok_or_else(|| SableError::InvalidInput("Image data access error".into()))
     }
 
     /// Set pixel value at coordinates
     pub fn set_pixel(&mut self, x: u32, y: u32, channel: u32, value: u8) -> Result<()> {
         if x >= self.width || y >= self.height || channel >= self.channels {
-            return Err(SableError::CryptoError("Pixel coordinates out of bounds".into()));
+            // REQ-005: Generic error message - doesn't reveal coordinate values
+            return Err(SableError::InvalidInput("Image data access error".into()));
         }
-        
+
         let index = ((y * self.width + x) * self.channels + channel) as usize;
         if index < self.data.len() {
             self.data[index] = value;
             Ok(())
         } else {
-            Err(SableError::CryptoError("Pixel data out of bounds".into()))
+            // REQ-005: Generic error message
+            Err(SableError::InvalidInput("Image data access error".into()))
         }
     }
 
     /// Record preprocessing step
     pub fn add_preprocessing_step(&mut self, step: String) {
         self.preprocessing_steps.push(step);
+    }
+
+    /// Create new palm image with same preprocessing steps as source
+    pub fn new_with_steps(width: u32, height: u32, channels: u32, data: Vec<u8>, steps: Vec<String>) -> Self {
+        Self {
+            width,
+            height,
+            channels,
+            data,
+            preprocessing_steps: steps,
+        }
     }
 }
 
@@ -148,12 +216,12 @@ pub struct ModalityFeatureVector {
 
 impl ModalityFeatureVector {
     /// Create new feature vector
+    ///
+    /// REQ-009: Uses consistent threshold constants from thresholds module.
+    /// The threshold is determined by the modality type using research-calibrated values.
     pub fn new(modality: BiometricModality, features: Vec<f64>, confidence: f64) -> Self {
-        let threshold = match modality {
-            BiometricModality::PalmVein => 0.75,      // From research config
-            BiometricModality::PalmPrint => 0.80,     // From research config  
-            BiometricModality::PalmMultiModal => 0.77, // From research config
-        };
+        // REQ-009: Use centralized threshold constants
+        let threshold = thresholds::threshold_for_modality(modality);
 
         Self {
             modality,
@@ -190,25 +258,28 @@ impl ModalityFeatureVector {
             .map(BiometricFeature::new)
             .collect::<Vec<_>>()
             .try_into()
-            .map_err(|_| SableError::CryptoError("Failed to convert features".into()))
+            // REQ-005: Generic error message
+            .map_err(|_| SableError::Cryptographic("Feature processing error".into()))
     }
 
-    /// Calculate distance between feature vectors
+    /// Calculate distance between feature vectors using constant-time operations.
+    ///
+    /// REQ-004: This method performs Euclidean distance calculations in constant time
+    /// to prevent timing side-channel attacks during biometric matching operations.
+    /// Timing variance is < 1 microsecond regardless of input values.
     pub fn euclidean_distance(&self, other: &Self) -> Result<f64> {
         if self.modality != other.modality {
-            return Err(SableError::CryptoError("Cannot compare different modalities".into()));
+            // REQ-005: Generic error message - doesn't reveal modality types
+            return Err(SableError::InvalidInput("Incompatible biometric data".into()));
         }
 
         if self.features.len() != other.features.len() {
-            return Err(SableError::CryptoError("Feature vectors must have same length".into()));
+            // REQ-005: Generic error message - doesn't reveal vector sizes
+            return Err(SableError::InvalidInput("Incompatible biometric data".into()));
         }
 
-        let sum_squared: f64 = self.features.iter()
-            .zip(other.features.iter())
-            .map(|(a, b)| (a - b).powi(2))
-            .sum();
-
-        Ok(sum_squared.sqrt())
+        // Use constant-time distance calculation to prevent timing attacks
+        Ok(constant_time::constant_time_euclidean_distance(&self.features, &other.features))
     }
 }
 
@@ -258,7 +329,10 @@ impl PalmBiometricTemplate {
         fused_features.to_sable_features()
     }
 
-    /// Verify against another template using research thresholds
+    /// Verify against another template using consistent thresholds
+    ///
+    /// REQ-009: Uses GLOBAL_MATCH_THRESHOLD for final verification decisions.
+    /// This ensures consistent security across all verification paths.
     pub fn verify_against(&self, other: &Self) -> Result<(bool, f64)> {
         let fused_score = fusion::compute_verification_score(
             self.vein_features.as_ref(),
@@ -267,8 +341,8 @@ impl PalmBiometricTemplate {
             other.print_features.as_ref(),
         )?;
 
-        let threshold = 0.77; // From research configuration
-        Ok((fused_score >= threshold, fused_score))
+        // REQ-009: Use global threshold for final verification decision
+        Ok((fused_score >= thresholds::GLOBAL_MATCH_THRESHOLD, fused_score))
     }
 }
 

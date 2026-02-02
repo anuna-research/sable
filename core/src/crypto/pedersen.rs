@@ -101,6 +101,9 @@ impl Commitment {
     }
 }
 
+/// Type alias for backward compatibility with code using `PedersenCommitment`
+pub type PedersenCommitment = Commitment;
+
 /// Commitment opening information (message and randomness)
 /// This struct automatically zeros its contents on drop for security
 #[derive(Clone)]
