@@ -146,7 +146,7 @@ sequenceDiagram
     %% Peer-to-peer verification
     P->>V: 17. Send commitment + proof + certificate (optional)
     V->>SC: 18. Verify zk-SNARK proof locally
-    SC->>SC: 19. Validate proof against commitment
+    SC->>SC: 19. Validate proof against commitment (proves knowledge of biometric data)
     SC->>SC: 20. Check challenge nonce binding
     SC->>V: 21. Return verification result (12ms)
     
@@ -177,7 +177,7 @@ While SABLE's core design focuses on peer-to-peer verification, the same cryptog
 - **📋 Commitment as "Biometric Public Key"**: The Pedersen commitment `C = g^f * h^s` acts like a public identifier
 - **🌍 Global Distribution**: Commitments can be stored in databases, blockchains, or directory services
 - **📡 Remote Proof Generation**: Person generates zero knowledge proof on their device (same 192 bytes)
-- **🔍 Remote Verification**: Online services verify proof against stored commitment over internet
+- **🔍 Remote Verification**: Online services verify the zero-knowledge proof against the stored commitment, confirming the person knows the biometric data that created the commitment without revealing that data
 
 ### **Remote Use Cases**
 - **💻 Online Services**: Website login with biometric proof instead of passwords
@@ -199,8 +199,9 @@ SABLE's security is built on well-established cryptographic foundations and real
 - **Hash Function Security**: Poseidon hash provides collision resistance in finite fields
 
 **🔐 Zero Knowledge Proof Security:**
-- **Groth16 zk-SNARK Soundness**: Computationally sound under discrete log assumption
-- **Circuit Constraint Integrity**: 14,000 arithmetic constraints correctly encode biometric verification
+- **Groth16 zk-SNARK Soundness**: Computationally sound under discrete log assumption; prevents fake proofs
+- **Circuit Constraint Integrity**: 14,000+ arithmetic constraints encode: distance ≤ 0.25, quality ≥ 0.7, time ≤ 30s
+- **Commitment Binding**: Proofs cryptographically bind to enrolled biometric templates without revealing them
 - **Trusted Setup**: Proving/verifying keys generated through secure ceremony (powers-of-tau)
 
 **📱 Mobile Hardware Security:**
@@ -239,19 +240,37 @@ SABLE's security is built on well-established cryptographic foundations and real
 
 **✅ What SABLE Protects Against:**
 - **Biometric Database Breaches**: No centralized biometric storage
-- **Government Surveillance**: Officials cannot access citizen biometric data
-- **Replay Attacks**: Temporal and challenge-response constraints prevent reuse
-- **Man-in-the-Middle**: Session keys and nonce binding protect against interception
-- **Biometric Reconstruction**: One-way commitments prevent reverse engineering
+- **Government Surveillance**: Officials cannot access citizen biometric data during attestation
+- **Replay Attacks**: 30-second temporal constraints and 256-bit challenge nonces prevent reuse
+- **Man-in-the-Middle**: ECDH session keys and nonce binding protect against interception
+- **Biometric Template Extraction**: Pedersen commitments cryptographically hide enrolled biometric data
+- **Synthetic Feature Generation**: Attackers cannot derive target biometrics from public commitments
 - **Network Analysis**: Offline P2P operation eliminates network metadata
+- **Commitment Forgery**: BLS12-381 discrete logarithm assumption prevents fake commitments
 
 **⚠️ Assumptions & Limitations:**
-- **Device Compromise**: Assumes secure enclave/keystore integrity on user devices
-- **Liveness Detection**: Relies on micro-motion analysis for anti-spoofing (8-12 Hz tremor detection)
-- **Certificate Authority Trust**: Government PKI attestation requires trust in issuing authorities
-- **Physical Security**: Assumes users maintain physical control of their mobile devices
-- **Implementation Security**: Side-channel attacks, timing analysis require careful implementation
-- **Quantum Resistance**: BLS12-381 vulnerable to quantum attacks (post-quantum migration needed)
+
+**Biometric Attack Vectors:**
+- **False Acceptance Risk**: 0.25 Euclidean distance threshold yields ~1-2% FAR; OR-rule fusion doubles FAR compared to AND-rule
+- **Presentation Attacks**: Physical spoofing with high-resolution infrared prints, silicone palms, and vascular dye
+- **Single Modality Exploitation**: Attackers can target easier-to-spoof modality and omit the other (vein OR print)
+- **Liveness Detection**: Current micro-motion analysis (8-12 Hz tremor) may not detect advanced spoofing techniques
+
+**System Security Dependencies:**
+- **Device Compromise**: Rooted/jailbroken devices could extract enrolled templates from secure storage or inject synthetic features
+- **Secure Hardware**: Relies on Secure Enclave/Android Keystore integrity for private key and template protection
+- **Physical Security**: Assumes users maintain physical control of their mobile devices and prevent unauthorized access
+- **Certificate Authority Trust**: Government PKI attestation requires trust in issuing certificate authorities
+
+**Implementation Risks:**
+- **Side-Channel Attacks**: Timing analysis, power consumption, and electromagnetic emissions require careful implementation
+- **Memory Safety**: Sensitive data (salts, features) must be properly zeroized to prevent memory dumps
+- **Software Supply Chain**: Trusted compilation, verified signatures, and secure update mechanisms
+
+**Cryptographic Limitations:**
+- **Quantum Vulnerability**: BLS12-381 and current primitives vulnerable to Shor's algorithm (post-quantum migration needed by 2030-2035)
+- **Trusted Setup**: Groth16 requires secure ceremony; compromised setup could enable proof forgery
+- **Implementation Bugs**: Circuit constraints must correctly encode biometric verification logic
 
 ### **Performance vs Security Trade-offs**
 
@@ -270,11 +289,41 @@ SABLE's security is built on well-established cryptographic foundations and real
 - **Advanced Liveness**: Multi-spectral imaging and deeper physiological detection
 
 **Threat Landscape Changes:**
-- **AI-Generated Biometrics**: Deep fake attacks on biometric capture systems
-- **Quantum Computing**: Timeline for cryptographically relevant quantum computers
+- **AI-Generated Biometrics**: Deep fake and synthetic biometric attacks on capture systems
+- **Quantum Computing**: Timeline for cryptographically relevant quantum computers (estimated 2030-2035)
 - **Hardware Supply Chain**: Integrity of mobile secure enclaves and key storage
+- **Advanced Presentation Attacks**: Multi-spectral spoofing, 3D printing, and physiological simulation
 
-This security model provides **128-bit equivalent security** while maintaining practical mobile deployment characteristics and preserving complete biometric privacy.
+## **Security Recommendations for Production**
+
+**High-Assurance Deployment:**
+- Tighten distance thresholds to 0.17-0.20 (reduces FAR to <0.1%)
+- Implement AND-rule fusion (both vein AND print must pass)
+- Add presentation attack detection (PAD) with CNN-based liveness
+- Require multi-spectral capture for advanced anti-spoofing
+- Disable single-modality fallback in sensitive applications
+
+**Operational Security:**
+- Regular threshold calibration on diverse datasets
+- Continuous monitoring of genuine/impostor score distributions
+- Hardware security module integration for key management
+- Formal verification of circuit constraints and cryptographic implementations
+
+**Security Analysis by Attack Vector:**
+
+- **Cryptographic Attacks** (forging proofs/commitments): **128-bit security** - computationally infeasible with current technology
+- **Biometric Spoofing** (presentation attacks): **~1-2% success rate** - physically challenging but achievable with sophisticated spoofing
+- **Device Compromise** (extracting enrolled templates): **Variable** - depends on device security, root/jailbreak status
+- **Template Injection** (bypassing sensors): **High success if device compromised** - requires privileged access
+
+**Practical Security Assessment:**
+For most real-world scenarios, biometric presentation attacks represent the primary threat vector due to the 1-2% false acceptance rate. However, this is a **targeted attack requiring physical proximity and sophisticated spoofing materials**, not a scalable remote attack. The system successfully prevents the more dangerous **mass surveillance** and **database breach** scenarios that traditional biometric systems face.
+
+**Deployment Suitability:**
+- **✅ Consumer applications** (device unlock, app authentication)  
+- **✅ Physical access control** (building entry, age verification)
+- **✅ Government services** (benefits access, document signing)
+- **⚠️ High-security applications** require additional controls (AND-rule fusion, enhanced PAD, stricter thresholds)
 
 ---
 
