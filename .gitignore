@@ -1,5 +1,5 @@
 # Rust build artifacts
-/target/
+**/target/
 **/*.rs.bk
 
 # Cargo
@@ -22,9 +22,10 @@ ehthumbs.db
 Thumbs.db
 
 # Benchmark outputs
-*.json
-*.html
 criterion/
+
+# Node.js
+node_modules/
 
 # Crypto test vectors
 test_vectors/

@@ -107,6 +107,7 @@ pub mod crypto;
 pub mod error;
 pub mod p2p;
 pub mod types;
+pub mod zk;
 
 #[cfg(feature = "mobile")]
 pub mod mobile;

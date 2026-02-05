@@ -1,0 +1,543 @@
+; SPEC-001: Halo2 Face Verification Implementation Plan
+; Generated from docs/specs/SPEC-001-halo2-face-verification.md
+
+; =============================================================================
+; AGENTS
+; =============================================================================
+
+(given agent-engineer-available)
+(given agent-security-available)
+
+; =============================================================================
+; PHASE 1: FOUNDATION (Experiment)
+; Goal: Validate Halo2 feasibility with minimal circuit
+; Timebox: 1 day
+; =============================================================================
+
+(given task-add-halo2-deps)
+(meta task-add-halo2-deps
+  (title "Add Halo2 Dependencies")
+  (description "Add halo2-base and halo2-ecc dependencies to Cargo.toml workspace")
+  (phase "phase-1-foundation")
+  (estimate "30min")
+  (spec-ref "SPEC-001"))
+
+(given task-hello-world-circuit)
+(meta task-hello-world-circuit
+  (title "Hello World Halo2 Circuit")
+  (description "Implement minimal hello world Halo2 circuit to validate setup works")
+  (phase "phase-1-foundation")
+  (estimate "2h")
+  (spec-ref "SPEC-001"))
+
+(given task-benchmark-halo2)
+(meta task-benchmark-halo2
+  (title "Benchmark Halo2 Performance")
+  (description "Benchmark basic proof generation and verification times on reference hardware")
+  (phase "phase-1-foundation")
+  (estimate "1h")
+  (spec-ref "NFR-001, NFR-002"))
+
+(given task-document-findings)
+(meta task-document-findings
+  (title "Document Phase 1 Findings")
+  (description "Document Phase 1 findings, performance characteristics, and go/no-go decision")
+  (phase "phase-1-foundation")
+  (estimate "30min")
+  (spec-ref "SPEC-001"))
+
+; Phase 1 dependencies
+(given no-deps-add-halo2-deps)
+
+; =============================================================================
+; PHASE 2: CORE CIRCUIT
+; Goal: Implement face verification circuit components
+; =============================================================================
+
+(given task-impl-quantizer)
+(meta task-impl-quantizer
+  (title "Implement Feature Quantizer")
+  (description "Implement FeatureQuantizer (CON-003): Convert f64 embeddings to u8 bytes with linear quantization")
+  (phase "phase-2-core")
+  (implements "REQ-005, CON-003")
+  (estimate "1h")
+  (spec-ref "SPEC-001 Section 6"))
+
+(given task-impl-poseidon-halo2)
+(meta task-impl-poseidon-halo2
+  (title "Implement Poseidon Hash in Halo2")
+  (description "Implement Poseidon hash circuit in Halo2 for commitment verification")
+  (phase "phase-2-core")
+  (implements "REQ-004")
+  (estimate "3h")
+  (spec-ref "SPEC-001 ADR-001"))
+
+(given task-impl-hamming-distance)
+(meta task-impl-hamming-distance
+  (title "Implement Hamming Distance Circuit")
+  (description "Implement Hamming distance calculation using XOR operations in Halo2 circuit")
+  (phase "phase-2-core")
+  (implements "REQ-003")
+  (estimate "2h")
+  (spec-ref "SPEC-001 ADR-002"))
+
+(given task-impl-threshold-check)
+(meta task-impl-threshold-check
+  (title "Implement Threshold Comparison")
+  (description "Implement threshold comparison constraint to verify similarity >= 50%")
+  (phase "phase-2-core")
+  (implements "REQ-003")
+  (estimate "1h")
+  (blocked-by "task-calibrate-hamming-threshold")
+  (spec-ref "SPEC-001 Section 5.2"))
+
+(given task-calibrate-hamming-threshold)
+(meta task-calibrate-hamming-threshold
+  (title "Calibrate Hamming Threshold")
+  (description "Empirically determine Hamming distance threshold that corresponds to 0.5 cosine similarity")
+  (phase "phase-2-core")
+  (estimate "2h")
+  (open-question true)
+  (spec-ref "SPEC-001 Section 10"))
+
+(given task-unit-tests-circuit)
+(meta task-unit-tests-circuit
+  (title "Unit Tests for Circuit Components")
+  (description "Write unit tests for quantizer, Poseidon, Hamming distance, and threshold components")
+  (phase "phase-2-core")
+  (estimate "2h")
+  (spec-ref "TEST-005, TEST-006"))
+
+; =============================================================================
+; PHASE 3: INTEGRATION
+; Goal: Wire circuit to demo server
+; =============================================================================
+
+(given task-impl-proof-generator)
+(meta task-impl-proof-generator
+  (title "Implement ProofGenerator Trait")
+  (description "Implement ProofGenerator trait (CON-001) wrapping Halo2 prover")
+  (phase "phase-3-integration")
+  (implements "REQ-001, REQ-002, CON-001")
+  (estimate "2h")
+  (spec-ref "SPEC-001 Section 6"))
+
+(given task-impl-proof-verifier)
+(meta task-impl-proof-verifier
+  (title "Implement ProofVerifier Trait")
+  (description "Implement ProofVerifier trait (CON-002) wrapping Halo2 verifier")
+  (phase "phase-3-integration")
+  (implements "CON-002")
+  (estimate "1h")
+  (spec-ref "SPEC-001 Section 6"))
+
+(given task-update-handlers)
+(meta task-update-handlers
+  (title "Update Demo Server Handlers")
+  (description "Update demo/server/src/handlers.rs to use new Halo2 prover instead of simulated proofs")
+  (phase "phase-3-integration")
+  (estimate "2h")
+  (spec-ref "SPEC-001 Section 5.3"))
+
+(given task-integration-tests)
+(meta task-integration-tests
+  (title "Integration Tests")
+  (description "End-to-end integration tests for enrollment and verification flow with real Halo2 proofs")
+  (phase "phase-3-integration")
+  (estimate "2h")
+  (spec-ref "TEST-001, TEST-003, TEST-004"))
+
+; =============================================================================
+; PHASE 4: VALIDATION
+; Goal: Verify requirements met
+; =============================================================================
+
+(given task-run-test-specs)
+(meta task-run-test-specs
+  (title "Run Test Specifications")
+  (description "Run all TEST specifications from SPEC-001 (TEST-001 through TEST-010)")
+  (phase "phase-4-validation")
+  (estimate "2h")
+  (spec-ref "SPEC-001 Section 8"))
+
+(given task-performance-benchmarks)
+(meta task-performance-benchmarks
+  (title "Performance Benchmarks")
+  (description "Verify NFR-001 (≤1000ms prove), NFR-002 (≤50ms verify), NFR-003 (≤10KB proof)")
+  (phase "phase-4-validation")
+  (estimate "1h")
+  (spec-ref "NFR-001, NFR-002, NFR-003"))
+
+(given task-security-review)
+(meta task-security-review
+  (title "Security Review")
+  (description "Security review of cryptographic implementation per AI trust boundaries")
+  (phase "phase-4-validation")
+  (security-sensitive true)
+  (requires-agent "security")
+  (estimate "2h")
+  (spec-ref "SPEC-001 ADR-001, NFR-005"))
+
+(given task-documentation)
+(meta task-documentation
+  (title "Update Documentation")
+  (description "Update documentation with Halo2 architecture, usage, and migration notes")
+  (phase "phase-4-validation")
+  (estimate "1h")
+  (spec-ref "SPEC-001"))
+
+; =============================================================================
+; READINESS RULES
+; =============================================================================
+
+; Phase 1 readiness
+(normally r-ready-add-deps
+  (and task-add-halo2-deps no-deps-add-halo2-deps)
+  ready-add-halo2-deps)
+
+(normally r-ready-hello-world
+  (and task-hello-world-circuit completed-add-halo2-deps)
+  ready-hello-world-circuit)
+
+(normally r-ready-benchmark
+  (and task-benchmark-halo2 completed-hello-world-circuit)
+  ready-benchmark-halo2)
+
+(normally r-ready-findings
+  (and task-document-findings completed-benchmark-halo2)
+  ready-document-findings)
+
+; Phase 1 completion
+(normally r-phase1-complete
+  (and completed-add-halo2-deps
+       completed-hello-world-circuit
+       completed-benchmark-halo2
+       completed-document-findings)
+  completed-phase1)
+
+; Phase 2 readiness (depends on Phase 1)
+(normally r-ready-quantizer
+  (and task-impl-quantizer completed-phase1)
+  ready-impl-quantizer)
+
+(normally r-ready-poseidon
+  (and task-impl-poseidon-halo2 completed-impl-quantizer)
+  ready-impl-poseidon-halo2)
+
+(normally r-ready-hamming
+  (and task-impl-hamming-distance completed-impl-poseidon-halo2)
+  ready-impl-hamming-distance)
+
+; Calibration can run after hamming is done
+(normally r-ready-calibration
+  (and task-calibrate-hamming-threshold completed-impl-hamming-distance)
+  ready-calibrate-hamming-threshold)
+
+; Threshold check requires calibration
+(normally r-ready-threshold
+  (and task-impl-threshold-check
+       completed-impl-hamming-distance
+       completed-calibrate-hamming-threshold)
+  ready-impl-threshold-check)
+
+; Defeater: threshold blocked until calibration done
+(except d-threshold-blocked
+  (and task-impl-threshold-check (not completed-calibrate-hamming-threshold))
+  ready-impl-threshold-check)
+
+(normally r-ready-unit-tests
+  (and task-unit-tests-circuit
+       completed-impl-quantizer
+       completed-impl-poseidon-halo2
+       completed-impl-hamming-distance
+       completed-impl-threshold-check)
+  ready-unit-tests-circuit)
+
+; Phase 2 completion
+(normally r-phase2-complete
+  (and completed-impl-quantizer
+       completed-impl-poseidon-halo2
+       completed-impl-hamming-distance
+       completed-impl-threshold-check
+       completed-calibrate-hamming-threshold
+       completed-unit-tests-circuit)
+  completed-phase2)
+
+; Phase 3 readiness (depends on Phase 2)
+(normally r-ready-proof-generator
+  (and task-impl-proof-generator completed-phase2)
+  ready-impl-proof-generator)
+
+(normally r-ready-proof-verifier
+  (and task-impl-proof-verifier completed-impl-proof-generator)
+  ready-impl-proof-verifier)
+
+(normally r-ready-handlers
+  (and task-update-handlers completed-impl-proof-verifier)
+  ready-update-handlers)
+
+(normally r-ready-integration
+  (and task-integration-tests completed-update-handlers)
+  ready-integration-tests)
+
+; Phase 3 completion
+(normally r-phase3-complete
+  (and completed-impl-proof-generator
+       completed-impl-proof-verifier
+       completed-update-handlers
+       completed-integration-tests)
+  completed-phase3)
+
+; Phase 4 readiness (depends on Phase 3)
+(normally r-ready-test-specs
+  (and task-run-test-specs completed-phase3)
+  ready-run-test-specs)
+
+(normally r-ready-perf-bench
+  (and task-performance-benchmarks completed-run-test-specs)
+  ready-performance-benchmarks)
+
+(normally r-ready-security
+  (and task-security-review completed-phase3)
+  ready-security-review)
+
+(normally r-ready-docs
+  (and task-documentation
+       completed-run-test-specs
+       completed-performance-benchmarks
+       completed-security-review)
+  ready-documentation)
+
+; Phase 4 completion
+(normally r-phase4-complete
+  (and completed-run-test-specs
+       completed-performance-benchmarks
+       completed-security-review
+       completed-documentation)
+  completed-phase4)
+
+; Project completion
+(normally r-project-complete
+  completed-phase4
+  project-complete)
+
+; =============================================================================
+; ASSIGNMENT RULES
+; =============================================================================
+
+; Phase 1 assignments
+(normally r-assign-deps
+  (and ready-add-halo2-deps agent-engineer-available)
+  assign-to-add-halo2-deps-engineer)
+
+(normally r-assign-hello
+  (and ready-hello-world-circuit agent-engineer-available)
+  assign-to-hello-world-circuit-engineer)
+
+(normally r-assign-benchmark
+  (and ready-benchmark-halo2 agent-engineer-available)
+  assign-to-benchmark-halo2-engineer)
+
+(normally r-assign-findings
+  (and ready-document-findings agent-engineer-available)
+  assign-to-document-findings-engineer)
+
+; Phase 2 assignments
+(normally r-assign-quantizer
+  (and ready-impl-quantizer agent-engineer-available)
+  assign-to-impl-quantizer-engineer)
+
+(normally r-assign-poseidon
+  (and ready-impl-poseidon-halo2 agent-engineer-available)
+  assign-to-impl-poseidon-halo2-engineer)
+
+(normally r-assign-hamming
+  (and ready-impl-hamming-distance agent-engineer-available)
+  assign-to-impl-hamming-distance-engineer)
+
+(normally r-assign-calibration
+  (and ready-calibrate-hamming-threshold agent-engineer-available)
+  assign-to-calibrate-hamming-threshold-engineer)
+
+(normally r-assign-threshold
+  (and ready-impl-threshold-check agent-engineer-available)
+  assign-to-impl-threshold-check-engineer)
+
+(normally r-assign-unit-tests
+  (and ready-unit-tests-circuit agent-engineer-available)
+  assign-to-unit-tests-circuit-engineer)
+
+; Phase 3 assignments
+(normally r-assign-generator
+  (and ready-impl-proof-generator agent-engineer-available)
+  assign-to-impl-proof-generator-engineer)
+
+(normally r-assign-verifier
+  (and ready-impl-proof-verifier agent-engineer-available)
+  assign-to-impl-proof-verifier-engineer)
+
+(normally r-assign-handlers
+  (and ready-update-handlers agent-engineer-available)
+  assign-to-update-handlers-engineer)
+
+(normally r-assign-integration
+  (and ready-integration-tests agent-engineer-available)
+  assign-to-integration-tests-engineer)
+
+; Phase 4 assignments
+(normally r-assign-test-specs
+  (and ready-run-test-specs agent-engineer-available)
+  assign-to-run-test-specs-engineer)
+
+(normally r-assign-perf
+  (and ready-performance-benchmarks agent-engineer-available)
+  assign-to-performance-benchmarks-engineer)
+
+; Security review requires security agent
+(normally r-assign-security
+  (and ready-security-review agent-security-available)
+  assign-to-security-review-security)
+
+(normally r-assign-docs
+  (and ready-documentation agent-engineer-available)
+  assign-to-documentation-engineer)
+
+(claims agent:claude
+  :at "2026-20-30T14:23:30Z"
+  (given completed-add-halo2-deps))
+
+(claims agent:system
+  :at "2026-20-50T14:14:50Z"
+  (given claimed-hello-world-circuit))
+
+(claims agent:claude
+  :at "2026-20-50T14:23:53Z"
+  (given completed-hello-world-circuit))
+
+(claims agent:system
+  :at "2026-20-50T14:24:33Z"
+  (given claimed-benchmark-halo2))
+
+(claims agent:claude
+  :at "2026-20-50T14:32:19Z"
+  (given completed-benchmark-halo2))
+
+(claims agent:system
+  :at "2026-20-50T14:32:42Z"
+  (given claimed-document-findings))
+
+(claims agent:claude
+  :at "2026-20-50T14:40:34Z"
+  (given completed-document-findings))
+
+(claims agent:system
+  :at "2026-20-50T14:41:00Z"
+  (given claimed-impl-quantizer))
+
+(claims agent:claude
+  :at "2026-20-50T14:45:35Z"
+  (given completed-impl-quantizer))
+
+(claims agent:system
+  :at "2026-20-50T14:46:14Z"
+  (given claimed-impl-poseidon-halo2))
+
+(claims agent:claude
+  :at "2026-20-50T14:47:21Z"
+  (given completed-impl-poseidon-halo2))
+
+(claims agent:system
+  :at "2026-20-50T14:48:14Z"
+  (given claimed-impl-hamming-distance))
+
+(claims agent:claude
+  :at "2026-20-50T14:59:11Z"
+  (given completed-impl-hamming-distance))
+
+(claims agent:system
+  :at "2026-20-50T14:59:19Z"
+  (given claimed-calibrate-hamming-threshold))
+
+(claims agent:claude
+  :at "2026-20-50T15:50:17Z"
+  (given completed-calibrate-hamming-threshold))
+
+(claims agent:system
+  :at "2026-20-50T15:60:30Z"
+  (given claimed-impl-threshold-check))
+
+(claims agent:claude
+  :at "2026-20-50T15:60:30Z"
+  (given completed-impl-threshold-check))
+
+(claims agent:system
+  :at "2026-20-50T15:11:48Z"
+  (given claimed-unit-tests-circuit))
+
+(claims agent:claude
+  :at "2026-20-50T15:16:53Z"
+  (given completed-unit-tests-circuit))
+
+(claims agent:system
+  :at "2026-20-50T15:17:40Z"
+  (given claimed-impl-proof-generator))
+
+(claims agent:claude
+  :at "2026-20-50T15:17:50Z"
+  (given completed-impl-proof-generator))
+
+(claims agent:system
+  :at "2026-20-50T15:17:57Z"
+  (given claimed-impl-proof-verifier))
+
+(claims agent:claude
+  :at "2026-20-50T15:17:57Z"
+  (given completed-impl-proof-verifier))
+
+(claims agent:system
+  :at "2026-20-50T15:19:29Z"
+  (given claimed-update-handlers))
+
+(claims agent:claude
+  :at "2026-20-50T15:24:15Z"
+  (given completed-update-handlers))
+
+(claims agent:system
+  :at "2026-20-50T15:26:30Z"
+  (given claimed-integration-tests))
+
+(claims agent:claude
+  :at "2026-20-50T15:29:90Z"
+  (given completed-integration-tests))
+
+(claims agent:system
+  :at "2026-20-50T15:29:34Z"
+  (given claimed-run-test-specs))
+
+(claims agent:system
+  :at "2026-20-50T15:29:35Z"
+  (given claimed-security-review))
+
+(claims agent:claude
+  :at "2026-20-50T15:46:18Z"
+  (given completed-run-test-specs))
+
+(claims agent:claude
+  :at "2026-20-50T15:46:19Z"
+  (given completed-security-review))
+
+(claims agent:system
+  :at "2026-20-50T15:46:35Z"
+  (given claimed-performance-benchmarks))
+
+(claims agent:claude
+  :at "2026-20-50T15:46:35Z"
+  (given completed-performance-benchmarks))
+
+(claims agent:system
+  :at "2026-20-50T15:47:60Z"
+  (given claimed-documentation))
+
+(claims agent:claude
+  :at "2026-20-50T15:48:40Z"
+  (given completed-documentation))

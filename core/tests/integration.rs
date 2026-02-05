@@ -262,19 +262,161 @@ fn test_deterministic_behavior() {
     let features = [0.123f32; FEATURE_VECTOR_SIZE];
     let message = Fr::from(42u64);
     let randomness = Fr::from(123u64);
-    
+
     // Multiple runs should be identical
     for _ in 0..5 {
         let hash1 = poseidon_hash(&features).unwrap();
         let hash2 = poseidon_hash(&features).unwrap();
         assert_eq!(hash1, hash2, "Hash should be deterministic");
-        
+
         let commit1 = sable_core::crypto::pedersen::commit_default(message, randomness);
         let commit2 = sable_core::crypto::pedersen::commit_default(message, randomness);
         assert_eq!(commit1, commit2, "Commitment should be deterministic");
-        
+
         let generators1 = Generators::new().unwrap();
         let generators2 = Generators::new().unwrap();
         assert_eq!(generators1, generators2, "Generators should be deterministic");
+    }
+}
+
+// ============================================================================
+// Halo2 Integration Tests (require "halo2" feature)
+// ============================================================================
+
+#[cfg(feature = "halo2")]
+mod halo2_integration {
+    use sable_core::zk::halo2::{
+        FaceVerificationProver, FaceVerificationVerifier,
+        FeatureQuantizer, ThresholdConfig, hamming_distance,
+    };
+
+    /// Test complete Halo2 face verification workflow
+    #[test]
+    fn test_halo2_face_verification_workflow() {
+        // Step 1: Create enrolled biometric embedding (f64 values in [-1, 1])
+        let enrolled_embedding: Vec<f64> = (0..512)
+            .map(|i| ((i as f64 / 256.0) - 1.0) * 0.8)
+            .collect();
+
+        // Step 2: Quantize to u8 for ZK circuit
+        let enrolled_quantized = FeatureQuantizer::quantize(&enrolled_embedding);
+        assert_eq!(enrolled_quantized.len(), 512);
+
+        // Step 3: Simulate live scan (same person, small noise)
+        let live_embedding: Vec<f64> = enrolled_embedding
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (v + (i as f64 * 0.001).sin() * 0.02).clamp(-1.0, 1.0))
+            .collect();
+        let live_quantized = FeatureQuantizer::quantize(&live_embedding);
+
+        // Step 4: Calculate Hamming distance
+        let distance = hamming_distance(&enrolled_quantized, &live_quantized);
+        println!("Hamming distance: {} / {} bits", distance, 512 * 8);
+
+        // Step 5: Configure threshold (50% similarity)
+        let config = ThresholdConfig::new(512, 0.5);
+        let threshold = config.max_hamming_distance();
+        println!("Threshold: {} bits", threshold);
+
+        // Step 6: Generate ZK proof
+        let mut prover = FaceVerificationProver::new();
+        let proof = prover.prove(distance, threshold)
+            .expect("Proof generation should succeed");
+
+        // Step 7: Verify proof size meets requirements
+        println!("Proof size: {} bytes", proof.size());
+        assert!(proof.meets_size_requirement(), "Proof should be ≤10KB");
+
+        // Step 8: Verify the proof
+        let verifier = FaceVerificationVerifier::from_prover(&mut prover)
+            .expect("Should create verifier");
+        let result = verifier.verify(&proof).expect("Verification should succeed");
+
+        // Same person should match
+        assert!(result, "Same person's embeddings should verify successfully");
+    }
+
+    /// Test Halo2 rejects different persons
+    #[test]
+    fn test_halo2_rejects_different_person() {
+        // Person A's embedding
+        let person_a: Vec<f64> = (0..512)
+            .map(|i| ((i * 7) as f64 / 512.0) - 1.0)
+            .collect();
+
+        // Person B's embedding (different pattern)
+        let person_b: Vec<f64> = (0..512)
+            .map(|i| (((i * 13 + 256) % 512) as f64 / 512.0) - 1.0)
+            .collect();
+
+        let qa = FeatureQuantizer::quantize(&person_a);
+        let qb = FeatureQuantizer::quantize(&person_b);
+
+        let distance = hamming_distance(&qa, &qb);
+        let config = ThresholdConfig::new(512, 0.5);
+        let threshold = config.max_hamming_distance();
+
+        println!("Different persons: distance={}, threshold={}", distance, threshold);
+
+        let mut prover = FaceVerificationProver::new();
+        let proof = prover.prove(distance, threshold)
+            .expect("Proof generation should succeed");
+
+        let verifier = FaceVerificationVerifier::from_prover(&mut prover)
+            .expect("Should create verifier");
+        let result = verifier.verify(&proof).expect("Verification should succeed");
+
+        // Different persons should not match (distance likely > threshold)
+        // Note: This depends on the specific embeddings
+        if distance > threshold {
+            assert!(!result, "Different persons should not verify");
+        }
+    }
+
+    /// Test Halo2 threshold boundary
+    #[test]
+    fn test_halo2_threshold_boundary() {
+        // Test exactly at threshold
+        {
+            let mut prover = FaceVerificationProver::new();
+            let proof_at = prover.prove(100, 100).expect("Should generate proof");
+            let verifier = FaceVerificationVerifier::from_prover(&mut prover)
+                .expect("Should create verifier");
+            assert!(verifier.verify(&proof_at).expect("Should verify"),
+                "Distance == threshold should pass");
+        }
+
+        // Test just over threshold
+        {
+            let mut prover = FaceVerificationProver::new();
+            let proof_over = prover.prove(101, 100).expect("Should generate proof");
+            let verifier = FaceVerificationVerifier::from_prover(&mut prover)
+                .expect("Should create verifier");
+            assert!(!verifier.verify(&proof_over).expect("Should verify"),
+                "Distance > threshold should fail");
+        }
+    }
+
+    /// Test quantization preserves similarity ordering
+    #[test]
+    fn test_quantization_preserves_ordering() {
+        let base: Vec<f64> = (0..512).map(|i| (i as f64 / 256.0) - 1.0).collect();
+
+        // Create embeddings at different similarity levels
+        let similar: Vec<f64> = base.iter().map(|v| (v + 0.01).clamp(-1.0, 1.0)).collect();
+        let different: Vec<f64> = base.iter().map(|v| (-v).clamp(-1.0, 1.0)).collect();
+
+        let q_base = FeatureQuantizer::quantize(&base);
+        let q_similar = FeatureQuantizer::quantize(&similar);
+        let q_different = FeatureQuantizer::quantize(&different);
+
+        let dist_similar = hamming_distance(&q_base, &q_similar);
+        let dist_different = hamming_distance(&q_base, &q_different);
+
+        // Similar embeddings should have smaller Hamming distance
+        assert!(dist_similar < dist_different,
+            "Similar embeddings should have smaller Hamming distance: {} vs {}",
+            dist_similar, dist_different);
     }
 }

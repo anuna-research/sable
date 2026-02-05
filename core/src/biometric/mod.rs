@@ -63,6 +63,8 @@ pub mod fusion;
 pub mod constant_time;
 /// Biometric matching threshold constants (REQ-009).
 pub mod thresholds;
+/// NIR liveness detection for presentation attack resistance (REQ-020).
+pub mod liveness;
 
 use crate::types::BiometricFeature;
 use crate::error::{Result, SableError};

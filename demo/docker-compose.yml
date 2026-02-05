@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - RUST_LOG=demo_server=info,tower_http=info
+
+  frontend:
+    build:
+      context: web
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend

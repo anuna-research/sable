@@ -11,6 +11,7 @@ description = "SABLE: Secure Attested Biometric Library for Edge - Core cryptogr
 default = ["std"]
 std = []
 zk = ["ark-relations", "ark-groth16", "ark-snark"]
+halo2 = ["dep:halo2-base", "dep:halo2-ecc", "dep:halo2curves", "dep:snark-verifier-sdk"]
 mobile = ["bincode", "serde_json", "zk"]
 # REQ-022: SIMD/NEON optimizations for 2x performance improvement
 simd = []
@@ -31,6 +32,12 @@ ark-groth16 = { workspace = true, optional = true }
 ark-snark = { workspace = true, optional = true }
 ark-sponge = { workspace = true }
 ark-bls12-381 = { workspace = true }
+
+# Halo2 ecosystem (transparent setup ZK proofs)
+halo2-base = { workspace = true, optional = true }
+halo2-ecc = { workspace = true, optional = true }
+halo2curves = { workspace = true, optional = true }
+snark-verifier-sdk = { workspace = true, optional = true }
 
 # Cryptographic utilities
 getrandom = { workspace = true }
@@ -69,6 +76,11 @@ required-features = ["zk"]
 name = "energy"
 harness = false
 required-features = ["mobile"]
+
+[[bench]]
+name = "halo2_performance"
+harness = false
+required-features = ["halo2"]
 
 # Mobile library targets
 [lib]

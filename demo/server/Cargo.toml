@@ -1,0 +1,40 @@
+[package]
+name = "demo-server"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "SABLE Web Demo - Interactive ZK biometric authentication showcase"
+
+[features]
+default = []
+fast-demo = []  # Skip proof generation delay for faster development
+halo2-proofs = []  # Enable real Halo2 ZK proofs instead of simulation
+
+[dependencies]
+# SABLE core with ZK support (halo2 for real ZK proofs)
+sable-core = { path = "../../core", features = ["zk", "halo2"] }
+
+# BLS12-381 types (for scalar conversion)
+blstrs = "0.7"
+ff = "0.13"
+
+# Web framework
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1.35", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Cryptographic types
+hex = "0.4"
+base64 = "0.21"
+
+# Utilities
+uuid = { version = "1.6", features = ["v4"] }
+parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+

@@ -57,9 +57,15 @@ use serde::{Deserialize, Serialize};
 /// let value = feature.value();
 /// assert!((value - 0.5).abs() < 0.001);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "mobile", derive(Serialize, Deserialize))]
 pub struct BiometricFeature(pub u16);
+
+impl Zeroize for BiometricFeature {
+    fn zeroize(&mut self) {
+        self.0 = 0;
+    }
+}
 
 impl BiometricFeature {
     /// Create a biometric feature from a floating point value (0.0-1.0).
