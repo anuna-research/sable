@@ -48,6 +48,7 @@ export interface ProveResponse {
   public_inputs_hex: string[];
   distance: number;
   quality_score: number;
+  liveness_passed: boolean | null;
   timings: ProveTimings;
   what_was_proven: string[];
   what_stayed_private: string[];
@@ -56,6 +57,7 @@ export interface ProveResponse {
 export interface VerifyRequest {
   proof_hex: string;
   public_inputs_hex: string[];
+  session_id?: string;
 }
 
 export interface VerificationDetails {
@@ -63,6 +65,26 @@ export interface VerificationDetails {
   distance_check_passed: boolean;
   temporal_check_passed: boolean;
   quality_check_passed: boolean;
+  liveness_check_passed: boolean | null;
+}
+
+export interface LivenessRequest {
+  session_id: string;
+  baseline_image: string;
+  flash_image: string;
+}
+
+export interface LivenessSignals {
+  reflectance_variance: number;
+  reflectance_gradient: number;
+  highlight_softness: number;
+  channel_consistency: number;
+}
+
+export interface LivenessResponse {
+  passed: boolean;
+  signals: LivenessSignals;
+  timing_ms: number;
 }
 
 export interface VerifyResponse {
@@ -124,6 +146,13 @@ export const api = {
 
   prove(data: ProveRequest): Promise<ProveResponse> {
     return request('/auth/prove', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  checkLiveness(data: LivenessRequest): Promise<LivenessResponse> {
+    return request('/liveness/screen-flash', {
       method: 'POST',
       body: JSON.stringify(data),
     });

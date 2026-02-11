@@ -32,6 +32,9 @@ serde_json = "1.0"
 hex = "0.4"
 base64 = "0.21"
 
+# Image decoding (JPEG from webcam frames)
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
 # Utilities
 uuid = { version = "1.6", features = ["v4"] }
 parking_lot = "0.12"

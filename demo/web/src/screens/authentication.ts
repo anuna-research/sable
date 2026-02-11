@@ -8,7 +8,7 @@ import {
   stopWebcam,
 } from '../components/webcam';
 
-export type AuthPhase = 'ready' | 'challenge' | 'capturing' | 'proving' | 'complete';
+export type AuthPhase = 'ready' | 'challenge' | 'capturing' | 'liveness' | 'proving' | 'complete';
 
 export function renderAuthenticationScreen(
   phase: AuthPhase,
@@ -23,6 +23,7 @@ export function renderAuthenticationScreen(
     ready: 'Ready to Authenticate',
     challenge: 'Challenge Received',
     capturing: 'Capture Live Face Scan',
+    liveness: 'Screen Flash Liveness Check',
     proving: 'Generating Zero-Knowledge Proof...',
     complete: 'Proof Generated',
   };
@@ -61,7 +62,11 @@ export function renderAuthenticationScreen(
           <strong>Live Face Scan:</strong> A new face embedding is extracted from your webcam
         </li>
         <li style="margin-bottom: 0.75rem;">
-          <strong>Circuit Execution:</strong> The Groth16 circuit verifies:
+          <strong>Liveness Check:</strong> Screen flash reflectance analysis verifies a real face
+          (Tang et al., NDSS 2018)
+        </li>
+        <li style="margin-bottom: 0.75rem;">
+          <strong>Circuit Execution:</strong> The Halo2 circuit verifies:
           <ul style="margin-top: 0.5rem; margin-left: 1rem;">
             <li>Features hash to the committed value</li>
             <li>Embedding similarity is above threshold</li>
@@ -70,7 +75,7 @@ export function renderAuthenticationScreen(
           </ul>
         </li>
         <li style="margin-bottom: 0.75rem;">
-          <strong>Proof Output:</strong> A succinct 192-byte proof that can be verified quickly
+          <strong>Proof Output:</strong> A ~2KB Halo2 proof that can be verified in milliseconds
         </li>
       </ol>
     </div>
@@ -158,10 +163,28 @@ function renderAuthPhase(
         </div>
       `;
 
+    case 'liveness':
+      return `
+        <div class="fade-in">
+          <h3>Screen Flash Liveness Check</h3>
+          <p style="font-size: 0.875rem; color: var(--text-secondary);">
+            Your screen will briefly flash white. This controlled-illumination analysis
+            verifies you are a real person by measuring light reflectance patterns on
+            your face (Tang et al., NDSS 2018).
+          </p>
+          <div style="text-align: center; margin: 2rem 0;">
+            <span class="spinner"></span>
+            <p id="liveness-status" style="margin-top: 0.5rem;">Initializing camera...</p>
+          </div>
+          <video id="liveness-video" autoplay playsinline muted
+            style="position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none;"></video>
+        </div>
+      `;
+
     case 'proving':
       return `
         <div class="fade-in">
-          <h3>Generating Groth16 Proof</h3>
+          <h3>Generating Halo2 Proof</h3>
           <div class="progress-container">
             <div class="progress-bar" id="proof-progress" style="width: 0%;"></div>
           </div>
@@ -206,12 +229,21 @@ function renderAuthPhase(
             </span>
           </p>
 
+          ${proof.liveness_passed != null ? `
+            <h3>Liveness Check</h3>
+            <p style="font-size: 0.875rem;">
+              <span style="color: ${proof.liveness_passed ? 'var(--accent-success)' : 'var(--accent-error)'};">
+                ${proof.liveness_passed ? 'Passed - real face detected via screen flash reflectance' : 'Failed - liveness check did not pass'}
+              </span>
+            </p>
+          ` : ''}
+
           <h3>ZK Proof (truncated)</h3>
           <div class="code" style="font-size: 0.75rem; word-break: break-all;">
             ${proof.proof_hex.substring(0, 128)}...
           </div>
           <p style="font-size: 0.875rem; margin-top: 0.5rem;">
-            192-byte Groth16 proof on BLS12-381 curve
+            ~2KB Halo2 proof on BN254 curve
           </p>
 
           <div style="margin-top: 1.5rem;">
@@ -266,6 +298,13 @@ export function updateProofProgress(percent: number, status: string): void {
   if (progressBar) {
     progressBar.style.width = `${percent}%`;
   }
+  if (statusEl) {
+    statusEl.textContent = status;
+  }
+}
+
+export function updateLivenessStatus(status: string): void {
+  const statusEl = document.getElementById('liveness-status');
   if (statusEl) {
     statusEl.textContent = status;
   }

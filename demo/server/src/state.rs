@@ -22,6 +22,18 @@ pub struct EnrollmentSession {
     pub created_at: std::time::Instant,
 }
 
+/// Screen flash liveness result stored per session
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct LivenessResult {
+    pub passed: bool,
+    pub reflectance_variance: f64,
+    pub reflectance_gradient: f64,
+    pub highlight_softness: f64,
+    pub channel_consistency: f64,
+    pub checked_at: std::time::Instant,
+}
+
 /// Authentication challenge data
 #[derive(Clone)]
 pub struct AuthChallenge {
@@ -40,6 +52,8 @@ pub struct AppState {
     pub challenges: Arc<RwLock<HashMap<String, AuthChallenge>>>,
     /// Halo2 ZK prover (shared for setup reuse)
     pub halo2_prover: Arc<RwLock<FaceVerificationProver>>,
+    /// Liveness results by session_id
+    pub liveness_results: Arc<RwLock<HashMap<String, LivenessResult>>>,
 }
 
 impl AppState {
@@ -52,6 +66,7 @@ impl AppState {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             challenges: Arc::new(RwLock::new(HashMap::new())),
             halo2_prover: Arc::new(RwLock::new(prover)),
+            liveness_results: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -79,6 +94,16 @@ impl AppState {
     pub fn remove_challenge(&self, challenge_id: &str) -> Option<AuthChallenge> {
         let mut challenges = self.challenges.write();
         challenges.remove(challenge_id)
+    }
+
+    pub fn store_liveness_result(&self, session_id: String, result: LivenessResult) {
+        let mut results = self.liveness_results.write();
+        results.insert(session_id, result);
+    }
+
+    pub fn get_liveness_result(&self, session_id: &str) -> Option<LivenessResult> {
+        let results = self.liveness_results.read();
+        results.get(session_id).cloned()
     }
 }
 

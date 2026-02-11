@@ -7,6 +7,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 // Note: PalmProcessor is available for production use with proper biometric sensors
 // For webcam demo, we use image-based feature extraction instead
+use sable_core::biometric::screen_flash::{ScreenFlashExtractor, ScreenFlashThresholds};
+use sable_core::biometric::PalmImage;
 use sable_core::crypto::pedersen::{CommitmentOpening, Generators, commit_with_opening};
 use sable_core::crypto::poseidon::poseidon_hash;
 use sable_core::crypto::rng::SecureRng;
@@ -22,7 +24,7 @@ use crate::simulation::{
     calculate_distance, calculate_quality_score, generate_similar_features,
     generate_simulated_features,
 };
-use crate::state::{AppState, AuthChallenge, EnrollmentSession};
+use crate::state::{AppState, AuthChallenge, EnrollmentSession, LivenessResult};
 
 // Feature vector size (must match SABLE core)
 const FEATURE_VECTOR_SIZE: usize = 512;
@@ -240,6 +242,7 @@ pub struct ProveResponse {
     pub hamming_threshold: u64,
     pub quality_score: f32,
     pub proof_size_bytes: usize,
+    pub liveness_passed: Option<bool>,
     pub timings: ProveTimings,
     pub what_was_proven: Vec<String>,
     pub what_stayed_private: Vec<String>,
@@ -407,6 +410,11 @@ pub async fn auth_prove(
         format!("{}", if halo2_result { "1" } else { "0" }), // Result: 1=match, 0=no match
     ];
 
+    // Check for stored liveness result
+    let liveness_passed = state
+        .get_liveness_result(&challenge.session_id)
+        .map(|r| r.passed);
+
     Ok(Json(ProveResponse {
         proof_hex: hex::encode(&proof_bytes),
         public_inputs_hex: public_inputs,
@@ -415,24 +423,37 @@ pub async fn auth_prove(
         hamming_threshold: threshold,
         quality_score,
         proof_size_bytes: proof_bytes.len(),
+        liveness_passed,
         timings: ProveTimings {
             feature_scan_ms: scan_time.as_secs_f64() * 1000.0,
             distance_calc_ms: distance_time.as_secs_f64() * 1000.0,
             proof_generation_ms: proof_time.as_secs_f64() * 1000.0,
             total_ms: total_time.as_secs_f64() * 1000.0,
         },
-        what_was_proven: vec![
-            "I possess biometric features matching the enrolled template (Halo2 ZK proof)".to_string(),
-            format!("Hamming distance {} ≤ threshold {} (ZK verified)", hamming_dist, threshold),
-            "The biometric scan was captured recently (temporal validity)".to_string(),
-            format!("Scan quality meets minimum threshold (score: {:.2})", quality_score),
-        ],
-        what_stayed_private: vec![
-            "The actual biometric feature values (512 quantized bytes)".to_string(),
-            "The cryptographic salt used in the commitment".to_string(),
-            "The exact Hamming distance (only that it's below threshold)".to_string(),
-            "Any identifying information about the biometric pattern".to_string(),
-        ],
+        what_was_proven: {
+            let mut proven = vec![
+                "I possess biometric features matching the enrolled template (Halo2 ZK proof)".to_string(),
+                format!("Hamming distance {} ≤ threshold {} (ZK verified)", hamming_dist, threshold),
+                "The biometric scan was captured recently (temporal validity)".to_string(),
+                format!("Scan quality meets minimum threshold (score: {:.2})", quality_score),
+            ];
+            if liveness_passed == Some(true) {
+                proven.push("Screen flash liveness check passed (real face detected)".to_string());
+            }
+            proven
+        },
+        what_stayed_private: {
+            let mut private = vec![
+                "The actual biometric feature values (512 quantized bytes)".to_string(),
+                "The cryptographic salt used in the commitment".to_string(),
+                "The exact Hamming distance (only that it's below threshold)".to_string(),
+                "Any identifying information about the biometric pattern".to_string(),
+            ];
+            if liveness_passed.is_some() {
+                private.push("Screen flash reflectance signals (variance, gradient, softness, consistency)".to_string());
+            }
+            private
+        },
     }))
 }
 
@@ -445,6 +466,8 @@ pub struct VerifyRequest {
     pub proof_hex: String,
     #[allow(dead_code)]
     pub public_inputs_hex: Vec<String>,
+    /// Optional session ID to look up liveness result
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -460,6 +483,7 @@ pub struct VerificationDetails {
     pub distance_check_passed: bool,
     pub temporal_check_passed: bool,
     pub quality_check_passed: bool,
+    pub liveness_check_passed: Option<bool>,
 }
 
 pub async fn verify(
@@ -514,11 +538,19 @@ pub async fn verify(
 
     let verification_time = start.elapsed();
 
+    // Look up liveness result if session_id provided
+    let liveness_check = req
+        .session_id
+        .as_deref()
+        .and_then(|sid| state.get_liveness_result(sid))
+        .map(|r| r.passed);
+
     match verification_result {
         Ok(is_match) => {
             tracing::info!(
-                "Halo2 verification completed: valid={}, time={:.2}ms",
+                "Halo2 verification completed: valid={}, liveness={:?}, time={:.2}ms",
                 is_match,
+                liveness_check,
                 verification_time.as_secs_f64() * 1000.0
             );
             Ok(Json(VerifyResponse {
@@ -529,6 +561,7 @@ pub async fn verify(
                     distance_check_passed: is_match,
                     temporal_check_passed: true,
                     quality_check_passed: true,
+                    liveness_check_passed: liveness_check,
                 },
             }))
         }
@@ -543,6 +576,7 @@ pub async fn verify(
                     distance_check_passed: false,
                     temporal_check_passed: true,
                     quality_check_passed: true,
+                    liveness_check_passed: liveness_check,
                 },
             }))
         }
@@ -564,6 +598,153 @@ pub async fn health() -> Json<HealthResponse> {
         status: "healthy".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+// ============================================================================
+// Screen Flash Liveness Endpoint
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct ScreenFlashRequest {
+    /// Session ID to associate liveness result with
+    pub session_id: String,
+    /// Baseline image (before flash) as base64-encoded JPEG
+    pub baseline_image: String,
+    /// Flash image (during flash) as base64-encoded JPEG
+    pub flash_image: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScreenFlashResponse {
+    pub passed: bool,
+    pub signals: LivenessSignals,
+    pub timing_ms: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LivenessSignals {
+    pub reflectance_variance: f64,
+    pub reflectance_gradient: f64,
+    pub highlight_softness: f64,
+    pub channel_consistency: f64,
+}
+
+pub async fn screen_flash_check(
+    State(state): State<AppState>,
+    Json(req): Json<ScreenFlashRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    let start = Instant::now();
+
+    // Verify session exists
+    state.get_session(&req.session_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Session not found".to_string(),
+            }),
+        )
+    })?;
+
+    // Decode baseline image
+    let baseline_img = decode_base64_jpeg(&req.baseline_image).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Invalid baseline image: {}", e),
+            }),
+        )
+    })?;
+
+    // Decode flash image
+    let flash_img = decode_base64_jpeg(&req.flash_image).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Invalid flash image: {}", e),
+            }),
+        )
+    })?;
+
+    // Run screen flash extractor
+    let extractor = ScreenFlashExtractor::new();
+    let signals = extractor
+        .extract_signals(&baseline_img, &flash_img)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Signal extraction failed: {}", e),
+                }),
+            )
+        })?;
+
+    let thresholds = ScreenFlashThresholds::default();
+    let passed = signals.passes_thresholds(&thresholds);
+
+    let timing = start.elapsed();
+
+    // Convert fixed-point signals to float for display
+    let variance_f = signals.reflectance_variance as f64 / 65535.0;
+    let gradient_f = signals.reflectance_gradient as f64 / 65535.0;
+    let softness_f = signals.highlight_softness as f64 / 65535.0;
+    let consistency_f = signals.channel_consistency as f64 / 65535.0;
+
+    tracing::info!(
+        "Liveness check: passed={}, variance={:.4}, gradient={:.4}, softness={:.4}, consistency={:.4}, time={:.2}ms",
+        passed, variance_f, gradient_f, softness_f, consistency_f,
+        timing.as_secs_f64() * 1000.0
+    );
+
+    // Store result for the session
+    state.store_liveness_result(
+        req.session_id,
+        LivenessResult {
+            passed,
+            reflectance_variance: variance_f,
+            reflectance_gradient: gradient_f,
+            highlight_softness: softness_f,
+            channel_consistency: consistency_f,
+            checked_at: Instant::now(),
+        },
+    );
+
+    Ok(Json(ScreenFlashResponse {
+        passed,
+        signals: LivenessSignals {
+            reflectance_variance: variance_f,
+            reflectance_gradient: gradient_f,
+            highlight_softness: softness_f,
+            channel_consistency: consistency_f,
+        },
+        timing_ms: timing.as_secs_f64() * 1000.0,
+    }))
+}
+
+/// Decode a base64-encoded JPEG image (with optional data URL prefix) to a PalmImage
+fn decode_base64_jpeg(input: &str) -> std::result::Result<PalmImage, String> {
+    use base64::Engine;
+    use image::GenericImageView;
+
+    // Strip data URL prefix if present
+    let b64_data = if let Some(pos) = input.find(",") {
+        &input[pos + 1..]
+    } else {
+        input
+    };
+
+    // Decode base64
+    let jpeg_bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64_data)
+        .map_err(|e| format!("Base64 decode failed: {}", e))?;
+
+    // Decode JPEG to RGB
+    let img = image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
+        .map_err(|e| format!("JPEG decode failed: {}", e))?;
+
+    let rgb = img.to_rgb8();
+    let (w, h) = img.dimensions();
+
+    Ok(PalmImage::new(w, h, 3, rgb.into_raw()))
 }
 
 // ============================================================================

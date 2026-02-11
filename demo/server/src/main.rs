@@ -39,6 +39,7 @@ async fn main() {
         .route("/enroll", post(handlers::enroll))
         .route("/auth/challenge", post(handlers::auth_challenge))
         .route("/auth/prove", post(handlers::auth_prove))
+        .route("/liveness/screen-flash", post(handlers::screen_flash_check))
         .route("/verify", post(handlers::verify));
 
     // Build main router
@@ -52,11 +53,12 @@ async fn main() {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3001));
     tracing::info!("🚀 SABLE Demo Server starting on http://{}", addr);
     tracing::info!("   API endpoints:");
-    tracing::info!("   - POST /api/enroll        Create biometric enrollment");
-    tracing::info!("   - POST /api/auth/challenge Get authentication challenge");
-    tracing::info!("   - POST /api/auth/prove    Generate ZK proof");
-    tracing::info!("   - POST /api/verify        Verify ZK proof");
-    tracing::info!("   - GET  /api/health        Health check");
+    tracing::info!("   - POST /api/enroll                  Create biometric enrollment");
+    tracing::info!("   - POST /api/auth/challenge          Get authentication challenge");
+    tracing::info!("   - POST /api/auth/prove              Generate ZK proof");
+    tracing::info!("   - POST /api/liveness/screen-flash   Screen flash liveness check");
+    tracing::info!("   - POST /api/verify                  Verify ZK proof");
+    tracing::info!("   - GET  /api/health                  Health check");
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();

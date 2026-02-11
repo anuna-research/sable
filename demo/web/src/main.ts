@@ -4,6 +4,7 @@ import {
   ChallengeResponse,
   ProveResponse,
   VerifyResponse,
+  LivenessResponse,
 } from './api';
 import {
   Step,
@@ -25,6 +26,7 @@ import {
   renderAuthenticationScreen,
   attachAuthenticationHandlers,
   updateProofProgress,
+  updateLivenessStatus,
   initAuthWebcam,
   captureAuthFrame,
   stopAuthWebcam,
@@ -33,6 +35,7 @@ import {
   renderVerificationScreen,
   attachVerificationHandlers,
 } from './screens/verification';
+import { performScreenFlash, ScreenFlashCapture } from './components/screenFlash';
 
 // Application state
 interface AppState {
@@ -55,6 +58,9 @@ interface AppState {
   challenge: ChallengeResponse | null;
   proof: ProveResponse | null;
 
+  // Liveness
+  livenessResult: LivenessResponse | null;
+
   // Verification
   verifyResult: VerifyResponse | null;
 }
@@ -74,6 +80,7 @@ const state: AppState = {
   authWebcamError: null,
   challenge: null,
   proof: null,
+  livenessResult: null,
   verifyResult: null,
 };
 
@@ -166,6 +173,10 @@ function render(): void {
       // Initialize webcam after render if in capturing phase
       if (state.authPhase === 'capturing' && !state.authCapturedFace && !state.authWebcamError) {
         initAuthWebcamAsync();
+      }
+      // Run liveness check after render if in liveness phase
+      if (state.authPhase === 'liveness') {
+        runLivenessCheck();
       }
       break;
     case 'verification':
@@ -327,8 +338,104 @@ async function handleProve(face: CapturedFace): Promise<void> {
     return;
   }
 
+  // Transition to liveness phase first
   state.isLoading = true;
   state.error = null;
+  state.authPhase = 'liveness';
+  // Store face for use after liveness check
+  state.authCapturedFace = face;
+  render();
+  // Liveness check will be triggered by render() -> runLivenessCheck()
+}
+
+// Guard to prevent re-entrant liveness checks
+let livenessRunning = false;
+
+async function runLivenessCheck(): Promise<void> {
+  if (livenessRunning) return;
+  livenessRunning = true;
+
+  try {
+    // Open a separate webcam stream for the screen flash
+    const video = document.getElementById('liveness-video') as HTMLVideoElement;
+    if (!video) {
+      throw new Error('Liveness video element not found');
+    }
+
+    updateLivenessStatus('Opening camera for liveness check...');
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+      audio: false,
+    });
+
+    video.srcObject = stream;
+    await video.play();
+
+    // Wait for video to be ready
+    await new Promise<void>((resolve) => {
+      if (video.readyState >= 2) {
+        resolve();
+      } else {
+        video.onloadeddata = () => resolve();
+      }
+    });
+
+    // Small delay for camera to stabilize
+    await sleep(300);
+
+    updateLivenessStatus('Performing screen flash...');
+
+    // Perform the screen flash capture
+    const capture: ScreenFlashCapture = await performScreenFlash(video);
+
+    // Stop webcam
+    stream.getTracks().forEach(track => track.stop());
+    video.srcObject = null;
+
+    updateLivenessStatus('Analyzing reflectance patterns...');
+
+    // Send to server
+    const livenessResult = await api.checkLiveness({
+      session_id: state.sessionId!,
+      baseline_image: capture.baselineDataUrl,
+      flash_image: capture.flashDataUrl,
+    });
+
+    state.livenessResult = livenessResult;
+
+    if (livenessResult.passed) {
+      updateLivenessStatus('Liveness check passed!');
+      await sleep(500);
+
+      // Proceed to proof generation
+      await generateProof();
+    } else {
+      // Liveness failed - let user retry
+      state.error = 'Liveness check failed. Please ensure good lighting and try again.';
+      state.authPhase = 'capturing';
+      state.isLoading = false;
+      render();
+    }
+  } catch (err) {
+    state.error = err instanceof Error ? err.message : 'Liveness check failed';
+    state.authPhase = 'capturing';
+    state.isLoading = false;
+    render();
+  } finally {
+    livenessRunning = false;
+  }
+}
+
+async function generateProof(): Promise<void> {
+  if (!state.challenge || !state.authCapturedFace) {
+    state.error = 'Missing challenge or face data';
+    state.authPhase = 'capturing';
+    state.isLoading = false;
+    render();
+    return;
+  }
+
   state.authPhase = 'proving';
   render();
 
@@ -338,7 +445,7 @@ async function handleProve(face: CapturedFace): Promise<void> {
 
     const proof = await api.prove({
       challenge_id: state.challenge.challenge_id,
-      face_embedding: face.embedding,
+      face_embedding: state.authCapturedFace.embedding,
     });
 
     state.proof = proof;
@@ -358,7 +465,7 @@ async function simulateProofProgress(): Promise<void> {
     { percent: 10, status: 'Processing face embedding...' },
     { percent: 25, status: 'Converting to ZK features...' },
     { percent: 40, status: 'Computing Poseidon hash...' },
-    { percent: 55, status: 'Building Groth16 circuit...' },
+    { percent: 55, status: 'Building Halo2 circuit...' },
     { percent: 70, status: 'Generating witness...' },
     { percent: 85, status: 'Computing proof...' },
     { percent: 95, status: 'Finalizing...' },
@@ -389,6 +496,7 @@ async function handleVerify(): Promise<void> {
     const result = await api.verify({
       proof_hex: state.proof.proof_hex,
       public_inputs_hex: state.proof.public_inputs_hex,
+      session_id: state.sessionId ?? undefined,
     });
     state.verifyResult = result;
     state.completedSteps.add('verification');
@@ -420,6 +528,7 @@ function handleRestart(): void {
   state.authWebcamError = null;
   state.challenge = null;
   state.proof = null;
+  state.livenessResult = null;
   state.verifyResult = null;
   render();
 }

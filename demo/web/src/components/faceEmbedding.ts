@@ -32,10 +32,10 @@ const humanConfig = {
       enabled: false,       // Not needed
     },
     antispoof: {
-      enabled: false,       // Could enable for production
+      enabled: true,        // Client-side antispoof indicator
     },
     liveness: {
-      enabled: false,       // Could enable for production
+      enabled: true,        // Client-side liveness indicator
     },
   },
   body: { enabled: false },

@@ -27,8 +27,8 @@ export function renderHomeScreen(_onStart: () => void): string {
           using Poseidon hash and Pedersen commitments
         </li>
         <li style="margin-bottom: 0.5rem;">
-          <strong>Authentication:</strong> A Groth16 proof demonstrates your live scan
-          matches the enrolled template
+          <strong>Authentication:</strong> A Halo2 proof demonstrates your live scan
+          matches the enrolled template, with screen flash liveness verification
         </li>
         <li style="margin-bottom: 0.5rem;">
           <strong>Verification:</strong> The verifier learns only that you passed -
@@ -46,14 +46,14 @@ export function renderHomeScreen(_onStart: () => void): string {
         </div>
         <div class="timing-item">
           <div class="timing-value" style="font-size: 1rem;">Pedersen</div>
-          <div class="timing-label">Hiding commitment (~140μs)</div>
+          <div class="timing-label">Hiding commitment (~140\u00B5s)</div>
         </div>
         <div class="timing-item">
-          <div class="timing-value" style="font-size: 1rem;">Groth16</div>
-          <div class="timing-label">ZK proof (~850ms)</div>
+          <div class="timing-value" style="font-size: 1rem;">Halo2</div>
+          <div class="timing-label">ZK proof (~450ms)</div>
         </div>
         <div class="timing-item">
-          <div class="timing-value" style="font-size: 1rem;">BLS12-381</div>
+          <div class="timing-value" style="font-size: 1rem;">BN254</div>
           <div class="timing-label">Elliptic curve</div>
         </div>
       </div>
