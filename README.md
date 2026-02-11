@@ -31,7 +31,7 @@
 
 SABLE lets you verify your identity using biometrics (like face scans) **without exposing your actual biometric data** to anyone -- not to the person verifying you, not to the government, and not to any central database.
 
-It creates a zero-knowledge proof that confirms you are who you claim to be without revealing what your biometric data actually looks like. Think of it like a tamper-proof envelope that says "this person is verified" without anyone being able to see what's inside.
+It creates a zero-knowledge proof that your biometric data matches an enrolled template — without revealing the underlying data to anyone. Think of it like a tamper-proof envelope that says "this person is verified" without anyone being able to see what's inside.
 
 ### The problem
 
