@@ -35,18 +35,36 @@ It creates a zero-knowledge proof that confirms you are who you claim to be with
 
 ### The problem
 
-- **Traditional systems** store your fingerprints/face scans in databases that can be hacked, misused, or accessed by governments
-- **Blockchain solutions** require internet, cost money for each verification, and often still expose data
-- **Current mobile auth** only works on your own device, can't prove identity to others
+Existing approaches to biometric identity each compromise on something:
+
+- **Centralized databases** store biometrics in servers that can be hacked, surveilled, or misused -- breaches expose millions of irrevocable biometric records
+- **Cloud-based privacy solutions** use multi-party computation to split biometric templates across nodes, but still require always-on cloud infrastructure and trust in the operators
+- **Blockchain-tied identity** requires internet, gas fees, and on-chain verification -- solving uniqueness but not privacy-preserving authentication
+- **Hardware-dependent systems** need proprietary capture devices (e.g. iris scanners), limiting deployment to controlled environments
+- **Standard mobile biometrics** only work on your own device and can't prove identity to a third party
+
+None of these combine true zero-knowledge proofs over biometric data with offline operation, selective credential disclosure, and no special hardware.
 
 ### How SABLE is different
 
-- **Complete privacy** -- your biometric data never leaves your device
-- **Selective disclosure** -- with an optional government credential, reveal only what's needed (e.g. "over 18" without your name or date of birth)
-- **Liveness detection** -- screen flash reflectance analysis prevents photo and screen attacks
-- **Works offline** -- no internet, servers, or blockchain needed for peer-to-peer verification
-- **Government verification** -- officials can certify you without accessing your biometrics
-- **Halo2 ZK proofs** -- transparent setup (no trusted ceremony), ~450ms proof generation, ~2ms verification
+| Capability | Cloud MPC | Blockchain ID | Hardware-based | SABLE |
+|-----------|-----------|---------------|----------------|-------|
+| Biometric data stays on device | Sharded across cloud | Varies | On device | **On device** |
+| True ZK proofs over biometrics | No (MPC matching) | Set membership | No | **Yes (Halo2)** |
+| Works offline / peer-to-peer | No | No | No | **Yes** |
+| No special hardware needed | Yes | No | No | **Yes** |
+| Selective credential disclosure | No | No | No | **Yes (BBS+)** |
+| No trusted setup / ceremony | N/A | Varies | N/A | **Yes** |
+| Open source | No | Partial | No | **Apache 2.0** |
+
+SABLE is the first open-source system to combine all of these:
+
+- **True zero-knowledge proofs** -- Halo2 proofs over biometric data (~450ms generation, ~2ms verification), not statistical matching on encrypted fragments
+- **Fully offline** -- peer-to-peer verification via NFC/BLE with no cloud, blockchain, or internet dependency
+- **Selective disclosure** -- optional government-issued Verifiable Credentials with BBS+ signatures let you prove predicates (e.g. "over 18") without revealing underlying data
+- **No special hardware** -- works with any smartphone camera, using screen flash liveness detection to prevent spoofing
+- **Transparent setup** -- Halo2 eliminates the trusted ceremony required by older ZK systems
+- **Open source** -- Apache 2.0 licensed, fully auditable
 
 ## Demo
 
