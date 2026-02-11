@@ -28,25 +28,148 @@
     </div>
 
     <div class="card">
-      <h3>How Zero-Knowledge Proofs Work</h3>
-      <p>
-        Imagine proving you know a password without ever showing the password itself.
-        Zero-knowledge proofs (ZKPs) make this possible for biometric data:
-      </p>
-      <ul style="margin: 1rem 0; padding-left: 1.5rem; color: var(--text-secondary);">
-        <li style="margin-bottom: 0.5rem;">
-          <strong>Enrollment:</strong> Your biometric features are hashed and committed
-          using Poseidon hash and Pedersen commitments
-        </li>
-        <li style="margin-bottom: 0.5rem;">
-          <strong>Authentication:</strong> A Halo2 proof demonstrates your live scan
-          matches the enrolled template, with screen flash liveness verification
-        </li>
-        <li style="margin-bottom: 0.5rem;">
-          <strong>Verification:</strong> The verifier learns only that you passed -
-          nothing about your actual biometrics
-        </li>
-      </ul>
+      <h3>System Architecture</h3>
+      <div class="arch-diagram">
+        <div class="arch-gov-row">
+          <div class="arch-node gov optional">
+            <div class="arch-node-icon">&#x1F3DB;&#xFE0F;</div>
+            <div class="arch-node-title">Government <span class="optional-tag">optional</span></div>
+            <div class="arch-node-items">
+              <span>Identity verification</span>
+              <span>Issue Verifiable Credential</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="arch-vert-arrow optional">
+          <div class="arch-vert-line"></div>
+          <div class="arch-vert-label">Verifiable Credential</div>
+          <div class="arch-vert-tip"></div>
+        </div>
+
+        <div class="arch-flow">
+          <div class="arch-node user">
+            <div class="arch-node-icon">&#x1F464;</div>
+            <div class="arch-node-title">You (User)</div>
+            <div class="arch-node-items">
+              <span>Camera capture</span>
+              <span>Feature extraction</span>
+              <span>Screen flash liveness</span>
+              <span>Holds biometrics locally</span>
+            </div>
+          </div>
+
+          <div class="arch-arrow">
+            <div class="arch-arrow-line"></div>
+          </div>
+
+          <div class="arch-node engine">
+            <div class="arch-node-icon">&#x1F510;</div>
+            <div class="arch-node-title">ZK Engine</div>
+            <div class="arch-node-items">
+              <span>Poseidon hash</span>
+              <span>Pedersen commit</span>
+              <span>Halo2 proof</span>
+            </div>
+          </div>
+
+          <div class="arch-arrow">
+            <div class="arch-arrow-line"></div>
+          </div>
+
+          <div class="arch-node verifier">
+            <div class="arch-node-icon">&#x2705;</div>
+            <div class="arch-node-title">Verifier</div>
+            <div class="arch-node-items">
+              <span>Proof verification</span>
+              <span>Credential check (if VC)</span>
+              <span>Pass / Fail</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="privacy-note">
+        &#x1F6E1;&#xFE0F; Biometric data never leaves you &mdash; only mathematical proofs and credentials cross the boundary
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Protocol Flow</h3>
+      <div class="swimlane">
+        <div class="swimlane-header">
+          <div></div>
+          <div class="swimlane-col-label gov-label">Government</div>
+          <div></div>
+          <div class="swimlane-col-label user-label">You (User)</div>
+          <div></div>
+          <div class="swimlane-col-label verifier-label">Verifier</div>
+        </div>
+
+        <!-- Phase 0: Issue — Optional government VC issuance -->
+        <div class="swimlane-row optional-row">
+          <div class="swim-phase phase-issue">Issue <span class="optional-tag">opt</span></div>
+          <div class="swim-action optional">
+            <div class="swim-action-title">Verify identity</div>
+            <div class="swim-action-detail">Issue Verifiable Credential binding identity to biometric commitment</div>
+          </div>
+          <div class="swim-arrow optional"><div class="swim-arrow-right"></div></div>
+          <div class="swim-action optional">
+            <div class="swim-action-title">Receive VC</div>
+            <div class="swim-action-detail">Store credential on device</div>
+          </div>
+          <div></div>
+          <div class="swim-empty"></div>
+        </div>
+
+        <!-- Phase 2: Enroll — User captures biometrics, server commits -->
+        <div class="swimlane-row">
+          <div class="swim-phase phase-enroll">Enroll</div>
+          <div class="swim-empty"></div>
+          <div></div>
+          <div class="swim-action">
+            <div class="swim-action-title">Capture face</div>
+            <div class="swim-action-detail">Extract 1024-dim embedding</div>
+          </div>
+          <div class="swim-arrow"><div class="swim-arrow-right"></div></div>
+          <div class="swim-action">
+            <div class="swim-action-title">Hash &amp; commit</div>
+            <div class="swim-action-detail">Poseidon hash + Pedersen commitment</div>
+          </div>
+        </div>
+
+        <!-- Phase 3: Auth — User captures + liveness, ZK proof generated -->
+        <div class="swimlane-row">
+          <div class="swim-phase phase-auth">Auth</div>
+          <div class="swim-empty"></div>
+          <div></div>
+          <div class="swim-action">
+            <div class="swim-action-title">Capture + flash</div>
+            <div class="swim-action-detail">Screen flash liveness detection</div>
+          </div>
+          <div class="swim-arrow"><div class="swim-arrow-right"></div></div>
+          <div class="swim-action">
+            <div class="swim-action-title">Generate ZK proof</div>
+            <div class="swim-action-detail">Halo2 proof in ~450ms, 2KB</div>
+          </div>
+        </div>
+
+        <!-- Phase 4: Verify — Verifier checks proof + credential -->
+        <div class="swimlane-row">
+          <div class="swim-phase phase-verify">Verify</div>
+          <div class="swim-empty"></div>
+          <div></div>
+          <div class="swim-action">
+            <div class="swim-action-title">Receive result</div>
+            <div class="swim-action-detail">Pass/fail only &mdash; no biometrics</div>
+          </div>
+          <div class="swim-arrow"><div class="swim-arrow-left"></div></div>
+          <div class="swim-action">
+            <div class="swim-action-title">Verify proof</div>
+            <div class="swim-action-detail">~2ms BN254 verification (+ VC check if issued)</div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="card">
@@ -9900,4 +10023,4 @@ lBhEMohlFerLlBjEMohMVTEARDKCITsAk2AEgAAAkAAAAAAAAAAAAAAAAAAAAAAAASAAAAAAAAD/
     transition: opacity 0.2s ease-out;
     pointer-events: none;
   `,e}function _f(e){return new Promise(t=>setTimeout(t,e))}const Z={currentStep:"home",completedSteps:new Set,isLoading:!1,error:null,enrollmentPhase:"capture",enrollCapturedFace:null,enrollWebcamError:null,sessionId:null,enrollResult:null,authPhase:"ready",authCapturedFace:null,authWebcamError:null,challenge:null,proof:null,livenessResult:null,verifyResult:null};function gt(){const e=document.getElementById("app");if(!e)return;let t="";switch(Z.currentStep!=="home"&&(t+=wS(Z.currentStep,Z.completedSteps)),Z.currentStep){case"home":t+=SS();break;case"enrollment":t+=S2e(Z.enrollmentPhase,Z.isLoading,Z.enrollCapturedFace,Z.enrollResult,Z.error,Z.enrollWebcamError);break;case"authentication":t+=_2e(Z.authPhase,Z.isLoading,Z.challenge,Z.authCapturedFace,Z.proof,Z.error,Z.authWebcamError);break;case"verification":t+=D2e(Z.proof,Z.isLoading,Z.verifyResult,Z.error);break}switch(e.innerHTML=t,Z.currentStep!=="home"&&kS(ac),Z.currentStep){case"home":IS(()=>ac("enrollment"));break;case"enrollment":T2e(U2e,G2e,j2e,()=>ac("authentication"),H2e,Z.enrollCapturedFace),Z.enrollmentPhase==="capture"&&!Z.enrollResult&&!Z.enrollWebcamError&&V2e();break;case"authentication":M2e(q2e,K2e,Y2e,J2e,()=>ac("verification"),Z2e,Z.authCapturedFace),Z.authPhase==="capturing"&&!Z.authCapturedFace&&!Z.authWebcamError&&X2e(),Z.authPhase==="liveness"&&Q2e();break;case"verification":z2e(age,nge);break}}function ac(e){Z.currentStep==="enrollment"?tg():Z.currentStep==="authentication"&&ag(),Z.currentStep=e,Z.error=null,e==="enrollment"&&!Z.enrollResult&&(Z.enrollmentPhase="capture",Z.enrollCapturedFace=null,Z.enrollWebcamError=null),e==="authentication"&&!Z.proof&&(Z.authPhase="ready",Z.authCapturedFace=null,Z.authWebcamError=null),gt()}async function V2e(){try{await R2e()}catch(e){Z.enrollWebcamError=e instanceof Error?e.message:"Camera access failed",gt()}}function U2e(){const e=E2e();e&&(Z.enrollCapturedFace=e,Z.enrollmentPhase="preview",tg(),gt())}function G2e(){Z.enrollCapturedFace=null,Z.enrollmentPhase="capture",Z.enrollWebcamError=null,gt()}function H2e(){Z.enrollWebcamError=null,Z.enrollmentPhase="capture",gt()}async function j2e(e){Z.isLoading=!0,Z.error=null,gt();try{const t=await Nl.enroll({user_id:"webcam-user",face_embedding:e.embedding});Z.enrollResult=t,Z.sessionId=t.session_id,Z.enrollmentPhase="success",Z.completedSteps.add("enrollment")}catch(t){Z.error=t instanceof Error?t.message:"Enrollment failed"}finally{Z.isLoading=!1,gt()}}async function q2e(){if(!Z.sessionId){Z.error="No active session. Please enroll first.",gt();return}Z.isLoading=!0,Z.error=null,Z.authPhase="challenge",gt();try{const e=await Nl.getChallenge({session_id:Z.sessionId});Z.challenge=e,Z.isLoading=!1,Z.authPhase="capturing",gt()}catch(e){Z.error=e instanceof Error?e.message:"Failed to get challenge",Z.authPhase="ready",Z.isLoading=!1,gt()}}async function X2e(){try{await P2e()}catch(e){Z.authWebcamError=e instanceof Error?e.message:"Camera access failed",gt()}}function K2e(){const e=O2e();e&&(Z.authCapturedFace=e,ag(),gt())}function Y2e(){Z.authCapturedFace=null,Z.authWebcamError=null,Z.error=null,gt()}function Z2e(){Z.authWebcamError=null,gt()}async function J2e(e){if(!Z.challenge){Z.error="No challenge available",gt();return}Z.isLoading=!0,Z.error=null,Z.authPhase="liveness",Z.authCapturedFace=e,gt()}let $f=!1;async function Q2e(){if(!$f){$f=!0;try{const e=document.getElementById("liveness-video");if(!e)throw new Error("Liveness video element not found");tc("Opening camera for liveness check...");const t=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:640},height:{ideal:480},facingMode:"user"},audio:!1});e.srcObject=t,await e.play(),await new Promise(r=>{e.readyState>=2?r():e.onloadeddata=()=>r()}),await Um(300),tc("Performing screen flash...");const a=await W2e(e);t.getTracks().forEach(r=>r.stop()),e.srcObject=null,tc("Analyzing reflectance patterns...");const n=await Nl.checkLiveness({session_id:Z.sessionId,baseline_image:a.baselineDataUrl,flash_image:a.flashDataUrl});Z.livenessResult=n,n.passed?(tc("Liveness check passed!"),await Um(500),await ege()):(Z.error="Liveness check failed. Please ensure good lighting and try again.",Z.authCapturedFace=null,Z.authPhase="capturing",Z.isLoading=!1,gt())}catch(e){Z.error=e instanceof Error?e.message:"Liveness check failed",Z.authCapturedFace=null,Z.authPhase="capturing",Z.isLoading=!1,gt()}finally{$f=!1}}}async function ege(){if(!Z.challenge||!Z.authCapturedFace){Z.error="Missing challenge or face data",Z.authPhase="capturing",Z.isLoading=!1,gt();return}Z.authPhase="proving",gt();try{await tge();const e=await Nl.prove({challenge_id:Z.challenge.challenge_id,face_embedding:Z.authCapturedFace.embedding});Z.proof=e,Z.authPhase="complete",Z.completedSteps.add("authentication")}catch(e){Z.error=e instanceof Error?e.message:"Proof generation failed",Z.authPhase="capturing"}finally{Z.isLoading=!1,gt()}}async function tge(){const e=[{percent:10,status:"Processing face embedding..."},{percent:25,status:"Converting to ZK features..."},{percent:40,status:"Computing Poseidon hash..."},{percent:55,status:"Building Halo2 circuit..."},{percent:70,status:"Generating witness..."},{percent:85,status:"Computing proof..."},{percent:95,status:"Finalizing..."}];for(const t of e)F2e(t.percent,t.status),await Um(120)}async function age(){if(!Z.proof){Z.error="No proof available. Please authenticate first.",gt();return}Z.isLoading=!0,Z.error=null,gt();try{const e=await Nl.verify({proof_hex:Z.proof.proof_hex,public_inputs_hex:Z.proof.public_inputs_hex,session_id:Z.sessionId??void 0});Z.verifyResult=e,Z.completedSteps.add("verification")}catch(e){Z.error=e instanceof Error?e.message:"Verification failed"}finally{Z.isLoading=!1,gt()}}function nge(){tg(),ag(),Z.currentStep="home",Z.completedSteps.clear(),Z.isLoading=!1,Z.error=null,Z.enrollmentPhase="capture",Z.enrollCapturedFace=null,Z.enrollWebcamError=null,Z.sessionId=null,Z.enrollResult=null,Z.authPhase="ready",Z.authCapturedFace=null,Z.authWebcamError=null,Z.challenge=null,Z.proof=null,Z.livenessResult=null,Z.verifyResult=null,gt()}function Um(e){return new Promise(t=>setTimeout(t,e))}document.addEventListener("DOMContentLoaded",()=>{Nl.health().then(()=>{console.log("SABLE Demo API connected")}).catch(e=>{console.warn("API not available:",e.message)}),gt()});
-//# sourceMappingURL=index-0rWehZaP.js.map
+//# sourceMappingURL=index-93Wucwdb.js.map
