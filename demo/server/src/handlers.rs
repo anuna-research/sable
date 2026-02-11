@@ -665,8 +665,22 @@ pub async fn screen_flash_check(
         )
     })?;
 
-    // Run screen flash extractor
-    let extractor = ScreenFlashExtractor::new();
+    // ---- Ratio-Laplacian smoothness check ----
+    // The key physics: a photo on a screen has HIGH-FREQUENCY variation in the
+    // reflectance ratio because the displayed image modulates the baseline
+    // denominator. A real 3D face produces only SMOOTH, LOW-FREQUENCY ratio
+    // variation from geometry. We detect this by computing the Laplacian (2nd
+    // derivative) of the ratio map — high energy = photo attack.
+    let smoothness = check_ratio_smoothness(&baseline_img, &flash_img);
+
+    tracing::info!(
+        "Ratio smoothness: laplacian_energy={:.6}, mean_ratio={:.4}, passed={}",
+        smoothness.laplacian_energy, smoothness.mean_ratio, smoothness.passed
+    );
+
+    // Run screen flash extractor with high-security thresholds
+    let thresholds = ScreenFlashThresholds::high_security();
+    let extractor = ScreenFlashExtractor::with_thresholds(thresholds).unwrap();
     let signals = extractor
         .extract_signals(&baseline_img, &flash_img)
         .map_err(|e| {
@@ -678,8 +692,10 @@ pub async fn screen_flash_check(
             )
         })?;
 
-    let thresholds = ScreenFlashThresholds::default();
-    let passed = signals.passes_thresholds(&thresholds);
+    let reflectance_passed = signals.passes_thresholds(&thresholds);
+
+    // Both checks must pass: reflectance signals AND ratio smoothness
+    let passed = reflectance_passed && smoothness.passed;
 
     let timing = start.elapsed();
 
@@ -690,8 +706,10 @@ pub async fn screen_flash_check(
     let consistency_f = signals.channel_consistency as f64 / 65535.0;
 
     tracing::info!(
-        "Liveness check: passed={}, variance={:.4}, gradient={:.4}, softness={:.4}, consistency={:.4}, time={:.2}ms",
-        passed, variance_f, gradient_f, softness_f, consistency_f,
+        "Liveness check: passed={} (reflectance={}, smoothness={}), variance={:.4}, gradient={:.4}, softness={:.4}, consistency={:.4}, laplacian={:.6}, time={:.2}ms",
+        passed, reflectance_passed, smoothness.passed,
+        variance_f, gradient_f, softness_f, consistency_f,
+        smoothness.laplacian_energy,
         timing.as_secs_f64() * 1000.0
     );
 
@@ -718,6 +736,131 @@ pub async fn screen_flash_check(
         },
         timing_ms: timing.as_secs_f64() * 1000.0,
     }))
+}
+
+/// Result of ratio-Laplacian smoothness check.
+struct RatioSmoothnessCheck {
+    /// Mean squared Laplacian of the reflectance ratio map.
+    /// Low = smooth ratio variation (real 3D face).
+    /// High = high-frequency ratio variation (photo on screen).
+    laplacian_energy: f64,
+    /// Mean ratio across the image (sanity check that flash had effect).
+    mean_ratio: f64,
+    /// Whether the check passed.
+    passed: bool,
+}
+
+/// Detect photo-on-screen attacks using the Laplacian of the reflectance ratio.
+///
+/// Physics: ratio = flash_pixel / baseline_pixel.
+///
+/// For a REAL face: both baseline (ambient) and flash vary smoothly with 3D
+/// geometry, so the ratio varies smoothly → low Laplacian energy.
+///
+/// For a PHOTO on a screen: the baseline contains the displayed photo's
+/// high-frequency content (edges, textures). The flash adds a relatively
+/// uniform specular/ambient contribution. So ratio = (emission + flash) /
+/// emission = 1 + flash/emission. Since emission varies at the photo's spatial
+/// frequency, the ratio inherits that high-frequency structure → high
+/// Laplacian energy.
+///
+/// This is the fundamental physical distinction that cannot be spoofed by
+/// simply displaying a face photo.
+fn check_ratio_smoothness(baseline: &PalmImage, flash: &PalmImage) -> RatioSmoothnessCheck {
+    let w = baseline.width as usize;
+    let h = baseline.height as usize;
+
+    // Minimum baseline intensity to avoid dark-pixel amplification
+    let min_intensity: f64 = 15.0;
+
+    // Block size for downsampling — suppresses sensor noise and JPEG artifacts
+    // while preserving spatial structure. 8×8 blocks on 640×480 → 80×60 grid.
+    let block = 8usize;
+    let dw = w / block;
+    let dh = h / block;
+
+    if dw < 3 || dh < 3 {
+        return RatioSmoothnessCheck {
+            laplacian_energy: 0.0,
+            mean_ratio: 1.0,
+            passed: false,
+        };
+    }
+
+    // 1. Compute block-averaged luminance ratio map (downsampled)
+    let mut ratio_map: Vec<f64> = Vec::with_capacity(dw * dh);
+    let mut total_ratio = 0.0;
+
+    for by in 0..dh {
+        for bx in 0..dw {
+            let mut b_sum = 0.0;
+            let mut f_sum = 0.0;
+            let mut pix_count = 0.0;
+
+            for dy in 0..block {
+                for dx in 0..block {
+                    let px = bx * block + dx;
+                    let py = by * block + dy;
+                    if px < w && py < h {
+                        let idx = (py * w + px) * 3;
+                        b_sum += (baseline.data[idx] as f64
+                            + baseline.data[idx + 1] as f64
+                            + baseline.data[idx + 2] as f64)
+                            / 3.0;
+                        f_sum += (flash.data[idx] as f64
+                            + flash.data[idx + 1] as f64
+                            + flash.data[idx + 2] as f64)
+                            / 3.0;
+                        pix_count += 1.0;
+                    }
+                }
+            }
+
+            let b_avg = (b_sum / pix_count).max(min_intensity);
+            let f_avg = f_sum / pix_count;
+            let ratio = (f_avg / b_avg).clamp(0.3, 4.0);
+            ratio_map.push(ratio);
+            total_ratio += ratio;
+        }
+    }
+
+    let mean_ratio = total_ratio / ratio_map.len() as f64;
+
+    // 2. Compute discrete Laplacian energy on the downsampled ratio map
+    let mut laplacian_sum_sq = 0.0;
+    let mut count = 0u64;
+
+    for y in 1..(dh - 1) {
+        for x in 1..(dw - 1) {
+            let idx = y * dw + x;
+            let lap = ratio_map[idx - 1]
+                + ratio_map[idx + 1]
+                + ratio_map[idx - dw]
+                + ratio_map[idx + dw]
+                - 4.0 * ratio_map[idx];
+            laplacian_sum_sq += lap * lap;
+            count += 1;
+        }
+    }
+
+    let laplacian_energy = if count > 0 {
+        laplacian_sum_sq / count as f64
+    } else {
+        0.0
+    };
+
+    // After 8×8 block averaging, sensor noise is suppressed ~64× in variance.
+    // Structural patterns (photo edges/textures) persist at the block scale.
+    // Real face: smooth ratio → very low Laplacian energy
+    // Photo attack: ratio inherits photo structure → higher Laplacian energy
+    // Threshold tuned from empirical observations.
+    let passed = laplacian_energy < 0.35 && mean_ratio > 0.95;
+
+    RatioSmoothnessCheck {
+        laplacian_energy,
+        mean_ratio,
+        passed,
+    }
 }
 
 /// Decode a base64-encoded JPEG image (with optional data URL prefix) to a PalmImage

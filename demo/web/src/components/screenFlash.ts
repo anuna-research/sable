@@ -8,10 +8,10 @@ export interface ScreenFlashCapture {
 }
 
 /** Duration of the screen flash in milliseconds */
-const FLASH_DURATION_MS = 400;
+const FLASH_DURATION_MS = 500;
 
-/** Delay before capturing flash frame (let camera adjust) */
-const FLASH_SETTLE_MS = 150;
+/** Delay before capturing flash frame (let camera auto-exposure settle) */
+const FLASH_SETTLE_MS = 350;
 
 /**
  * Perform screen flash liveness capture using a running video stream.

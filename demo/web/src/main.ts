@@ -323,6 +323,7 @@ function handleAuthCapture(): void {
 function handleAuthRetake(): void {
   state.authCapturedFace = null;
   state.authWebcamError = null;
+  state.error = null;
   render();
 }
 
@@ -411,14 +412,16 @@ async function runLivenessCheck(): Promise<void> {
       // Proceed to proof generation
       await generateProof();
     } else {
-      // Liveness failed - let user retry
+      // Liveness failed - clear captured face so webcam reopens for retry
       state.error = 'Liveness check failed. Please ensure good lighting and try again.';
+      state.authCapturedFace = null;
       state.authPhase = 'capturing';
       state.isLoading = false;
       render();
     }
   } catch (err) {
     state.error = err instanceof Error ? err.message : 'Liveness check failed';
+    state.authCapturedFace = null;
     state.authPhase = 'capturing';
     state.isLoading = false;
     render();
