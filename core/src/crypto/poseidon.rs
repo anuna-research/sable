@@ -434,7 +434,6 @@ pub fn simd_enabled() -> bool {
 struct PoseidonHash {
     state: [Fr; 9],
     rate: usize,
-    capacity: usize,
     full_rounds: usize,
     partial_rounds: usize,
 }
@@ -445,7 +444,6 @@ impl PoseidonHash {
         Self {
             state: [Fr::ZERO; 9],
             rate: 8,
-            capacity: 1,
             full_rounds: 8,
             partial_rounds: 56,
         }
@@ -501,11 +499,6 @@ impl PoseidonHash {
     }
     
     /// S-box function: x^5
-    fn sbox(&self, x: Fr) -> Fr {
-        Self::sbox_static(x)
-    }
-    
-    /// Static S-box function: x^5
     fn sbox_static(x: Fr) -> Fr {
         let x2 = x.square();
         let x4 = x2.square();

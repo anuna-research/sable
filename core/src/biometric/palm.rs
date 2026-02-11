@@ -245,18 +245,6 @@ impl PalmProcessor {
 
 /// Convenience functions for common palm biometric operations
 impl PalmProcessor {
-    /// Quick feature extraction from image file path (requires image loading)
-    #[cfg(feature = "image-loading")]
-    pub fn extract_from_file<P: AsRef<std::path::Path>>(
-        &self,
-        _path: P,
-    ) -> Result<Vec<BiometricFeature>> {
-        // This would require image loading dependencies
-        // Placeholder for now
-        // REQ-005: Generic error message - doesn't reveal implementation details
-        Err(SableError::Cryptographic("Feature not available".into()))
-    }
-
     /// Save biometric template to secure storage
     #[cfg(feature = "mobile")]
     pub fn save_template<P: AsRef<std::path::Path>>(

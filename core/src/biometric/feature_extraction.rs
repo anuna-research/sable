@@ -666,39 +666,6 @@ fn calculate_image_completeness(image: &PalmImage) -> f64 {
     (valid_count as f64 / image.data.len() as f64).clamp(0.0, 1.0)
 }
 
-/// Calculate SNR from Gabor filter responses
-fn calculate_snr_from_responses(responses: &[Vec<f64>]) -> f64 {
-    if responses.is_empty() {
-        return 0.5;
-    }
-
-    let mut total_signal = 0.0;
-    let mut total_noise = 0.0;
-
-    for response in responses {
-        if response.is_empty() {
-            continue;
-        }
-
-        let mean: f64 = response.iter().sum::<f64>() / response.len() as f64;
-        let variance: f64 = response.iter()
-            .map(|&x| (x - mean).powi(2))
-            .sum::<f64>() / response.len() as f64;
-
-        // Signal is the absolute mean response, noise is the standard deviation
-        total_signal += mean.abs();
-        total_noise += variance.sqrt();
-    }
-
-    if total_noise < 1e-10 {
-        return 1.0; // Perfect signal with no noise
-    }
-
-    // Normalize SNR to [0, 1] range using tanh
-    let snr_ratio = total_signal / total_noise;
-    (snr_ratio / 10.0).tanh() // Scale factor of 10 based on typical SNR values
-}
-
 /// Calculate contrast from image histogram
 fn calculate_contrast_from_image(image: &PalmImage) -> f64 {
     if image.data.is_empty() {

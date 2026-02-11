@@ -52,9 +52,6 @@ const QUANT_MIN: f64 = -1.0;
 /// Quantization range maximum (maps to 255).
 const QUANT_MAX: f64 = 1.0;
 
-/// Quantization scale factor.
-const QUANT_SCALE: f64 = 127.5;
-
 /// Feature quantizer for converting f64 embeddings to u8 bytes.
 ///
 /// Implements CON-003 from SPEC-001.

@@ -348,7 +348,7 @@ impl NirLivenessExtractor {
     fn validate_frames(&self, frames: &[PalmImage; 3]) -> Result<()> {
         let (w, h, c) = (frames[0].width, frames[0].height, frames[0].channels);
 
-        for (i, frame) in frames.iter().enumerate().skip(1) {
+        for (_i, frame) in frames.iter().enumerate().skip(1) {
             if frame.width != w || frame.height != h || frame.channels != c {
                 // REQ-005: Generic error, doesn't reveal which frame or dimensions
                 return Err(SableError::InvalidInput(
