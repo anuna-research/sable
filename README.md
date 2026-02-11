@@ -8,6 +8,8 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Rust](https://img.shields.io/badge/rust-nightly-brightgreen.svg)](https://www.rust-lang.org)
+[![Coverage](https://img.shields.io/badge/coverage-89%25-brightgreen.svg)](https://codeberg.org/anuna/sable)
+[![Tests](https://img.shields.io/badge/tests-484%20passing-brightgreen.svg)](https://codeberg.org/anuna/sable)
 [![Mobile](https://img.shields.io/badge/platform-Android%20%7C%20iOS-lightgrey.svg)](https://codeberg.org/anuna/sable)
 
 </div>
