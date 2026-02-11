@@ -1,0 +1,164 @@
+; SPEC-001-A: Screen Flash Reflectance Ratio Check
+; RGB controlled-illumination liveness analysis (Tang et al., NDSS 2018)
+
+; =============================================================================
+; AGENTS
+; =============================================================================
+
+(given agent-engineer-available)
+
+; =============================================================================
+; PHASE 1: FOUNDATION
+; Goal: Define types and reflectance computation
+; =============================================================================
+
+(given task-define-types)
+(meta task-define-types
+  (title "Define Types and Threshold Constants")
+  (description "Define ScreenFlashThresholds, ScreenFlashSignals, ScreenFlashWitness, ScreenFlashExtractor structs with u16 fixed-point thresholds")
+  (phase "phase-1-foundation")
+  (implements "REQ-062, REQ-068")
+  (estimate "1h")
+  (spec-ref "SPEC-001-A"))
+
+(given task-reflectance-computation)
+(meta task-reflectance-computation
+  (title "Implement Reflectance Ratio Computation")
+  (description "Per-pixel reflectance map: flash/baseline ratio normalized by anchor region")
+  (phase "phase-1-foundation")
+  (estimate "1h")
+  (spec-ref "SPEC-001-A"))
+
+; =============================================================================
+; PHASE 2: SIGNALS
+; Goal: Implement 4 signal extraction methods + validation
+; =============================================================================
+
+(given task-signal-extraction)
+(meta task-signal-extraction
+  (title "Implement Signal Extraction")
+  (description "4 signals: reflectance variance, gradient score, highlight softness, channel consistency")
+  (phase "phase-2-signals")
+  (implements "REQ-062")
+  (estimate "2h")
+  (spec-ref "SPEC-001-A"))
+
+(given task-threshold-validation)
+(meta task-threshold-validation
+  (title "Implement Threshold Validation and Witness Conversion")
+  (description "passes_thresholds() with 3 min + 1 max check; to_circuit_witness() u16->u64 widening")
+  (phase "phase-2-signals")
+  (implements "REQ-005")
+  (estimate "30min")
+  (spec-ref "SPEC-001-A"))
+
+; =============================================================================
+; PHASE 3: INTEGRATION
+; Goal: Tests and module registration
+; =============================================================================
+
+(given task-unit-tests)
+(meta task-unit-tests
+  (title "Write Unit Tests")
+  (description "Tests for thresholds, input validation, real skin simulation, attack detection, zeroize, witness conversion")
+  (phase "phase-3-integration")
+  (estimate "2h")
+  (spec-ref "SPEC-001-A"))
+
+(given task-register-module)
+(meta task-register-module
+  (title "Register Module in mod.rs")
+  (description "Add pub mod screen_flash to core/src/biometric/mod.rs")
+  (phase "phase-3-integration")
+  (estimate "10min")
+  (spec-ref "SPEC-001-A"))
+
+(given task-compile-verify)
+(meta task-compile-verify
+  (title "Compile and Verify")
+  (description "cargo check and cargo test pass cleanly")
+  (phase "phase-3-integration")
+  (estimate "30min")
+  (spec-ref "SPEC-001-A"))
+
+; =============================================================================
+; READINESS RULES
+; =============================================================================
+
+(given no-deps-define-types)
+
+(normally r-ready-types
+  (and task-define-types no-deps-define-types)
+  ready-define-types)
+
+(normally r-ready-reflectance
+  (and task-reflectance-computation completed-define-types)
+  ready-reflectance-computation)
+
+(normally r-phase1-complete
+  (and completed-define-types completed-reflectance-computation)
+  completed-phase1)
+
+(normally r-ready-signals
+  (and task-signal-extraction completed-phase1)
+  ready-signal-extraction)
+
+(normally r-ready-validation
+  (and task-threshold-validation completed-signal-extraction)
+  ready-threshold-validation)
+
+(normally r-phase2-complete
+  (and completed-signal-extraction completed-threshold-validation)
+  completed-phase2)
+
+(normally r-ready-tests
+  (and task-unit-tests completed-phase2)
+  ready-unit-tests)
+
+(normally r-ready-register
+  (and task-register-module completed-phase2)
+  ready-register-module)
+
+(normally r-ready-compile
+  (and task-compile-verify completed-unit-tests completed-register-module)
+  ready-compile-verify)
+
+(normally r-phase3-complete
+  (and completed-unit-tests completed-register-module completed-compile-verify)
+  completed-phase3)
+
+(normally r-project-complete
+  completed-phase3
+  project-complete)
+
+; =============================================================================
+; ASSIGNMENT RULES
+; =============================================================================
+
+(normally r-assign-types
+  (and ready-define-types agent-engineer-available)
+  assign-to-define-types-engineer)
+
+(normally r-assign-reflectance
+  (and ready-reflectance-computation agent-engineer-available)
+  assign-to-reflectance-computation-engineer)
+
+(normally r-assign-signals
+  (and ready-signal-extraction agent-engineer-available)
+  assign-to-signal-extraction-engineer)
+
+(normally r-assign-validation
+  (and ready-threshold-validation agent-engineer-available)
+  assign-to-threshold-validation-engineer)
+
+(normally r-assign-tests
+  (and ready-unit-tests agent-engineer-available)
+  assign-to-unit-tests-engineer)
+
+(normally r-assign-register
+  (and ready-register-module agent-engineer-available)
+  assign-to-register-module-engineer)
+
+(normally r-assign-compile
+  (and ready-compile-verify agent-engineer-available)
+  assign-to-compile-verify-engineer)

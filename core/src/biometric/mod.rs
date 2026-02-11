@@ -65,6 +65,8 @@ pub mod constant_time;
 pub mod thresholds;
 /// NIR liveness detection for presentation attack resistance (REQ-020).
 pub mod liveness;
+/// Screen flash reflectance analysis for controlled-illumination liveness (REQ-062).
+pub mod screen_flash;
 
 use crate::types::BiometricFeature;
 use crate::error::{Result, SableError};
