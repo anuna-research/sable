@@ -1,0 +1,266 @@
+; SABLE Demo: Working End-to-End with Liveness Detection
+; Get the demo server + web frontend running with screen flash liveness checks
+
+; =============================================================================
+; AGENTS
+; =============================================================================
+
+(given agent-claude-available)
+
+; =============================================================================
+; PHASE 1: BUILD VERIFICATION
+; Goal: Confirm demo compiles and runs end-to-end
+; =============================================================================
+
+(given task-build-backend)
+(meta task-build-backend
+  (title "Build and verify demo server compiles")
+  (description "Run rustup run nightly cargo build --release -p demo-server. Fix any compilation errors. Ensure SRS file exists at core/params/kzg_bn254_10.srs.")
+  (phase "phase-1-build")
+  (estimate "15min"))
+
+(given task-build-frontend)
+(meta task-build-frontend
+  (title "Build web frontend")
+  (description "Run npm install && npm run build in demo/web/. Fix any TypeScript errors.")
+  (phase "phase-1-build")
+  (estimate "10min"))
+
+(given task-verify-e2e)
+(meta task-verify-e2e
+  (title "Verify end-to-end flow works")
+  (description "Start backend and frontend. Confirm health endpoint responds. Test enroll/auth/verify flow if possible or inspect for obvious runtime issues.")
+  (phase "phase-1-build")
+  (estimate "15min"))
+
+; =============================================================================
+; PHASE 2: BACKEND LIVENESS ENDPOINT
+; Goal: Add image decoding + screen flash liveness endpoint to demo server
+; =============================================================================
+
+(given task-add-image-dep)
+(meta task-add-image-dep
+  (title "Add image crate dependency to demo server")
+  (description "Add image = '0.25' to demo/server/Cargo.toml for JPEG/PNG decoding of webcam frames.")
+  (phase "phase-2-backend")
+  (estimate "5min"))
+
+(given task-liveness-handler)
+(meta task-liveness-handler
+  (title "Implement screen flash liveness endpoint")
+  (description "Add POST /api/liveness/screen-flash handler in handlers.rs. Accepts JSON with baseline_image and flash_image as base64-encoded JPEG. Decodes to raw RGB pixels, constructs PalmImage, calls ScreenFlashExtractor::extract_signals() and validate_signals(). Returns pass/fail + signal values + timing.")
+  (phase "phase-2-backend")
+  (estimate "45min")
+  (files "demo/server/src/handlers.rs, demo/server/src/main.rs"))
+
+(given task-integrate-liveness-prove)
+(meta task-integrate-liveness-prove
+  (title "Integrate liveness result into prove response")
+  (description "Add liveness_passed field to ProveRequest and ProveResponse. Store liveness result in session state. Include liveness check in what_was_proven list. Update VerificationDetails.liveness_check_passed to reflect actual liveness result instead of hardcoded true.")
+  (phase "phase-2-backend")
+  (estimate "30min")
+  (files "demo/server/src/handlers.rs, demo/server/src/state.rs"))
+
+; =============================================================================
+; PHASE 3: FRONTEND LIVENESS FLOW
+; Goal: Add screen flash capture UI + liveness API integration
+; =============================================================================
+
+(given task-enable-antispoof)
+(meta task-enable-antispoof
+  (title "Enable Human.js antispoof module")
+  (description "Set antispoof.enabled=true in faceEmbedding.ts config. Add antispoof score to FaceDetectionResult. Display antispoof score in enrollment and auth screens as a client-side liveness indicator.")
+  (phase "phase-3-frontend")
+  (estimate "20min")
+  (files "demo/web/src/components/faceEmbedding.ts, demo/web/src/components/webcam.ts"))
+
+(given task-liveness-api)
+(meta task-liveness-api
+  (title "Add liveness API client function")
+  (description "Add LivenessRequest/LivenessResponse types and api.screenFlashLiveness() method to api.ts. Sends baseline_image + flash_image as base64 strings.")
+  (phase "phase-3-frontend")
+  (estimate "15min")
+  (files "demo/web/src/api.ts"))
+
+(given task-screen-flash-capture)
+(meta task-screen-flash-capture
+  (title "Implement screen flash capture component")
+  (description "Create demo/web/src/components/screenFlash.ts. Implements the screen flash capture sequence: (1) capture baseline frame from webcam, (2) overlay full-screen bright white div, (3) wait 200ms for exposure adjustment, (4) capture flash frame, (5) remove overlay. Extract raw frame data from canvas as base64 JPEG. Return both frames.")
+  (phase "phase-3-frontend")
+  (estimate "45min")
+  (files "demo/web/src/components/screenFlash.ts"))
+
+(given task-auth-liveness-phase)
+(meta task-auth-liveness-phase
+  (title "Add liveness check phase to authentication flow")
+  (description "Insert a 'liveness' phase between face capture and proof generation in the authentication screen. After user confirms face capture, automatically run screen flash sequence, call /api/liveness/screen-flash, display results (pass/fail + signal details). Add 'liveness' to AuthPhase type. Update main.ts state and handlers. Pass liveness_passed to prove request.")
+  (phase "phase-3-frontend")
+  (estimate "1h")
+  (files "demo/web/src/screens/authentication.ts, demo/web/src/main.ts"))
+
+(given task-update-verify-display)
+(meta task-update-verify-display
+  (title "Update verification screen to show liveness results")
+  (description "Show liveness check status in verification details alongside existing checks. Update the what_was_proven display to include liveness claim. Ensure liveness_check_passed reflects actual server-side check.")
+  (phase "phase-3-frontend")
+  (estimate "20min")
+  (files "demo/web/src/screens/verification.ts"))
+
+; =============================================================================
+; PHASE 4: POLISH AND VERIFY
+; Goal: End-to-end testing and fix-up
+; =============================================================================
+
+(given task-e2e-test)
+(meta task-e2e-test
+  (title "End-to-end test of complete flow")
+  (description "Run the full demo: enroll -> authenticate with liveness -> verify. Confirm screen flash fires, liveness endpoint responds, results display correctly. Fix any issues found.")
+  (phase "phase-4-polish")
+  (estimate "30min"))
+
+(given task-update-home-screen)
+(meta task-update-home-screen
+  (title "Update home screen and auth explanation text")
+  (description "Update home screen building blocks to mention Halo2 instead of Groth16. Update auth screen explanation to describe Halo2 circuit and liveness check step. Fix proof size text from 192-byte Groth16 to ~2KB Halo2.")
+  (phase "phase-4-polish")
+  (estimate "15min")
+  (files "demo/web/src/screens/home.ts, demo/web/src/screens/authentication.ts"))
+
+; =============================================================================
+; READINESS RULES
+; =============================================================================
+
+; Phase 1: Build verification (backend and frontend can build in parallel)
+(given no-deps-build-backend)
+(given no-deps-build-frontend)
+
+(normally r-ready-build-backend
+  (and task-build-backend no-deps-build-backend)
+  ready-build-backend)
+
+(normally r-ready-build-frontend
+  (and task-build-frontend no-deps-build-frontend)
+  ready-build-frontend)
+
+(normally r-ready-verify-e2e
+  (and task-verify-e2e completed-build-backend completed-build-frontend)
+  ready-verify-e2e)
+
+(normally r-phase1-complete
+  (and completed-build-backend completed-build-frontend completed-verify-e2e)
+  completed-phase1)
+
+; Phase 2: Backend liveness (sequential chain)
+(normally r-ready-add-image-dep
+  (and task-add-image-dep completed-phase1)
+  ready-add-image-dep)
+
+(normally r-ready-liveness-handler
+  (and task-liveness-handler completed-add-image-dep)
+  ready-liveness-handler)
+
+(normally r-ready-integrate-prove
+  (and task-integrate-liveness-prove completed-liveness-handler)
+  ready-integrate-liveness-prove)
+
+(normally r-phase2-complete
+  (and completed-add-image-dep completed-liveness-handler completed-integrate-liveness-prove)
+  completed-phase2)
+
+; Phase 3: Frontend liveness (some parallelism possible)
+(normally r-ready-enable-antispoof
+  (and task-enable-antispoof completed-phase1)
+  ready-enable-antispoof)
+
+(normally r-ready-liveness-api
+  (and task-liveness-api completed-phase2)
+  ready-liveness-api)
+
+(normally r-ready-screen-flash-capture
+  (and task-screen-flash-capture completed-phase1)
+  ready-screen-flash-capture)
+
+(normally r-ready-auth-liveness-phase
+  (and task-auth-liveness-phase completed-liveness-api completed-screen-flash-capture completed-enable-antispoof)
+  ready-auth-liveness-phase)
+
+(normally r-ready-update-verify
+  (and task-update-verify-display completed-auth-liveness-phase)
+  ready-update-verify-display)
+
+(normally r-phase3-complete
+  (and completed-enable-antispoof completed-liveness-api completed-screen-flash-capture completed-auth-liveness-phase completed-update-verify-display)
+  completed-phase3)
+
+; Phase 4: Polish
+(normally r-ready-e2e-test
+  (and task-e2e-test completed-phase2 completed-phase3)
+  ready-e2e-test)
+
+(normally r-ready-update-home
+  (and task-update-home-screen completed-phase3)
+  ready-update-home-screen)
+
+(normally r-phase4-complete
+  (and completed-e2e-test completed-update-home-screen)
+  completed-phase4)
+
+(normally r-project-complete
+  completed-phase4
+  project-complete)
+
+; =============================================================================
+; ASSIGNMENT RULES
+; =============================================================================
+
+(normally r-assign-build-backend
+  (and ready-build-backend agent-claude-available)
+  assign-to-build-backend-claude)
+
+(normally r-assign-build-frontend
+  (and ready-build-frontend agent-claude-available)
+  assign-to-build-frontend-claude)
+
+(normally r-assign-verify-e2e
+  (and ready-verify-e2e agent-claude-available)
+  assign-to-verify-e2e-claude)
+
+(normally r-assign-add-image-dep
+  (and ready-add-image-dep agent-claude-available)
+  assign-to-add-image-dep-claude)
+
+(normally r-assign-liveness-handler
+  (and ready-liveness-handler agent-claude-available)
+  assign-to-liveness-handler-claude)
+
+(normally r-assign-integrate-prove
+  (and ready-integrate-liveness-prove agent-claude-available)
+  assign-to-integrate-liveness-prove-claude)
+
+(normally r-assign-enable-antispoof
+  (and ready-enable-antispoof agent-claude-available)
+  assign-to-enable-antispoof-claude)
+
+(normally r-assign-liveness-api
+  (and ready-liveness-api agent-claude-available)
+  assign-to-liveness-api-claude)
+
+(normally r-assign-screen-flash-capture
+  (and ready-screen-flash-capture agent-claude-available)
+  assign-to-screen-flash-capture-claude)
+
+(normally r-assign-auth-liveness-phase
+  (and ready-auth-liveness-phase agent-claude-available)
+  assign-to-auth-liveness-phase-claude)
+
+(normally r-assign-update-verify
+  (and ready-update-verify-display agent-claude-available)
+  assign-to-update-verify-display-claude)
+
+(normally r-assign-e2e-test
+  (and ready-e2e-test agent-claude-available)
+  assign-to-e2e-test-claude)
+
+(normally r-assign-update-home
+  (and ready-update-home-screen agent-claude-available)
+  assign-to-update-home-screen-claude)
