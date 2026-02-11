@@ -24,7 +24,8 @@ export function renderHomeScreen(_onStart: () => void): string {
             <div class="arch-node-title">Government <span class="optional-tag">optional</span></div>
             <div class="arch-node-items">
               <span>Identity verification</span>
-              <span>Issue Verifiable Credential</span>
+              <span>Issue VC with BBS+ signatures</span>
+              <span>Enables selective disclosure</span>
             </div>
           </div>
         </div>
@@ -40,10 +41,10 @@ export function renderHomeScreen(_onStart: () => void): string {
             <div class="arch-node-icon">&#x1F464;</div>
             <div class="arch-node-title">You (User)</div>
             <div class="arch-node-items">
-              <span>Camera capture</span>
+              <span>Camera capture + liveness</span>
               <span>Feature extraction</span>
-              <span>Screen flash liveness</span>
-              <span>Holds biometrics locally</span>
+              <span>Choose what to reveal</span>
+              <span>Biometrics + VC stay on device</span>
             </div>
           </div>
 
@@ -55,9 +56,9 @@ export function renderHomeScreen(_onStart: () => void): string {
             <div class="arch-node-icon">&#x1F510;</div>
             <div class="arch-node-title">ZK Engine</div>
             <div class="arch-node-items">
-              <span>Poseidon hash</span>
-              <span>Pedersen commit</span>
-              <span>Halo2 proof</span>
+              <span>Poseidon hash + Pedersen commit</span>
+              <span>Halo2 composite proof</span>
+              <span>Biometric + credential predicates</span>
             </div>
           </div>
 
@@ -70,7 +71,7 @@ export function renderHomeScreen(_onStart: () => void): string {
             <div class="arch-node-title">Verifier</div>
             <div class="arch-node-items">
               <span>Proof verification</span>
-              <span>Credential check (if VC)</span>
+              <span>Sees only disclosed attributes</span>
               <span>Pass / Fail</span>
             </div>
           </div>
@@ -78,7 +79,7 @@ export function renderHomeScreen(_onStart: () => void): string {
       </div>
 
       <div class="privacy-note">
-        &#x1F6E1;&#xFE0F; Biometric data never leaves you &mdash; only mathematical proofs and credentials cross the boundary
+        &#x1F6E1;&#xFE0F; You control what is revealed &mdash; biometrics stay private, credential attributes are selectively disclosed
       </div>
     </div>
 
@@ -99,12 +100,12 @@ export function renderHomeScreen(_onStart: () => void): string {
           <div class="swim-phase phase-issue">Issue <span class="optional-tag">opt</span></div>
           <div class="swim-action optional">
             <div class="swim-action-title">Verify identity</div>
-            <div class="swim-action-detail">Issue Verifiable Credential binding identity to biometric commitment</div>
+            <div class="swim-action-detail">Issue VC with BBS+ signatures (name, DOB, nationality, biometric commitment&hellip;)</div>
           </div>
           <div class="swim-arrow optional"><div class="swim-arrow-right"></div></div>
           <div class="swim-action optional">
             <div class="swim-action-title">Receive VC</div>
-            <div class="swim-action-detail">Store credential on device</div>
+            <div class="swim-action-detail">Store multi-attribute credential on device</div>
           </div>
           <div></div>
           <div class="swim-empty"></div>
@@ -142,19 +143,78 @@ export function renderHomeScreen(_onStart: () => void): string {
           </div>
         </div>
 
-        <!-- Phase 4: Verify — Verifier checks proof + credential -->
+        <!-- Phase 4: Present — Optional selective disclosure -->
+        <div class="swimlane-row optional-row">
+          <div class="swim-phase phase-present">Present <span class="optional-tag">opt</span></div>
+          <div class="swim-empty"></div>
+          <div></div>
+          <div class="swim-action optional">
+            <div class="swim-action-title">Select attributes</div>
+            <div class="swim-action-detail">Choose what to reveal (e.g. &ldquo;over 18&rdquo; without name or DOB)</div>
+          </div>
+          <div class="swim-arrow optional"><div class="swim-arrow-right"></div></div>
+          <div class="swim-action optional">
+            <div class="swim-action-title">Receive disclosure</div>
+            <div class="swim-action-detail">Only chosen predicates &mdash; all other attributes hidden</div>
+          </div>
+        </div>
+
+        <!-- Phase 5: Verify — Verifier checks proof + optional credential -->
         <div class="swimlane-row">
           <div class="swim-phase phase-verify">Verify</div>
           <div class="swim-empty"></div>
           <div></div>
           <div class="swim-action">
             <div class="swim-action-title">Receive result</div>
-            <div class="swim-action-detail">Pass/fail only &mdash; no biometrics</div>
+            <div class="swim-action-detail">Pass/fail only &mdash; no biometrics exposed</div>
           </div>
           <div class="swim-arrow"><div class="swim-arrow-left"></div></div>
           <div class="swim-action">
-            <div class="swim-action-title">Verify proof</div>
-            <div class="swim-action-detail">~2ms BN254 verification (+ VC check if issued)</div>
+            <div class="swim-action-title">Verify composite proof</div>
+            <div class="swim-action-detail">Biometric match + disclosed predicates</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Selective Disclosure</h3>
+      <p>With a government-issued credential, you choose exactly what the verifier learns. The ZK proof covers both biometric match <em>and</em> credential predicates in a single proof.</p>
+      <div class="disclosure-example">
+        <div class="disclosure-header">
+          <span class="disclosure-title">Government Credential</span>
+          <span class="optional-tag">example</span>
+        </div>
+        <div class="disclosure-fields">
+          <div class="disclosure-field hidden">
+            <span class="disclosure-label">Full Name</span>
+            <span class="disclosure-value redacted">&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;</span>
+            <span class="disclosure-status">hidden</span>
+          </div>
+          <div class="disclosure-field hidden">
+            <span class="disclosure-label">Date of Birth</span>
+            <span class="disclosure-value redacted">&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;</span>
+            <span class="disclosure-status">hidden</span>
+          </div>
+          <div class="disclosure-field revealed">
+            <span class="disclosure-label">Age Check</span>
+            <span class="disclosure-value">&ge; 18</span>
+            <span class="disclosure-status">predicate</span>
+          </div>
+          <div class="disclosure-field revealed">
+            <span class="disclosure-label">Nationality</span>
+            <span class="disclosure-value">Valid</span>
+            <span class="disclosure-status">predicate</span>
+          </div>
+          <div class="disclosure-field hidden">
+            <span class="disclosure-label">ID Number</span>
+            <span class="disclosure-value redacted">&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;&#x2588;</span>
+            <span class="disclosure-status">hidden</span>
+          </div>
+          <div class="disclosure-field zk">
+            <span class="disclosure-label">Biometric</span>
+            <span class="disclosure-value">Match &#x2713;</span>
+            <span class="disclosure-status">ZK proof</span>
           </div>
         </div>
       </div>

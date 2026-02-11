@@ -766,6 +766,7 @@ p {
 .swim-phase.phase-issue { color: var(--accent-warning); }
 .swim-phase.phase-enroll { color: var(--accent-primary); }
 .swim-phase.phase-auth { color: var(--accent-secondary); }
+.swim-phase.phase-present { color: var(--accent-warning); }
 .swim-phase.phase-verify { color: var(--accent-success); }
 
 .swim-action {
@@ -879,6 +880,98 @@ p {
   margin-left: 0.25rem;
 }
 
+/* Selective disclosure example */
+.disclosure-example {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-top: 0.75rem;
+}
+
+.disclosure-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.625rem 0.75rem;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+}
+
+.disclosure-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.disclosure-fields {
+  display: flex;
+  flex-direction: column;
+}
+
+.disclosure-field {
+  display: grid;
+  grid-template-columns: 7rem 1fr auto;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+  font-size: 0.775rem;
+}
+
+.disclosure-field:last-child {
+  border-bottom: none;
+}
+
+.disclosure-label {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.disclosure-value {
+  color: var(--text-primary);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.75rem;
+}
+
+.disclosure-value.redacted {
+  color: var(--bg-tertiary);
+  letter-spacing: 0.05em;
+  user-select: none;
+}
+
+.disclosure-status {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.125rem 0.375rem;
+  border-radius: 3px;
+}
+
+.disclosure-field.hidden .disclosure-status {
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+}
+
+.disclosure-field.revealed .disclosure-status {
+  color: var(--accent-success);
+  background: rgba(16, 185, 129, 0.15);
+}
+
+.disclosure-field.revealed .disclosure-value {
+  color: var(--accent-success);
+}
+
+.disclosure-field.zk .disclosure-status {
+  color: var(--accent-secondary);
+  background: rgba(139, 92, 246, 0.15);
+}
+
+.disclosure-field.zk .disclosure-value {
+  color: var(--accent-secondary);
+}
+
 /* Privacy highlight */
 .privacy-note {
   display: flex;
@@ -891,6 +984,23 @@ p {
   border-radius: var(--radius);
   font-size: 0.8rem;
   color: var(--accent-secondary);
+}
+
+/* Footer */
+.site-footer {
+  text-align: center;
+  padding: 2rem 0 1rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.site-footer a {
+  color: var(--accent-primary);
+  text-decoration: none;
+}
+
+.site-footer a:hover {
+  text-decoration: underline;
 }
 
 /* Responsive */

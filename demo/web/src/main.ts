@@ -135,6 +135,8 @@ function render(): void {
       break;
   }
 
+  content += `<footer class="site-footer">Made by <a href="https://anuna.io" target="_blank" rel="noopener">Anuna Research</a> &middot; <a href="https://codeberg.org/anuna/sable" target="_blank" rel="noopener">Open Source (Apache 2.0)</a></footer>`;
+
   app.innerHTML = content;
 
   // Attach handlers

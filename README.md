@@ -29,9 +29,9 @@
 
 ## Description
 
-SABLE lets you verify your identity between smartphones using biometrics (like palm prints or face scans) **without exposing your actual biometric data** to anyone -- not to the person verifying you, not to the government, and not to any central database.
+SABLE lets you verify your identity using biometrics (like face scans) **without exposing your actual biometric data** to anyone -- not to the person verifying you, not to the government, and not to any central database.
 
-It does this by creating a mathematical proof of your biometric data that confirms it's you without revealing what that data actually is. Think of it like a tamper-proof envelope that says "this person is verified" without anyone being able to see what's inside.
+It creates a zero-knowledge proof that confirms you are who you claim to be without revealing what your biometric data actually looks like. Think of it like a tamper-proof envelope that says "this person is verified" without anyone being able to see what's inside.
 
 ### The problem
 
@@ -41,18 +41,48 @@ It does this by creating a mathematical proof of your biometric data that confir
 
 ### How SABLE is different
 
-- **Complete privacy** -- your biometric data never leaves your phone
-- **Works offline** -- no internet, servers, or blockchain needed
+- **Complete privacy** -- your biometric data never leaves your device
+- **Selective disclosure** -- with an optional government credential, reveal only what's needed (e.g. "over 18" without your name or date of birth)
+- **Liveness detection** -- screen flash reflectance analysis prevents photo and screen attacks
+- **Works offline** -- no internet, servers, or blockchain needed for peer-to-peer verification
 - **Government verification** -- officials can certify you without accessing your biometrics
-- **Mobile-first** -- designed specifically for smartphones, fast and efficient
-- **Dual ZK backends** -- Groth16 (Arkworks) and Halo2 (transparent setup) proof systems
+- **Halo2 ZK proofs** -- transparent setup (no trusted ceremony), ~450ms proof generation, ~2ms verification
+
+## Demo
+
+The interactive demo showcases the full flow with real Halo2 zero-knowledge proofs and screen flash liveness detection.
+
+### Running the demo
+
+```bash
+git clone https://codeberg.org/anuna/sable.git
+cd sable
+
+# Build the demo server (includes Halo2 ZK prover)
+cd demo/server
+cargo run --release
+
+# Open http://localhost:3001 in your browser
+```
+
+The server serves both the API and frontend. No separate frontend build step needed.
+
+> **Note:** Requires [Rust nightly](https://rustup.rs/) (enforced via `rust-toolchain.toml`). If Homebrew's `rustc` shadows rustup, use `rustup run nightly cargo run --release`.
+
+### Demo flow
+
+1. **Enroll** -- capture your face via webcam, creating a Pedersen commitment over your quantized biometric embedding
+2. **Authenticate** -- recapture your face, undergo screen flash liveness detection, then generate a Halo2 ZK proof that your live scan matches the enrolled template
+3. **Verify** -- validate the proof, seeing exactly what was proven vs. what stayed private
+
+The liveness check uses controlled-illumination reflectance analysis (based on Tang et al., NDSS 2018) to distinguish real 3D faces from photos displayed on screens.
 
 ## Installation
 
 ### Prerequisites
 
 - [Rust nightly](https://rustup.rs/) (enforced via `rust-toolchain.toml`)
-- [Node.js 18+](https://nodejs.org/) (for the web demo frontend)
+- [Node.js 18+](https://nodejs.org/) (only if rebuilding the web frontend)
 
 ### Building from source
 
@@ -70,49 +100,76 @@ cargo build --release --features halo2
 cargo test --features halo2 -p sable-core --lib --test integration
 ```
 
-> **Note:** If Homebrew's `rustc` shadows rustup, use `rustup run nightly cargo ...` explicitly.
-
-## Usage
-
-### Running the demo
-
-The demo server showcases the full enrollment, proof generation, and verification flow with real Halo2 zero-knowledge proofs.
-
-```bash
-# Start the backend (serves on http://localhost:3000)
-cd demo/server
-cargo run --release --features halo2-proofs
-
-# In a new terminal, start the frontend (serves on http://localhost:5173)
-cd demo/web
-npm install
-npm run dev
-```
-
-Open `http://localhost:5173` in your browser. The demo walks through:
-
-1. **Enroll** -- capture biometrics and create a cryptographic commitment
-2. **Authenticate** -- generate a zero-knowledge proof matching enrolled biometrics
-3. **Verify** -- validate the proof, seeing what was proven vs. what stayed private
-
 ### As a library
 
 ```rust
-// Feature flags: "zk" for Groth16, "halo2" for Halo2 proofs
-// See core/src/lib.rs for the full API surface
-use sable_core::crypto::poseidon::PoseidonHash;
+use sable_core::zk::halo2::FaceVerificationProver;
 use sable_core::crypto::pedersen::PedersenCommitment;
+use sable_core::crypto::poseidon::PoseidonHash;
 ```
 
-See the [demo server source](demo/server/src/handlers.rs) for a complete integration example using the Halo2 proof system.
+See the [demo server handlers](demo/server/src/handlers.rs) for a complete integration example.
 
 ## How it works
 
-1. **Capture** -- use your phone's camera to scan your palm or face
-2. **Secure** -- your phone creates a mathematical proof of your identity that can't be reversed or faked
-3. **Share** -- when someone needs to verify you, your phones talk directly via NFC/Bluetooth (no internet needed)
-4. **Verify** -- they get confirmation you're legitimate without seeing your actual biometric data
-5. **Attest** -- government agencies can officially verify you without storing your biometrics
+### Architecture
+
+```
+         ┌───────────────────┐
+         │    Government     │  optional
+         │  (Identity Issuer)│
+         └────────┬──────────┘
+                  │ Verifiable Credential (BBS+)
+                  ▼
+┌──────────┐    ┌──────────┐    ┌──────────┐
+│ You      │───▶│ZK Engine │───▶│ Verifier │
+│ (User)   │    │          │    │          │
+└──────────┘    └──────────┘    └──────────┘
+ Camera          Poseidon hash   Proof check
+ Liveness        Pedersen commit Pass / Fail
+ Holds VC        Halo2 proof     Sees only
+ + biometrics    Composite proof disclosed attrs
+```
+
+Biometric data never leaves the user's device. Only mathematical proofs and selectively disclosed credential attributes cross the boundary.
+
+### Protocol flow
+
+| Phase | You (User) | | Verifier |
+|-------|-----------|---|----------|
+| **Issue** *(optional)* | Receive Verifiable Credential from government | ← | -- |
+| **Enroll** | Capture face, extract 1024-dim embedding | → | Hash with Poseidon, create Pedersen commitment |
+| **Auth** | Recapture face + screen flash liveness | → | Generate Halo2 ZK proof (~450ms, 2KB) |
+| **Present** *(optional)* | Select attributes to disclose (e.g. "≥ 18") | → | Receive only chosen predicates |
+| **Verify** | Receive pass/fail result | ← | Verify composite proof (~2ms) |
+
+### Selective disclosure
+
+With an optional government-issued Verifiable Credential (signed with BBS+ signatures), the user controls exactly what the verifier learns:
+
+| Credential Field | Disclosed? | What verifier sees |
+|-----------------|------------|-------------------|
+| Full Name | Hidden | ████████ |
+| Date of Birth | Hidden | ████████ |
+| Age Check | Predicate | ≥ 18 |
+| Nationality | Predicate | Valid |
+| ID Number | Hidden | ████████ |
+| Biometric Match | ZK Proof | Match ✓ |
+
+The Halo2 proof simultaneously covers biometric match *and* credential predicates in a single composite proof. The Pedersen commitment acts as the binding anchor between the biometric data and the credential.
+
+### Liveness detection
+
+Screen flash liveness uses controlled-illumination reflectance analysis:
+
+1. Capture baseline frame under ambient lighting
+2. Flash the screen white
+3. Capture a second frame during the flash
+4. Analyze the reflectance ratio map (flash / baseline)
+
+**Key insight:** A real 3D face produces a smooth reflectance ratio (low Laplacian energy) because both ambient and flash illumination vary smoothly over the face geometry. A photo displayed on a screen produces high-frequency ratio variation because the displayed image modulates the baseline denominator. The ratio-Laplacian energy discriminates between these cases.
+
+This is combined with the core library's `ScreenFlashExtractor` which computes reflectance variance, gradient, highlight softness, and channel consistency signals.
 
 ### Verification flow
 
@@ -130,40 +187,34 @@ sequenceDiagram
     V->>P: 2. Send challenge nonce (256-bit)
 
     P->>PB: 3. Capture live biometric image
-    PB->>PB: 4. Preprocess (ROI, CLAHE, noise reduction)
-    PB->>PB: 5. Extract features (Gabor filters, thinning)
-    PB->>PB: 6. Multi-modal fusion (512-dim vector)
-    PB->>P: 7. Return biometric features
+    PB->>PB: 4. Screen flash liveness detection
+    PB->>PB: 5. Extract features (1024-dim embedding)
+    PB->>P: 6. Return biometric features
 
-    P->>SC: 8. Hash features with Poseidon
-    SC->>SC: 9. Generate salt (256-bit RNG)
-    SC->>SC: 10. Create Pedersen commitment C = g^f * h^s
+    P->>SC: 7. Hash features with Poseidon
+    SC->>SC: 8. Generate salt (256-bit RNG)
+    SC->>SC: 9. Create Pedersen commitment C = g^f * h^s
 
-    P->>SC: 11. Generate zk-SNARK proof
-    Note over SC: Proves: biometric match + quality + timing<br/>without revealing biometric data
-    SC->>SC: 12. Include challenge nonce in proof
-    SC->>P: 13. Return proof + commitment
+    P->>SC: 10. Generate Halo2 ZK proof
+    Note over SC: Proves: biometric match + liveness + quality<br/>without revealing biometric data
+    SC->>SC: 11. Include challenge nonce in proof
+    SC->>P: 12. Return proof + commitment
 
-    alt Government-Attested Identity
-        P->>PKI: 14. Retrieve X.509 certificate
-        PKI->>P: 15. Return signed certificate (binds to commitment)
+    alt Government-Attested Identity (Optional)
+        P->>PKI: 13. Retrieve Verifiable Credential
+        PKI->>P: 14. Return BBS+ signed credential
+        P->>P: 15. Select attributes to disclose
     end
 
-    P->>V: 16. Send commitment + proof + certificate (optional)
-    V->>SC: 17. Verify zk-SNARK proof locally
+    P->>V: 16. Send commitment + proof + selective disclosure (optional)
+    V->>SC: 17. Verify Halo2 proof locally (~2ms)
     SC->>SC: 18. Validate proof against commitment
     SC->>SC: 19. Check challenge nonce binding
     SC->>V: 20. Return verification result
 
-    alt Successful Verification
-        V->>V: 21. Update local trust score
-        P->>P: 22. Update local trust score
-        Note over V,P: Exponential decay: T(t) = T0 * e^(-0.1t/month)
-    end
+    V->>P: 21. Send verification response
 
-    V->>P: 23. Send verification response
-
-    Note over V,PKI: Privacy preserved: biometric data never transmitted<br/>Total time: less than 2 seconds offline
+    Note over V,PKI: Privacy preserved: biometric data never transmitted<br/>Only disclosed predicates revealed
 ```
 
 ### Remote verification
@@ -171,9 +222,9 @@ sequenceDiagram
 While SABLE's core design focuses on peer-to-peer verification, the same architecture extends to remote scenarios:
 
 - **Commitment as "biometric public key"** -- the Pedersen commitment `C = g^f * h^s` acts like a public identifier
-- **Global distribution** -- commitments can be stored in databases, blockchains, or directory services
 - **Remote proof generation** -- the person generates a ZK proof on their device
 - **Remote verification** -- online services verify the proof against the stored commitment
+- **Selective disclosure** -- present only required credential attributes to the service
 
 Use cases include website login, digital government services, enterprise VPN access, and telehealth patient verification. The same privacy guarantees apply: only mathematical proofs travel over the network, never biometric data.
 
@@ -185,15 +236,15 @@ Use cases include website login, digital government services, enterprise VPN acc
 sable/
 ├── core/                    # Core cryptographic library (sable-core)
 │   └── src/
-│       ├── biometric/       # Palm/face feature extraction, liveness, fusion
-│       ├── crypto/          # BLS12-381, Pedersen, Poseidon, Groth16, RNG
+│       ├── biometric/       # Face/palm feature extraction, liveness, screen flash
+│       ├── crypto/          # Pedersen, Poseidon, RNG
 │       ├── zk/halo2/        # Halo2 circuits (quantizer, poseidon, hamming, threshold)
 │       ├── mobile/          # Android/iOS FFI, keystore, sensors
 │       ├── p2p/             # NFC, BLE, WiFi Direct, session management
 │       └── attestation/     # X.509 certificates, chain validation, trust store
 ├── demo/
-│   ├── server/              # Axum REST API with real Halo2 proofs
-│   └── web/                 # TypeScript/Vite frontend
+│   ├── server/              # Axum REST API with real Halo2 proofs + liveness
+│   └── web/                 # TypeScript/Vite frontend (served by demo server)
 ├── docs/
 │   ├── specs/               # Technical specifications
 │   ├── plans/               # Implementation plans
@@ -208,32 +259,31 @@ sable/
 | Flag | Description |
 |------|-------------|
 | `std` (default) | Standard library support |
-| `zk` | Groth16 zk-SNARK circuits via Arkworks |
 | `halo2` | Halo2 transparent-setup ZK proof system |
 | `mobile` | Mobile platform bindings and optimizations |
 | `simd` / `neon` | ARM SIMD/NEON optimizations |
 
 ### Technical building blocks
 
-- **BLS12-381 elliptic curve** -- Pedersen commitments with 128-bit security
-- **Poseidon hash** -- ZK-friendly hash for feature vectors, ~10x faster than SHA-256 in circuits
-- **Groth16 zk-SNARKs** -- via Arkworks, 199,273 R1CS constraints
-- **Halo2 proofs** -- transparent setup (no trusted ceremony), KZG/SHPLONK polynomial commitments
-- **Palm biometrics** -- 6x3 Gabor filter banks, Zhang-Suen thinning, multi-modal vein+print fusion
-- **Screen flash liveness** -- RGB controlled-illumination reflectance ratio analysis (Tang et al., NDSS 2018)
-- **P2P protocols** -- NFC/BLE/WiFi Direct with X25519 ECDH + ChaCha20-Poly1305 AEAD
-- **Government PKI** -- X.509 certificate attestation levels (L1-L5) preserving citizen privacy
+| Component | Technology | Purpose |
+|-----------|-----------|---------|
+| Elliptic curve | BLS12-381 / BN254 | Pedersen commitments, 128-bit security |
+| Hash | Poseidon | ZK-friendly hash for feature vectors (~10x faster than SHA-256 in circuits) |
+| Commitments | Pedersen | Hiding commitment acts as "biometric public key" |
+| ZK proofs | Halo2 | Transparent setup, ~450ms proof gen, ~2ms verification, 2KB proofs |
+| Liveness | Screen flash | Ratio-Laplacian reflectance analysis (Tang et al., NDSS 2018) |
+| Biometrics | Face / Palm | 1024-dim embeddings, Gabor filters, multi-modal fusion |
+| P2P | NFC/BLE/WiFi Direct | X25519 ECDH + ChaCha20-Poly1305 AEAD |
+| Attestation | X.509 / Verifiable Credentials | Government identity binding with selective disclosure |
 
-### Performance
+### Performance (Halo2, release mode, Apple Silicon)
 
-| Operation | Groth16 (Arkworks) | Halo2 |
-|-----------|-------------------|-------|
-| Proof generation | ~850ms | ~450ms |
-| Verification | ~12ms | ~2.2ms |
-| Proof size | 192 bytes | 2.08 KB |
-| Memory usage | 128 MB | -- |
-
-Measured in release mode on Apple Silicon. All metrics meet non-functional requirements.
+| Operation | Target | Achieved |
+|-----------|--------|----------|
+| Proof generation | ≤ 1000ms | ~450ms |
+| Verification | ≤ 50ms | ~2.2ms |
+| Proof size | ≤ 10KB | 2.08KB |
+| Liveness check | -- | ~25ms |
 
 ## Security
 
@@ -242,31 +292,32 @@ Measured in release mode on Apple Silicon. All metrics meet non-functional requi
 - **Discrete Logarithm Problem** -- hardness over BLS12-381 (128-bit security level)
 - **Pairing-friendly curve security** -- BLS12-381 with embedding degree 12 resists known attacks
 - **Poseidon hash** -- collision resistance in finite fields
-- **Groth16 soundness** -- computationally sound under discrete log assumption
 - **Halo2 soundness** -- transparent setup eliminates trusted ceremony risk
+- **BBS+ signatures** -- selective disclosure without revealing hidden attributes
 
 ### What SABLE protects against
 
 - **Biometric database breaches** -- no centralized biometric storage exists to breach
 - **Government surveillance** -- officials cannot access citizen biometric data during attestation
+- **Over-disclosure** -- selective disclosure reveals only requested predicates, not full credentials
 - **Replay attacks** -- 30-second temporal constraints and 256-bit challenge nonces prevent reuse
+- **Presentation attacks** -- screen flash liveness detects photos and screen displays
 - **Man-in-the-middle** -- ECDH session keys and nonce binding protect against interception
 - **Biometric template extraction** -- Pedersen commitments cryptographically hide enrolled data
-- **Network analysis** -- offline P2P operation eliminates network metadata
 
 ### Replay attack protection
 
-- **30-second proof lifetime** enforced by zk-SNARK circuit timestamp constraints
+- **30-second proof lifetime** enforced by Halo2 circuit timestamp constraints
 - **Fresh biometric capture** required for each proof (no static replay)
+- **Screen flash liveness** prevents photo/video replay of biometric data
 - **Challenge-response protocol** with 256-bit nonces bound to specific sessions
 - **Ephemeral session keys** via ECDH for P2P communication channels
 
 ### Assumptions and limitations
 
 **Biometric attack vectors:**
-- 0.25 Euclidean distance threshold yields ~1-2% false acceptance rate
-- Presentation attacks (silicone palms, infrared prints) remain a risk without enhanced PAD
-- Single modality exploitation possible when OR-rule fusion is used
+- Presentation attacks (silicone faces, 3D prints) remain a risk without enhanced PAD
+- Liveness detection is calibrated for screen-based attacks; sophisticated physical replicas may bypass it
 
 **System dependencies:**
 - Relies on Secure Enclave / Android Keystore integrity
@@ -275,49 +326,37 @@ Measured in release mode on Apple Silicon. All metrics meet non-functional requi
 
 **Cryptographic limitations:**
 - BLS12-381 is vulnerable to quantum computers (post-quantum migration needed by 2030-2035)
-- Groth16 requires a trusted setup ceremony; Halo2 avoids this
 - Circuit constraints must correctly encode verification logic
+- BBS+ selective disclosure requires compatible credential issuance infrastructure
 
 ### Security recommendations for production
 
-- Tighten distance thresholds to 0.17-0.20 (reduces FAR to <0.1%)
-- Use AND-rule fusion (both modalities must pass)
 - Add CNN-based presentation attack detection
 - Require multi-spectral capture for anti-spoofing
 - Integrate hardware security modules for key management
 - Conduct formal verification of circuit constraints
-
-### Security analysis by attack vector
-
-| Attack Vector | Risk Level | Notes |
-|---------------|-----------|-------|
-| Cryptographic (forging proofs) | 128-bit security | Computationally infeasible |
-| Biometric spoofing | ~1-2% success rate | Requires physical proximity and sophisticated materials |
-| Device compromise | Variable | Depends on device root/jailbreak status |
-| Template injection | High if device compromised | Requires privileged access |
-
-For most real-world scenarios, biometric presentation attacks represent the primary threat vector. However, these are **targeted attacks requiring physical proximity**, not scalable remote attacks. The system prevents the more dangerous mass surveillance and database breach scenarios.
+- Implement credential revocation checking
 
 ## Project status
 
 **Active development.** The core library is feature-complete across all milestones but has not been audited for production use.
 
-**484 tests passing | 199,273 R1CS constraints | 77 Halo2-specific tests**
+**484 tests passing | 77 Halo2-specific tests | Interactive demo with liveness detection**
 
 | Milestone | Status |
 |-----------|--------|
 | Core cryptography (BLS12-381, Poseidon, Pedersen, RNG) | Complete |
-| Zero-knowledge proofs (Groth16 circuits, Arkworks) | Complete |
-| Mobile integration (Android JNI, iOS Swift, FFI) | Complete |
-| Palm biometrics (vein + print extraction, fusion) | Complete |
-| P2P protocol (NFC, BLE, WiFi Direct, sessions) | Complete |
-| Government attestation (X.509, OID extensions, chain validation) | Complete |
-| Production hardening (constant-time ops, SIMD, energy profiling) | Complete |
 | Halo2 ZK face verification (transparent setup, demo server) | Complete |
-| Screen flash liveness detection (reflectance ratio analysis) | Complete |
+| Screen flash liveness detection (ratio-Laplacian analysis) | Complete |
+| Interactive demo (enrollment, auth, liveness, verification) | Complete |
+| Palm biometrics (vein + print extraction, fusion) | Complete |
+| Mobile integration (Android JNI, iOS Swift, FFI) | Complete |
+| P2P protocol (NFC, BLE, WiFi Direct, sessions) | Complete |
+| Government attestation (X.509, chain validation) | Complete |
 
 ### Roadmap
 
+- Verifiable Credentials with BBS+ selective disclosure
 - Post-quantum migration (quantum-resistant curves and hash functions)
 - Hardware security module integration
 - Formal verification of circuit correctness
@@ -326,13 +365,13 @@ For most real-world scenarios, biometric presentation attacks represent the prim
 
 ## Use cases
 
-- **Building access** -- tap your phone to enter secure facilities using biometrics, without cards that can be lost or copied
-- **Age verification** -- prove you're over 18 without showing your ID or birth date
+- **Age verification** -- prove you're over 18 without revealing your name, date of birth, or any other personal data
 - **Government services** -- access benefits with officially attested credentials while keeping biometrics private
+- **Building access** -- tap your phone to enter secure facilities using biometrics, without cards that can be lost or copied
 - **Peer-to-peer trust** -- verify someone's identity without needing internet or a central authority
-- **High-security access** -- multi-modal authentication (vein + print) for critical systems
 - **Online services** -- website login with biometric proof instead of passwords
 - **Healthcare** -- telehealth patient verification and prescription authorization
+- **Border control** -- prove nationality and identity without exposing full passport data
 
 ## Contributing
 
