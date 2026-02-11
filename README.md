@@ -57,7 +57,7 @@ None of these combine true zero-knowledge proofs over biometric data with offlin
 | No trusted setup / ceremony | N/A | Varies | N/A | **Yes** |
 | Open source | No | Partial | No | **Apache 2.0** |
 
-SABLE is the first open-source system to combine all of these:
+To our knowledge, SABLE is the first open-source system to combine all of these:
 
 - **True zero-knowledge proofs** -- Halo2 proofs over biometric data (~450ms generation, ~2ms verification), not statistical matching on encrypted fragments
 - **Fully offline** -- peer-to-peer verification via NFC/BLE with no cloud, blockchain, or internet dependency
