@@ -34,6 +34,17 @@ test_vectors/
 # Documentation build
 /docs/book/
 
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+missfont.log
+
 # Temporary files
 *.tmp
 *.temp
