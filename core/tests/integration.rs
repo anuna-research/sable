@@ -398,6 +398,102 @@ mod halo2_integration {
         }
     }
 
+    /// Test full pipeline: face match + liveness in a single ZK proof
+    #[test]
+    fn test_halo2_face_plus_liveness_pipeline() {
+        use sable_core::zk::halo2::LivenessWitness;
+
+        // Step 1: Face verification setup (same as test_halo2_face_verification_workflow)
+        let enrolled: Vec<f64> = (0..512).map(|i| ((i as f64 / 256.0) - 1.0) * 0.8).collect();
+        let enrolled_q = FeatureQuantizer::quantize(&enrolled);
+
+        let live: Vec<f64> = enrolled.iter().enumerate()
+            .map(|(i, v)| (v + (i as f64 * 0.001).sin() * 0.02).clamp(-1.0, 1.0))
+            .collect();
+        let live_q = FeatureQuantizer::quantize(&live);
+
+        let distance = hamming_distance(&enrolled_q, &live_q);
+        let config = ThresholdConfig::new(512, 0.5);
+        let threshold = config.max_hamming_distance();
+
+        // Step 2: Build liveness witness (synthetic fingerprints)
+        let liveness = LivenessWitness {
+            delta_fingerprints: [0x0014, 0xA014, 0x4014, 0xA014, 0xA014, 0x0014],
+            expected_fingerprints: [0x0014, 0xA014, 0x4014, 0xA014, 0xA014, 0x0014],
+            color_threshold: 3,
+            spatial_threshold: 2,
+            min_magnitude: 5,
+        };
+
+        // Step 3: Generate combined proof
+        let mut prover = FaceVerificationProver::new();
+        let proof = prover.prove_with_liveness(distance, threshold, Some(liveness))
+            .expect("Combined proof should succeed");
+
+        // Step 4: Verify
+        let verifier = FaceVerificationVerifier::from_prover(&mut prover)
+            .expect("Should create verifier");
+
+
+        let details = verifier.verify_full(&proof).expect("Should verify");
+
+        assert!(details.face_match, "Face should match");
+        assert!(details.liveness_passed, "Liveness should pass");
+        assert!(proof.liveness_passed, "Proof.liveness_passed should be true");
+        println!(
+            "Combined proof: face={}, liveness={}, size={}B",
+            details.face_match, details.liveness_passed, proof.size()
+        );
+        assert!(proof.meets_size_requirement(), "Combined proof should be ≤10KB");
+    }
+
+    /// Test that tampered liveness fingerprints cause liveness failure
+    #[test]
+    fn test_halo2_liveness_tampered_fingerprints() {
+        use sable_core::zk::halo2::LivenessWitness;
+
+        let liveness = LivenessWitness {
+            // Tampered: delta fingerprints don't match expected
+            delta_fingerprints: [0xFFFF, 0x0000, 0xFFFF, 0x0000, 0xFFFF, 0x0000],
+            expected_fingerprints: [0x0014, 0xA014, 0x4014, 0xA014, 0xA014, 0x0014],
+            color_threshold: 3, // strict — HD will be >> 3
+            spatial_threshold: 2,
+            min_magnitude: 5,
+        };
+
+        let mut prover = FaceVerificationProver::new();
+        let proof = prover.prove_with_liveness(100, 200, Some(liveness))
+            .expect("Proof should still generate");
+
+        assert!(!proof.liveness_passed, "Tampered fingerprints should fail liveness");
+
+        let verifier = FaceVerificationVerifier::from_prover(&mut prover)
+            .expect("Should create verifier");
+
+
+        let details = verifier.verify_full(&proof).expect("Should verify");
+        assert!(details.face_match, "Face match is independent");
+        assert!(!details.liveness_passed, "Tampered liveness should fail");
+    }
+
+    /// Test backwards compatibility: prove without liveness defaults to pass
+    #[test]
+    fn test_halo2_backwards_compatible_no_liveness() {
+        let mut prover = FaceVerificationProver::new();
+        let proof = prover.prove(100, 200).expect("Should generate proof");
+
+        assert!(proof.liveness_passed, "Default liveness should be true");
+        assert_eq!(proof.public_inputs.len(), 3, "Should have 3 public inputs");
+
+        let verifier = FaceVerificationVerifier::from_prover(&mut prover)
+            .expect("Should create verifier");
+
+
+        let details = verifier.verify_full(&proof).expect("Should verify");
+        assert!(details.face_match);
+        assert!(details.liveness_passed, "Default liveness should pass");
+    }
+
     /// Test quantization preserves similarity ordering
     #[test]
     fn test_quantization_preserves_ordering() {

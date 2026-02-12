@@ -42,6 +42,8 @@ getrandom = "0.2"
 rand_core = "0.6"
 rand_chacha = "0.3"
 sha2 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
 zeroize = "1.7"
 subtle = "2.5"
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }

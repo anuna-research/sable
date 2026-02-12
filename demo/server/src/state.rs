@@ -40,6 +40,10 @@ pub struct AuthChallenge {
     pub challenge_id: String,
     pub session_id: String,
     pub nonce: [u8; 32],
+    /// Client commitment (hex-encoded SHA-256 hash) for liveness binding.
+    /// When present, the server can verify that the client committed to specific
+    /// data before the challenge nonce was revealed.
+    pub client_commitment: Option<String>,
     pub created_at: std::time::Instant,
 }
 

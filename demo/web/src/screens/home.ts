@@ -127,19 +127,19 @@ export function renderHomeScreen(_onStart: () => void): string {
           </div>
         </div>
 
-        <!-- Phase 3: Auth — User captures + liveness, ZK proof generated -->
+        <!-- Phase 3: Auth — Coin-flip liveness + ZK proof generated -->
         <div class="swimlane-row">
           <div class="swim-phase phase-auth">Auth</div>
           <div class="swim-empty"></div>
           <div></div>
           <div class="swim-action">
-            <div class="swim-action-title">Capture + flash</div>
-            <div class="swim-action-detail">Screen flash liveness detection</div>
+            <div class="swim-action-title">Liveness challenge</div>
+            <div class="swim-action-detail">Random split-screen color flash + 3D face geometry check</div>
           </div>
           <div class="swim-arrow"><div class="swim-arrow-right"></div></div>
           <div class="swim-action">
             <div class="swim-action-title">Generate ZK proof</div>
-            <div class="swim-action-detail">Halo2 proof in ~450ms, 2KB</div>
+            <div class="swim-action-detail">Face match + liveness in ~250ms, 2KB</div>
           </div>
         </div>
 
@@ -221,6 +221,46 @@ export function renderHomeScreen(_onStart: () => void): string {
     </div>
 
     <div class="card">
+      <h3>Liveness Detection</h3>
+      <p>SABLE makes it significantly harder to spoof authentication with a photo, video, or screen replay by using a challenge&ndash;response color-flash protocol. It is not foolproof &mdash; sophisticated 3D masks or real-time video manipulation may still defeat it &mdash; but it raises the bar well beyond static presentation attacks. The liveness result is proved inside the ZK circuit so the verifier never sees your reflectance data.</p>
+
+      <div class="liveness-steps">
+        <div class="liveness-step">
+          <div class="liveness-step-num">1</div>
+          <div class="liveness-step-body">
+            <div class="liveness-step-title">Unpredictable challenge</div>
+            <div class="liveness-step-detail">Both client and server contribute random nonces. Their combined hash (HKDF) determines the color pattern &mdash; neither side can predict or replay it. The challenge expires after 30 seconds and can only be used once.</div>
+          </div>
+        </div>
+        <div class="liveness-step">
+          <div class="liveness-step-num">2</div>
+          <div class="liveness-step-body">
+            <div class="liveness-step-title">Split-screen color flash</div>
+            <div class="liveness-step-detail">The screen flashes a <em>different color on top vs. bottom</em> across 3 rounds. A real 3D face reflects each color differently in the upper and lower regions; a flat photo or screen reflects them the same way.</div>
+          </div>
+        </div>
+        <div class="liveness-step">
+          <div class="liveness-step-num">3</div>
+          <div class="liveness-step-body">
+            <div class="liveness-step-title">3D geometry detection</div>
+            <div class="liveness-step-detail">The camera captures how light reflects off your face in each round. The server checks that upper and lower regions respond <em>differently</em> to different colors &mdash; confirming a real 3D surface.</div>
+          </div>
+        </div>
+        <div class="liveness-step">
+          <div class="liveness-step-num">4</div>
+          <div class="liveness-step-body">
+            <div class="liveness-step-title">ZK proof of liveness</div>
+            <div class="liveness-step-detail">Color-match fingerprints are fed into the Halo2 circuit alongside the face-match check. The verifier learns <strong>pass/fail</strong> only &mdash; no raw reflectance data is ever exposed.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="privacy-note">
+        &#x1F6E1;&#xFE0F; Defeats static photos and simple replays. Not a substitute for depth sensors or infrared &mdash; but the ZK proof means the verifier never sees raw reflectance data.
+      </div>
+    </div>
+
+    <div class="card">
       <h3>Cryptographic Building Blocks</h3>
       <div class="timing-grid">
         <div class="timing-item">
@@ -233,7 +273,7 @@ export function renderHomeScreen(_onStart: () => void): string {
         </div>
         <div class="timing-item">
           <div class="timing-value" style="font-size: 1rem;">Halo2</div>
-          <div class="timing-label">ZK proof (~450ms)</div>
+          <div class="timing-label">ZK proof (~250ms)</div>
         </div>
         <div class="timing-item">
           <div class="timing-value" style="font-size: 1rem;">BN254</div>

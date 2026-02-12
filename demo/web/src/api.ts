@@ -22,6 +22,7 @@ export interface EnrollResponse {
 
 export interface ChallengeRequest {
   session_id: string;
+  client_commitment?: string;  // hex-encoded SHA-256 of client nonce
 }
 
 export interface ChallengeResponse {
@@ -34,6 +35,8 @@ export interface ProveRequest {
   challenge_id: string;
   noise_level?: number;
   face_embedding?: number[];  // 1024-dim face embedding from live scan
+  c_nonce?: string;           // hex-encoded client nonce for spatial flash verification
+  flash_frames?: string[];    // baseline + 3 round JPEG data URLs
 }
 
 export interface ProveTimings {
@@ -43,12 +46,24 @@ export interface ProveTimings {
   total_ms: number;
 }
 
+export interface RegionMatchScore {
+  round: number;
+  upper_score: number;
+  lower_score: number;
+  spatial_diff_score: number;
+}
+
 export interface ProveResponse {
   proof_hex: string;
   public_inputs_hex: string[];
   distance: number;
   quality_score: number;
   liveness_passed: boolean | null;
+  color_challenge_passed?: boolean;
+  /** Whether liveness was proven inside the ZK proof (not just plaintext). */
+  liveness_proved_in_zk?: boolean;
+  region_match_scores?: RegionMatchScore[];
+  spatial_differentiation_score?: number;
   timings: ProveTimings;
   what_was_proven: string[];
   what_stayed_private: string[];
@@ -66,6 +81,11 @@ export interface VerificationDetails {
   temporal_check_passed: boolean;
   quality_check_passed: boolean;
   liveness_check_passed: boolean | null;
+  /** Whether liveness was verified inside the ZK proof (from public inputs). */
+  liveness_proved_in_zk?: boolean;
+  color_challenge_passed?: boolean;
+  region_match_scores?: RegionMatchScore[];
+  spatial_differentiation_score?: number;
 }
 
 export interface LivenessRequest {

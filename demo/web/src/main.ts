@@ -4,7 +4,6 @@ import {
   ChallengeResponse,
   ProveResponse,
   VerifyResponse,
-  LivenessResponse,
 } from './api';
 import {
   Step,
@@ -27,6 +26,9 @@ import {
   attachAuthenticationHandlers,
   updateProofProgress,
   updateLivenessStatus,
+  showLivenessGuide,
+  showLivenessProcessing,
+  updateFlashDot,
   initAuthWebcam,
   captureAuthFrame,
   stopAuthWebcam,
@@ -35,7 +37,14 @@ import {
   renderVerificationScreen,
   attachVerificationHandlers,
 } from './screens/verification';
-import { performScreenFlash, ScreenFlashCapture } from './components/screenFlash';
+import { performSpatialFlash, SpatialFlashCapture } from './components/screenFlash';
+import {
+  deriveFlashPattern,
+  computeClientCommitment,
+  bufferToHex,
+  hexToBuffer,
+  FlashRound,
+} from './crypto/flashChallenge';
 
 // Application state
 interface AppState {
@@ -58,8 +67,10 @@ interface AppState {
   challenge: ChallengeResponse | null;
   proof: ProveResponse | null;
 
-  // Liveness
-  livenessResult: LivenessResponse | null;
+  // Spatial flash liveness
+  cNonce: Uint8Array | null;
+  flashRounds: FlashRound[] | null;
+  spatialCapture: SpatialFlashCapture | null;
 
   // Verification
   verifyResult: VerifyResponse | null;
@@ -80,7 +91,9 @@ const state: AppState = {
   authWebcamError: null,
   challenge: null,
   proof: null,
-  livenessResult: null,
+  cNonce: null,
+  flashRounds: null,
+  spatialCapture: null,
   verifyResult: null,
 };
 
@@ -130,7 +143,8 @@ function render(): void {
         state.proof,
         state.isLoading,
         state.verifyResult,
-        state.error
+        state.error,
+        state.flashRounds
       );
       break;
   }
@@ -170,15 +184,12 @@ function render(): void {
         handleProve,
         () => navigateTo('verification'),
         handleAuthRetryCamera,
-        state.authCapturedFace
+        state.authCapturedFace,
+        handleLivenessConsent
       );
       // Initialize webcam after render if in capturing phase
       if (state.authPhase === 'capturing' && !state.authCapturedFace && !state.authWebcamError) {
         initAuthWebcamAsync();
-      }
-      // Run liveness check after render if in liveness phase
-      if (state.authPhase === 'liveness') {
-        runLivenessCheck();
       }
       break;
     case 'verification':
@@ -288,12 +299,27 @@ async function handleStartAuth(): Promise<void> {
   render();
 
   try {
-    // Step 1: Get challenge
-    const challenge = await api.getChallenge({ session_id: state.sessionId });
+    // Step 1: Generate client nonce and commitment
+    const cNonce = new Uint8Array(32);
+    crypto.getRandomValues(cNonce);
+    state.cNonce = cNonce;
+
+    const clientCommitment = await computeClientCommitment(cNonce);
+
+    // Step 2: Get challenge with client commitment
+    const challenge = await api.getChallenge({
+      session_id: state.sessionId,
+      client_commitment: clientCommitment,
+    });
     state.challenge = challenge;
+
+    // Step 3: Derive flash pattern from c_nonce and s_nonce
+    const sNonce = hexToBuffer(challenge.nonce_hex);
+    state.flashRounds = await deriveFlashPattern(cNonce, sNonce);
+
     state.isLoading = false;
 
-    // Step 2: Move to capturing phase
+    // Step 4: Move to capturing phase
     state.authPhase = 'capturing';
     render();
   } catch (err) {
@@ -354,18 +380,25 @@ async function handleProve(face: CapturedFace): Promise<void> {
 // Guard to prevent re-entrant liveness checks
 let livenessRunning = false;
 
-async function runLivenessCheck(): Promise<void> {
+/**
+ * Called when the user consents to the liveness check (clicks the "OK" button).
+ * This starts the camera, shows the face guide, and runs the spatial flash sequence.
+ */
+async function handleLivenessConsent(): Promise<void> {
   if (livenessRunning) return;
   livenessRunning = true;
 
   try {
-    // Open a separate webcam stream for the screen flash
+    // Show face guide (hide consent notice)
+    showLivenessGuide();
+
+    // Open camera for spatial flash
     const video = document.getElementById('liveness-video') as HTMLVideoElement;
     if (!video) {
       throw new Error('Liveness video element not found');
     }
 
-    updateLivenessStatus('Opening camera for liveness check...');
+    updateLivenessStatus('Opening camera...');
 
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
@@ -384,52 +417,69 @@ async function runLivenessCheck(): Promise<void> {
       }
     });
 
-    // Small delay for camera to stabilize
-    await sleep(300);
+    // Small delay for camera to stabilize and user to position face
+    updateLivenessStatus('Position your face in the oval...');
+    await sleep(1000);
 
-    updateLivenessStatus('Performing screen flash...');
+    if (!state.flashRounds || state.flashRounds.length !== 3) {
+      throw new Error('Flash pattern not derived');
+    }
 
-    // Perform the screen flash capture
-    const capture: ScreenFlashCapture = await performScreenFlash(video);
+    updateLivenessStatus('Starting spatial flash...');
+
+    // Perform the spatial flash capture with progress dots
+    const capture = await performSpatialFlashWithProgress(state.flashRounds, video);
+    state.spatialCapture = capture;
 
     // Stop webcam
     stream.getTracks().forEach(track => track.stop());
     video.srcObject = null;
 
-    updateLivenessStatus('Analyzing reflectance patterns...');
+    showLivenessProcessing('Liveness capture complete. Generating proof...');
+    await sleep(500);
 
-    // Send to server
-    const livenessResult = await api.checkLiveness({
-      session_id: state.sessionId!,
-      baseline_image: capture.baselineDataUrl,
-      flash_image: capture.flashDataUrl,
-    });
+    // Proceed to proof generation with spatial flash data
+    await generateProof();
 
-    state.livenessResult = livenessResult;
-
-    if (livenessResult.passed) {
-      updateLivenessStatus('Liveness check passed!');
-      await sleep(500);
-
-      // Proceed to proof generation
-      await generateProof();
-    } else {
-      // Liveness failed - clear captured face so webcam reopens for retry
-      state.error = 'Liveness check failed. Please ensure good lighting and try again.';
-      state.authCapturedFace = null;
-      state.authPhase = 'capturing';
-      state.isLoading = false;
-      render();
-    }
   } catch (err) {
     state.error = err instanceof Error ? err.message : 'Liveness check failed';
     state.authCapturedFace = null;
-    state.authPhase = 'capturing';
+    // Challenge is single-use and may have expired — reset to fetch a fresh one
+    state.challenge = null;
+    state.cNonce = null;
+    state.flashRounds = null;
+    state.spatialCapture = null;
+    state.authPhase = 'ready';
     state.isLoading = false;
     render();
   } finally {
     livenessRunning = false;
   }
+}
+
+/**
+ * Perform spatial flash with progress dot updates.
+ */
+async function performSpatialFlashWithProgress(
+  rounds: FlashRound[],
+  video: HTMLVideoElement
+): Promise<SpatialFlashCapture> {
+  // We wrap performSpatialFlash but update dots after each round.
+  // Since performSpatialFlash handles the full sequence internally,
+  // we update dots based on timing estimates.
+
+  // Start the spatial flash
+  const capturePromise = performSpatialFlash(rounds, video);
+
+  // Update progress dots at approximate intervals (~350ms per round)
+  const roundDuration = 350;
+  for (let i = 0; i < rounds.length; i++) {
+    await sleep(roundDuration);
+    updateFlashDot(i);
+    updateLivenessStatus(`Round ${i + 1} of ${rounds.length} captured`);
+  }
+
+  return capturePromise;
 }
 
 async function generateProof(): Promise<void> {
@@ -448,17 +498,40 @@ async function generateProof(): Promise<void> {
     // Simulate progress while waiting for backend
     await simulateProofProgress();
 
-    const proof = await api.prove({
+    // Build prove request with spatial flash data
+    const proveRequest: {
+      challenge_id: string;
+      face_embedding?: number[];
+      c_nonce?: string;
+      flash_frames?: string[];
+    } = {
       challenge_id: state.challenge.challenge_id,
       face_embedding: state.authCapturedFace.embedding,
-    });
+    };
+
+    // Include spatial flash data if available
+    if (state.cNonce && state.spatialCapture) {
+      proveRequest.c_nonce = bufferToHex(state.cNonce);
+      // flash_frames: [baseline, round0, round1, round2]
+      proveRequest.flash_frames = [
+        state.spatialCapture.baselineDataUrl,
+        ...state.spatialCapture.roundFrames,
+      ];
+    }
+
+    const proof = await api.prove(proveRequest);
 
     state.proof = proof;
     state.authPhase = 'complete';
     state.completedSteps.add('authentication');
   } catch (err) {
     state.error = err instanceof Error ? err.message : 'Proof generation failed';
-    state.authPhase = 'capturing';
+    // Challenge is single-use — reset to fetch a fresh one on retry
+    state.challenge = null;
+    state.cNonce = null;
+    state.flashRounds = null;
+    state.spatialCapture = null;
+    state.authPhase = 'ready';
   } finally {
     state.isLoading = false;
     render();
@@ -533,7 +606,9 @@ function handleRestart(): void {
   state.authWebcamError = null;
   state.challenge = null;
   state.proof = null;
-  state.livenessResult = null;
+  state.cNonce = null;
+  state.flashRounds = null;
+  state.spatialCapture = null;
   state.verifyResult = null;
   render();
 }

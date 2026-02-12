@@ -16,7 +16,7 @@ use std::time::Instant;
 
 // Halo2 ZK proof system
 use sable_core::zk::halo2::{
-    FaceVerificationVerifier, Proof,
+    FaceVerificationVerifier, Proof, LivenessWitness,
     FeatureQuantizer, hamming_distance, ThresholdConfig, Halo2Fr,
 };
 
@@ -24,6 +24,7 @@ use crate::simulation::{
     calculate_distance, calculate_quality_score, generate_similar_features,
     generate_simulated_features,
 };
+use crate::flash_challenge::{compute_liveness_fingerprints, derive_flash_pattern, verify_client_commitment, verify_spatial_flash};
 use crate::state::{AppState, AuthChallenge, EnrollmentSession, LivenessResult};
 
 // Feature vector size (must match SABLE core)
@@ -161,6 +162,10 @@ pub async fn enroll(
 #[derive(Debug, Deserialize)]
 pub struct ChallengeRequest {
     pub session_id: String,
+    /// Optional client commitment (hex-encoded SHA-256 hash).
+    /// When provided, binds the client to data committed before the nonce is revealed,
+    /// enabling server-side liveness verification in a later step.
+    pub client_commitment: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -208,6 +213,7 @@ pub async fn auth_challenge(
         challenge_id: challenge_id.clone(),
         session_id: req.session_id,
         nonce,
+        client_commitment: req.client_commitment,
         created_at: Instant::now(),
     };
 
@@ -231,6 +237,29 @@ pub struct ProveRequest {
     pub noise_level: Option<f32>,
     /// Face embedding from Human library (1024-dimensional) for live scan
     pub face_embedding: Option<Vec<f64>>,
+    /// Client nonce (hex-encoded 32-byte nonce) for spatial color challenge verification.
+    /// When provided alongside `flash_frames`, the server verifies H(c_nonce) matches
+    /// the client_commitment from the challenge, recomputes the expected flash pattern,
+    /// and performs per-region color matching against the captured frames.
+    pub c_nonce: Option<String>,
+    /// Base64-encoded JPEG frames for spatial color challenge: [baseline, round1, round2, round3].
+    /// The baseline frame is captured before any flash; the 3 round frames are captured
+    /// during each flash round with split-screen colors.
+    pub flash_frames: Option<Vec<String>>,
+}
+
+/// Per-round region match score for spatial color verification.
+#[derive(Debug, Clone, Serialize)]
+pub struct RegionScoreResponse {
+    /// Flash round index (0-based).
+    pub round: usize,
+    /// Cosine similarity of upper-half delta vs. expected top color.
+    pub upper_score: f64,
+    /// Cosine similarity of lower-half delta vs. expected bottom color.
+    pub lower_score: f64,
+    /// Cosine similarity between upper and lower delta vectors.
+    /// Low values (< 0.95) indicate 3D geometry; high values indicate flat surface.
+    pub spatial_diff_score: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -243,6 +272,14 @@ pub struct ProveResponse {
     pub quality_score: f32,
     pub proof_size_bytes: usize,
     pub liveness_passed: Option<bool>,
+    /// Whether the spatial color challenge passed (if c_nonce was provided).
+    pub color_challenge_passed: Option<bool>,
+    /// Whether liveness was proven inside the ZK proof (not just plaintext check).
+    pub liveness_proved_in_zk: Option<bool>,
+    /// Per-round region match scores from spatial color verification.
+    pub region_match_scores: Option<Vec<RegionScoreResponse>>,
+    /// Average spatial differentiation score across rounds.
+    pub spatial_differentiation_score: Option<f64>,
     pub timings: ProveTimings,
     pub what_was_proven: Vec<String>,
     pub what_stayed_private: Vec<String>,
@@ -348,9 +385,6 @@ pub async fn auth_prove(
         ));
     }
 
-    // Generate real Halo2 ZK proof
-    let proof_start = Instant::now();
-
     // Quantize live features for Hamming distance calculation
     let live_features_f64: Vec<f64> = live_features.iter().map(|&f| f as f64 / 2.0).collect();
     let live_quantized = FeatureQuantizer::quantize(&live_features_f64);
@@ -367,13 +401,218 @@ pub async fn auth_prove(
         hamming_dist, threshold, hamming_dist <= threshold
     );
 
-    // Generate real ZK proof using Halo2
-    let (proof_bytes, halo2_result) = {
+    // Check for stored liveness result
+    let liveness_passed = state
+        .get_liveness_result(&challenge.session_id)
+        .map(|r| r.passed);
+
+    // ========================================================================
+    // Spatial Color Challenge Verification (optional, before proof generation)
+    // ========================================================================
+    let mut color_challenge_passed: Option<bool> = None;
+    let mut region_match_scores: Option<Vec<RegionScoreResponse>> = None;
+    let mut spatial_differentiation_score: Option<f64> = None;
+    let mut liveness_witness: Option<LivenessWitness> = None;
+
+    if let (Some(c_nonce_hex), Some(frames_b64)) = (&req.c_nonce, &req.flash_frames) {
+        // a. Decode c_nonce from hex
+        let c_nonce_bytes = hex::decode(c_nonce_hex).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Invalid c_nonce hex: {}", e),
+                }),
+            )
+        })?;
+
+        if c_nonce_bytes.len() != 32 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "c_nonce must be 32 bytes, got {}",
+                        c_nonce_bytes.len()
+                    ),
+                }),
+            ));
+        }
+
+        let mut c_nonce_32 = [0u8; 32];
+        c_nonce_32.copy_from_slice(&c_nonce_bytes);
+
+        // b. Verify H(c_nonce) matches challenge.client_commitment (if present)
+        if let Some(commitment_hex) = &challenge.client_commitment {
+            let commitment_bytes = hex::decode(commitment_hex).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("Invalid client_commitment hex in challenge: {}", e),
+                    }),
+                )
+            })?;
+
+            if commitment_bytes.len() != 32 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!(
+                            "client_commitment must be 32 bytes, got {}",
+                            commitment_bytes.len()
+                        ),
+                    }),
+                ));
+            }
+
+            let mut commitment_32 = [0u8; 32];
+            commitment_32.copy_from_slice(&commitment_bytes);
+
+            if !verify_client_commitment(&c_nonce_32, &commitment_32) {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(ErrorResponse {
+                        error: "Client commitment mismatch: H(c_nonce) does not match stored commitment".to_string(),
+                    }),
+                ));
+            }
+
+            tracing::info!("Client commitment verified successfully");
+        }
+
+        // c. Recompute pattern = derive_flash_pattern(&c_nonce_32, &challenge.nonce)
+        let pattern = derive_flash_pattern(&c_nonce_32, &challenge.nonce);
+
+        // d. Decode flash_frames: [0] = baseline, [1..4] = flash frames
+        if frames_b64.len() != 4 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "flash_frames must contain exactly 4 frames (baseline + 3 rounds), got {}",
+                        frames_b64.len()
+                    ),
+                }),
+            ));
+        }
+
+        let baseline = decode_base64_jpeg(&frames_b64[0]).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Invalid baseline flash frame: {}", e),
+                }),
+            )
+        })?;
+
+        let mut flash_frames_decoded = Vec::with_capacity(3);
+        for (i, frame_b64) in frames_b64[1..].iter().enumerate() {
+            let frame = decode_base64_jpeg(frame_b64).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("Invalid flash frame {}: {}", i + 1, e),
+                    }),
+                )
+            })?;
+            flash_frames_decoded.push(frame);
+        }
+
+        // e. Call verify_spatial_flash(&baseline, &flash_frames, &pattern)
+        let spatial_result = verify_spatial_flash(&baseline, &flash_frames_decoded, &pattern)
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("Spatial flash verification failed: {}", e),
+                    }),
+                )
+            })?;
+
+        for score in &spatial_result.region_scores {
+            tracing::info!(
+                "Spatial round {}: upper_score={:.4}, lower_score={:.4}, spatial_diff={:.4}",
+                score.round, score.upper_score, score.lower_score, score.spatial_diff_score,
+            );
+        }
+        tracing::info!(
+            "Spatial color verification: passed={}, overall_spatial_score={:.4}, rounds={}",
+            spatial_result.passed,
+            spatial_result.overall_spatial_score,
+            spatial_result.region_scores.len(),
+        );
+
+        // f. If failed, return 401 error
+        if !spatial_result.passed {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: format!(
+                        "Spatial color challenge failed: overall_spatial_score={:.4}",
+                        spatial_result.overall_spatial_score,
+                    ),
+                }),
+            ));
+        }
+
+        // g. Compute delta fingerprints for ZK liveness proof
+        let (delta_fps, expected_fps) =
+            compute_liveness_fingerprints(&baseline, &flash_frames_decoded, &pattern);
+
+        tracing::info!(
+            "Liveness fingerprints: delta={:?}, expected={:?}",
+            delta_fps, expected_fps
+        );
+
+        liveness_witness = Some(LivenessWitness {
+            delta_fingerprints: delta_fps,
+            expected_fingerprints: expected_fps,
+            color_threshold: 5,    // allow up to HD=5 between delta and expected
+            spatial_threshold: 1,  // require at least HD=1 between upper/lower
+            min_magnitude: 3,      // minimum magnitude for flash response
+        });
+
+        // h. Store result, set response fields
+        color_challenge_passed = Some(spatial_result.passed);
+        spatial_differentiation_score = Some(spatial_result.overall_spatial_score);
+        region_match_scores = Some(
+            spatial_result
+                .region_scores
+                .iter()
+                .map(|s| RegionScoreResponse {
+                    round: s.round,
+                    upper_score: s.upper_score,
+                    lower_score: s.lower_score,
+                    spatial_diff_score: s.spatial_diff_score,
+                })
+                .collect(),
+        );
+
+        // Spatial color challenge is the primary liveness mechanism.
+        // When present, it supersedes any legacy single-flash result.
+        state.store_liveness_result(
+            challenge.session_id.clone(),
+            LivenessResult {
+                passed: spatial_result.passed,
+                reflectance_variance: 0.0,
+                reflectance_gradient: 0.0,
+                highlight_softness: 0.0,
+                channel_consistency: 0.0,
+                checked_at: Instant::now(),
+            },
+        );
+    }
+
+    // ========================================================================
+    // Generate Halo2 ZK Proof (face match + optional liveness)
+    // ========================================================================
+    let proof_start = Instant::now();
+
+    let (proof_bytes, halo2_result, liveness_proved_in_zk) = {
         let mut prover = state.halo2_prover.write();
-        match prover.prove(hamming_dist, threshold) {
+        match prover.prove_with_liveness(hamming_dist, threshold, liveness_witness) {
             Ok(proof) => {
                 let result = hamming_dist <= threshold;
-                (proof.proof_bytes, result)
+                let liveness_zk = proof.liveness_passed;
+                (proof.proof_bytes, result, liveness_zk)
             }
             Err(e) => {
                 return Err((
@@ -387,7 +626,12 @@ pub async fn auth_prove(
     };
 
     let proof_time = proof_start.elapsed();
-    let total_time = total_start.elapsed();
+
+    tracing::info!(
+        "Halo2 proof generated: face_match={}, liveness_in_zk={}, time={:.2}ms, size={}B",
+        halo2_result, liveness_proved_in_zk,
+        proof_time.as_secs_f64() * 1000.0, proof_bytes.len()
+    );
 
     // If Halo2 says no match, return error
     if !halo2_result {
@@ -408,12 +652,10 @@ pub async fn auth_prove(
         hex::encode(challenge.nonce),
         format!("{:016x}", threshold), // Threshold used
         format!("{}", if halo2_result { "1" } else { "0" }), // Result: 1=match, 0=no match
+        format!("{}", if liveness_proved_in_zk { "1" } else { "0" }), // Liveness result
     ];
 
-    // Check for stored liveness result
-    let liveness_passed = state
-        .get_liveness_result(&challenge.session_id)
-        .map(|r| r.passed);
+    let total_time = total_start.elapsed();
 
     Ok(Json(ProveResponse {
         proof_hex: hex::encode(&proof_bytes),
@@ -424,6 +666,10 @@ pub async fn auth_prove(
         quality_score,
         proof_size_bytes: proof_bytes.len(),
         liveness_passed,
+        color_challenge_passed,
+        liveness_proved_in_zk: if color_challenge_passed.is_some() { Some(liveness_proved_in_zk) } else { None },
+        region_match_scores,
+        spatial_differentiation_score,
         timings: ProveTimings {
             feature_scan_ms: scan_time.as_secs_f64() * 1000.0,
             distance_calc_ms: distance_time.as_secs_f64() * 1000.0,
@@ -440,6 +686,11 @@ pub async fn auth_prove(
             if liveness_passed == Some(true) {
                 proven.push("Screen flash liveness check passed (real face detected)".to_string());
             }
+            if liveness_proved_in_zk && color_challenge_passed == Some(true) {
+                proven.push("Spatial liveness verified in zero knowledge (Halo2 ZK-SNARK)".to_string());
+            } else if color_challenge_passed == Some(true) {
+                proven.push("Spatial color challenge passed (3D face geometry verified)".to_string());
+            }
             proven
         },
         what_stayed_private: {
@@ -451,6 +702,11 @@ pub async fn auth_prove(
             ];
             if liveness_passed.is_some() {
                 private.push("Screen flash reflectance signals (variance, gradient, softness, consistency)".to_string());
+            }
+            if liveness_proved_in_zk && color_challenge_passed.is_some() {
+                private.push("Per-region facial reflectance signals (proven without revealing)".to_string());
+            } else if color_challenge_passed.is_some() {
+                private.push("Per-region color reflectance deltas (spatial flash analysis)".to_string());
             }
             private
         },
@@ -484,6 +740,8 @@ pub struct VerificationDetails {
     pub temporal_check_passed: bool,
     pub quality_check_passed: bool,
     pub liveness_check_passed: Option<bool>,
+    /// Whether liveness was verified inside the ZK proof (from public_inputs[2]).
+    pub liveness_proved_in_zk: bool,
 }
 
 pub async fn verify(
@@ -516,15 +774,24 @@ pub async fn verify(
         1
     };
 
+    // Parse liveness result from public inputs (third field, if present)
+    let liveness_val = if req.public_inputs_hex.len() >= 5 {
+        req.public_inputs_hex[4].parse::<u64>().unwrap_or(1)
+    } else {
+        1 // backwards compatible: old proofs default to liveness pass
+    };
+
     // Reconstruct public inputs as Fr field elements
     let public_inputs = vec![
         Halo2Fr::from(result_val),
         Halo2Fr::from(threshold),
+        Halo2Fr::from(liveness_val),
     ];
 
     let proof = Proof {
         proof_bytes,
         public_inputs,
+        liveness_passed: liveness_val == 1,
     };
 
     // Verify using Halo2
@@ -548,9 +815,10 @@ pub async fn verify(
     match verification_result {
         Ok(is_match) => {
             tracing::info!(
-                "Halo2 verification completed: valid={}, liveness={:?}, time={:.2}ms",
+                "Halo2 verification completed: valid={}, liveness={:?}, liveness_zk={}, time={:.2}ms",
                 is_match,
                 liveness_check,
+                proof.liveness_passed,
                 verification_time.as_secs_f64() * 1000.0
             );
             Ok(Json(VerifyResponse {
@@ -562,6 +830,7 @@ pub async fn verify(
                     temporal_check_passed: true,
                     quality_check_passed: true,
                     liveness_check_passed: liveness_check,
+                    liveness_proved_in_zk: proof.liveness_passed,
                 },
             }))
         }
@@ -577,6 +846,7 @@ pub async fn verify(
                     temporal_check_passed: true,
                     quality_check_passed: true,
                     liveness_check_passed: liveness_check,
+                    liveness_proved_in_zk: false,
                 },
             }))
         }

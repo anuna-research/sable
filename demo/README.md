@@ -123,6 +123,118 @@ Succinct proof that demonstrates:
 - Exact distance value
 - Any identifying biometric patterns
 
+## Security Model & Limitations
+
+### Coin-Flip Spatial Liveness Protocol
+
+The demo implements a challenge-response liveness protocol based on Tang et al. (NDSS 2018) with a **coin-flip commitment scheme** and **split-screen spatial verification**. Neither party alone can predict or control the flash pattern.
+
+#### Protocol Steps
+
+```
+1. COMMIT    POST /api/auth/challenge
+             Client sends: {session_id, client_commitment: SHA-256(c_nonce)}
+             Server generates s_nonce, stores client_commitment
+             Server returns: {challenge_id, nonce_hex: s_nonce}
+
+2. FLASH     Client computes: pattern = HKDF-SHA256(c_nonce || s_nonce)
+               → 3 rounds × 2 regions (top/bottom) = 6 RGB colors
+             Client captures baseline frame (ambient lighting)
+             Client flashes 3 split-screen rounds, captures one frame per round
+             Total flash time: ~1.3s
+
+3. VERIFY    POST /api/auth/prove
+             Client reveals: {challenge_id, c_nonce, flash_frames, face_embedding}
+             Server checks:
+               a. SHA-256(c_nonce) == stored client_commitment  (commit binding)
+               b. Recompute pattern = HKDF-SHA256(c_nonce || s_nonce)
+               c. Per-region color shift verification (upper/lower face halves)
+               d. Spatial differentiation check (3D geometry proof)
+               e. Laplacian smoothness + Halo2 biometric ZK proof
+             Returns: {proof_hex, liveness_passed, region_match_scores, ...}
+```
+
+#### Trust Model
+
+| Property | Mechanism | Guarantees |
+|---|---|---|
+| Server cannot predict pattern alone | Coin-flip: pattern = HKDF(c_nonce \|\| s_nonce); server never sees c_nonce until reveal | Server cannot pre-select a "friendly" challenge |
+| Client cannot predict pattern alone | Commit-before-reveal: client commits SHA-256(c_nonce) before seeing s_nonce | Client cannot choose c_nonce to produce a known pattern |
+| No enrollment salt exposure | Flash derivation uses only session nonces, not the enrollment salt | Salt compromise in one protocol has zero propagation |
+| 3D geometry verification | Split-screen top/bottom colors produce different reflectance on curved faces | Flat surfaces (photos, screens) reflect both regions identically and fail |
+
+#### Attack Analysis
+
+| Attack | Old Model (single white flash) | Coin-Flip Spatial Model |
+|---|---|---|
+| **Pre-recorded frame replay** | Succeeds (flash is always white, pairs are replayable) | Fails: attacker cannot predict the 6-color pattern before commit |
+| **Photo held to honest webcam** | Detected by Laplacian smoothness check | Detected by Laplacian + spatial differentiation (flat surface) |
+| **Screen displaying a face video** | Detected by Laplacian smoothness check | Detected by Laplacian + spatial differentiation (flat surface) |
+| **Server collusion / biased challenge** | N/A (no challenge) | Fails: server cannot bias pattern without knowing c_nonce |
+| **Client-controlled capture (modified browser)** | Succeeds | Partially mitigated: must synthesize spatially consistent 3D reflectance for an unpredictable pattern in real time (see Remaining Limitations below) |
+
+#### Message Space
+
+The protocol's unpredictability stems from the color pattern entropy:
+
+- ~30 distinguishable color directions per region (limited by camera noise floor and skin reflectance bandwidth)
+- 6 independent region-challenges (3 rounds x 2 regions)
+- **Total: 30^6 = 729,000,000 possible patterns (~30 bits)**
+- Plus: spatial consistency constraint (flat surfaces fail regardless of color match)
+
+For comparison, a single white flash provides 1 bit (flash vs. no-flash).
+
+#### Comparison to Previous Single-White-Flash Model
+
+| Dimension | Single White Flash | Coin-Flip Spatial |
+|---|---|---|
+| Challenge entropy | ~1 bit | ~30 bits |
+| Replay resistance | None (static pattern) | Yes (unpredictable pattern per session) |
+| Server trust required | Low (no challenge to bias) | None (coin-flip prevents bias) |
+| 3D geometry check | No | Yes (split-screen differential) |
+| Latency | ~0.5s (1 flash + 1 capture) | ~1.3s (3 rounds + baseline) |
+| WCAG photosensitivity | Marginal (single bright flash) | Controlled (see safety measures below) |
+
+#### Remaining Limitation: Client Controls Capture
+
+The fundamental limitation of any browser-based liveness protocol is that the client controls the camera pipeline. A sufficiently sophisticated attacker who controls the browser can:
+
+1. Intercept the derived pattern after both nonces are known
+2. Render a synthetic face with correct spatially-varying reflectance
+3. Submit the synthetic frames as if from the webcam
+
+This attack requires **real-time 3D rendering** of plausible facial reflectance for an unpredictable pattern, which is a significantly higher bar than replaying static frames, but it is not impossible.
+
+##### Hardware-Based Mitigations for the Client-Trust Gap
+
+These approaches progressively close the gap, ordered by implementation complexity:
+
+1. **Platform attestation (WebAuthn / Play Integrity / App Attest).** Verify the client application has not been tampered with. Shifts trust from "the software behaves correctly" to "the platform's attestation mechanism is sound."
+
+2. **Signed camera frames (C2PA / Android Protected Confirmation).** Cryptographically signed sensor output proves the image came from real hardware at a specific time, preventing frame injection even on a compromised OS.
+
+3. **Trusted Execution Environment (ARM TrustZone / Intel SGX).** Run capture and liveness analysis inside a TEE. Even a compromised OS cannot tamper with the capture pipeline. This is the architecture SABLE's core library targets for production.
+
+4. **Dedicated NIR hardware with firmware attestation.** The core library's `NirLivenessExtractor` is designed for tamper-resistant NIR sensors that measure physiological signals (pulse, vein contrast). Combined with ZK proofs, the verifier trusts the hardware and the proof math rather than any software in between.
+
+The production SABLE architecture targets options 3 and 4, where liveness signals are captured by trusted hardware and proven in zero-knowledge. The demo uses the coin-flip spatial protocol as the strongest purely software-based approach feasible in a browser.
+
+#### WCAG 2.3.1 Photosensitive Safety
+
+The flash sequence is designed to comply with WCAG 2.3.1 (Three Flashes or Below Threshold):
+
+- **3 flashes over ~1.3s** stays within the "three flashes per second" safe limit
+- Each flash uses **muted, mid-saturation colors** (not full-brightness white)
+- Split-screen design means each region covers roughly half the viewport, reducing the flashing area
+- A **prefers-reduced-motion** media query can disable the flash UI entirely (authentication falls back to ZK-only without liveness)
+
+#### Mobile UX Considerations
+
+- **Front camera field of view**: Mobile front cameras have wider FOV; the split-screen regions are sized to ensure the face occupies enough of each region for measurable reflectance
+- **Screen brightness variance**: HKDF-derived colors are clamped to a luminance range that produces detectable reflectance across typical mobile brightness settings (40-100%)
+- **Ambient light interference**: The baseline frame subtraction compensates for ambient light; the protocol works in indoor lighting but may degrade in direct sunlight
+- **Battery and thermal**: 3 frames + 1 baseline is lightweight; no continuous video capture needed
+
 ## Development
 
 ### Backend Structure

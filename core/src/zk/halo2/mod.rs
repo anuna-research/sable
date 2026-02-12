@@ -56,12 +56,12 @@
 //! - **Flexible**: PLONKish arithmetization allows efficient custom gates
 //! - **Proven**: Used in production systems (Zcash, Scroll, Axiom)
 //!
-//! ## Performance
+//! ## Performance (Release Mode, Apple Silicon)
 //!
 //! | Operation | Time | Target |
 //! |-----------|------|--------|
-//! | Proof Generation | ~1.5s | ≤1000ms (NFR-001) |
-//! | Verification | ~50ms | ≤50ms (NFR-002) |
+//! | Proof Generation (face + liveness) | ~250ms | ≤1000ms (NFR-001) |
+//! | Verification | ~1.8ms | ≤50ms (NFR-002) |
 //! | Proof Size | 2.08KB | ≤10KB (NFR-003) |
 //!
 //! ## Security Properties
@@ -72,6 +72,7 @@
 
 pub mod hamming;
 pub mod hello;
+pub mod liveness;
 pub mod poseidon;
 pub mod proof;
 pub mod quantizer;
@@ -84,10 +85,11 @@ mod tests;
 pub use hamming::{HammingDistanceCircuit, hamming_distance, hamming_similarity, MAX_EMBEDDING_DIM};
 pub use hello::HelloCircuit;
 pub use poseidon::{PoseidonCircuit, poseidon_hash_pair};
-pub use proof::{FaceVerificationProver, FaceVerificationVerifier, Proof, ProofSetup};
+pub use proof::{FaceVerificationProver, FaceVerificationVerifier, Proof, ProofSetup, VerificationDetails};
 pub use quantizer::{FeatureQuantizer, QuantizedEmbedding, FACE_EMBEDDING_DIM};
 pub use threshold::{ThresholdConfig, VerificationResult, precomputed};
 pub use threshold_check::{ThresholdCheckCircuit, FaceVerificationCircuit};
+pub use liveness::{LivenessCheckCircuit, LivenessWitness, LivenessResult};
 
 // Re-export types needed for external use
 pub use halo2_base::halo2_proofs::halo2curves::bn256::Fr as Halo2Fr;

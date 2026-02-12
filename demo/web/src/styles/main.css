@@ -986,6 +986,230 @@ p {
   color: var(--accent-secondary);
 }
 
+/* Spatial Color Challenge — liveness verification */
+.spatial-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.875rem;
+  border-radius: 999px;
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+}
+
+.spatial-badge-pass {
+  background: rgba(16, 185, 129, 0.2);
+  color: var(--accent-success);
+}
+
+.spatial-badge-fail {
+  background: rgba(239, 68, 68, 0.2);
+  color: var(--accent-error);
+}
+
+.spatial-badge-icon {
+  font-size: 1.125rem;
+}
+
+/* Flash round cards */
+.flash-rounds {
+  margin-bottom: 1.25rem;
+}
+
+.flash-rounds-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.5rem;
+}
+
+.flash-cards-row {
+  display: flex;
+  gap: 1rem;
+}
+
+.flash-card {
+  display: flex;
+  flex-direction: column;
+  width: 40px;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+}
+
+.flash-card-top,
+.flash-card-bottom {
+  height: 30px;
+}
+
+.flash-card-label {
+  font-size: 0.625rem;
+  color: var(--text-muted);
+  text-align: center;
+  padding-top: 0.25rem;
+}
+
+/* Per-region match scores */
+.region-scores-section {
+  margin-bottom: 1.25rem;
+}
+
+.region-scores-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.5rem;
+}
+
+.region-score-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.region-score-label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  width: 4rem;
+  flex-shrink: 0;
+}
+
+.region-score-bars {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.region-score-bar-group {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.region-score-bar-label {
+  font-size: 0.625rem;
+  color: var(--text-muted);
+  width: 2.5rem;
+  flex-shrink: 0;
+}
+
+.region-score-track {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-primary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.region-score-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+.region-score-pct {
+  font-size: 0.625rem;
+  color: var(--text-muted);
+  width: 2rem;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+/* Spatial differentiation score */
+.spatial-diff-score {
+  margin-bottom: 0.5rem;
+}
+
+.spatial-diff-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.375rem;
+}
+
+.spatial-diff-track {
+  height: 8px;
+  background: var(--bg-primary);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 0.25rem;
+}
+
+.spatial-diff-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.4s ease;
+}
+
+.spatial-diff-value {
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+/* Liveness protocol steps */
+.liveness-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.liveness-step {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+}
+
+.liveness-step-num {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 50%;
+  background: var(--accent-secondary);
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 700;
+  flex-shrink: 0;
+  margin-top: 0.125rem;
+}
+
+.liveness-step-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.25rem;
+}
+
+.liveness-step-detail {
+  font-size: 0.775rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.liveness-step-detail em {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.liveness-step-detail strong {
+  color: var(--accent-secondary);
+}
+
 /* Footer */
 .site-footer {
   text-align: center;

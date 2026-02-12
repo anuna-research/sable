@@ -1,7 +1,3 @@
-mod handlers;
-mod simulation;
-mod state;
-
 use axum::{
     routing::{get, post},
     Router,
@@ -11,7 +7,8 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::state::AppState;
+use demo_server::handlers;
+use demo_server::state::AppState;
 
 #[tokio::main]
 async fn main() {

@@ -1,0 +1,251 @@
+; Joint Coin-Flip Liveness Challenge Protocol with Spatial Patterns
+;
+; Both client and server contribute randomness to derive an unpredictable
+; spatially-structured flash pattern. Uses the existing challenge nonce as
+; the server's contribution. No extra round trips — augments the existing
+; 2-request auth flow.
+;
+; Spatial design: Each flash round splits the screen into top/bottom halves,
+; each half showing a different color. A real 3D face reflects each half's
+; color differently depending on facial geometry (forehead vs chin angle to
+; screen). Flat surfaces (photos/screens) reflect uniformly — detectable.
+;
+; Mobile UX: 3 rounds × 2 regions = 6 independent color challenges in ~1.3s.
+; Face positioning guide → brief flash sequence → done.
+;
+; Protocol:
+;   1. POST /api/auth/challenge {session_id, client_commitment: H(c_nonce)}
+;      Server generates challenge nonce (s_nonce), stores client_commitment
+;      ← {challenge_id, nonce_hex}
+;
+;   2. Client computes: pattern = PRF(c_nonce || s_nonce)
+;        → 3 rounds × 2 regions = 6 RGB colors
+;      Client shows face positioning guide ("Hold still")
+;      Client captures baseline frame (ambient)
+;      Client flashes 3 split-screen rounds, captures frame per round
+;      Total flash time: ~1.3s
+;
+;   3. POST /api/auth/prove {challenge_id, c_nonce, flash_frames, face_embedding}
+;      Server verifies:
+;        a. H(c_nonce) matches client_commitment from step 1
+;        b. Recomputes pattern = PRF(c_nonce || s_nonce)
+;        c. For each frame: segments face into upper/lower regions,
+;           extracts per-region color shift, checks direction matches
+;           the expected color for that region
+;        d. Checks spatial differentiation: upper and lower face regions
+;           must show DIFFERENT color shifts (3D geometry proof)
+;        e. Existing Laplacian smoothness + biometric ZK proof
+;      ← {proof_hex, liveness_passed, region_match_scores, ...}
+;
+; Trust model:
+;   - Neither party alone can predict/control the flash pattern
+;   - Enrollment salt is NOT involved (no salt compromise propagation)
+;   - Commit-before-reveal prevents both parties from biasing output
+;   - Spatial patterns provide 3D geometry verification for free
+;   - Client still controls capture (mitigated by physics + spatial checks)
+;
+; Message space:
+;   ~30 distinguishable directions/region × 6 independent challenges
+;   = 30^6 ≈ 729M ≈ 30 bits (conservative)
+;   Plus spatial consistency check (flat surfaces fail regardless of colors)
+
+; =============================================================================
+; AGENTS
+; =============================================================================
+
+(given agent-claude-available)
+
+; =============================================================================
+; PHASE 1: PRF & SPATIAL COLOR VERIFICATION CORE
+; Goal: Implement pattern derivation from joint randomness + per-region matching
+; =============================================================================
+
+(given task-flash-prf)
+(meta task-flash-prf
+  (title "Implement Spatial Flash Pattern PRF")
+  (description "Implement derive_flash_pattern(c_nonce: [u8;32], s_nonce: [u8;32]) -> FlashPattern using HKDF-SHA256. FlashPattern contains 3 rounds, each with 2 RGB colors (top_color, bottom_color). Derive 6 distinct RGB colors from the concatenation of both nonces (18 bytes of HKDF output, mapped to RGB). Ensure paired colors per round are visually distinct (minimum angular distance in RGB space > 60 degrees). Photosensitive safety: clamp saturation to avoid pure saturated red flashes (WCAG 2.3.1 general flash threshold — no large-area saturated red; cap red channel contribution so R < 0.8 when G+B < 0.2). Place in demo/server/src/flash_challenge.rs. Include: the PRF function, a verify_client_commitment(c_nonce, commitment) -> bool helper using SHA-256, FlashPattern / FlashRound structs. Must be deterministic and reproducible in both Rust and TypeScript (use the same HKDF-SHA256 construction).")
+  (phase "phase-1-core")
+  (estimate "1h"))
+
+(given task-region-color-matching)
+(meta task-region-color-matching
+  (title "Implement Per-Region Reflected Color Verification")
+  (description "Implement server-side verification that each face region reflects the correct half-screen color. For each flash round: 1) Take the captured frame + baseline, 2) Compute per-pixel reflectance ratio map (flash/baseline), 3) Split the face bounding box into upper half (forehead/eyes) and lower half (mouth/chin) — use a simple 50% vertical split of the face region, 4) For each half: compute mean RGB delta vector, compare its direction against the expected flash color for that screen region using cosine similarity, 5) Spatial differentiation check: verify the upper and lower delta vectors point in DIFFERENT directions (confirms 3D geometry — flat surfaces fail this). Return per-region per-round match scores + spatial differentiation score + overall pass/fail. Face region can be approximated as center 60% of frame (user is guided to center their face).")
+  (phase "phase-1-core")
+  (estimate "2h"))
+
+(given task-phase1-tests)
+(meta task-phase1-tests
+  (title "Unit Tests for PRF and Spatial Verification")
+  (description "Tests: 1) PRF determinism: same nonces -> same pattern, 2) PRF uniqueness: different nonces -> different patterns, 3) Per-round colors are visually distinct (angular distance > 60 deg), 4) Client commitment verification: correct/wrong c_nonce, 5) Region matching with synthetic frames: correct split-color -> pass, 6) Wrong colors -> fail, 7) Uniform flash (same color top/bottom) -> spatial differentiation fails, 8) Flat-surface simulation (same delta in both regions) -> spatial check fails, 9) Tolerance for slight ambient variation and face position jitter.")
+  (phase "phase-1-core")
+  (estimate "1h"))
+
+; Phase 1 dependencies
+(given no-deps-flash-prf)
+
+; =============================================================================
+; PHASE 2: API & MOBILE FRONTEND INTEGRATION
+; Goal: Wire into existing 2-request flow with mobile-optimized UX
+; =============================================================================
+
+(given task-update-challenge-endpoint)
+(meta task-update-challenge-endpoint
+  (title "Update Challenge Endpoint for Client Commitment")
+  (description "Modify POST /api/auth/challenge: 1) Accept optional client_commitment: String (hex-encoded SHA-256 hash) in ChallengeRequest, 2) Store client_commitment in AuthChallenge struct alongside existing nonce, 3) Response unchanged — client already receives nonce_hex. If client_commitment is absent, liveness check is skipped (backwards compatible).")
+  (phase "phase-2-integration")
+  (estimate "30min"))
+
+(given task-update-prove-endpoint)
+(meta task-update-prove-endpoint
+  (title "Update Prove Endpoint for Spatial Color Verification")
+  (description "Modify POST /api/auth/prove: 1) Accept optional c_nonce: String (hex) and flash_frames: Vec<String> (base64 JPEGs, one per round, plus baseline as first element). 2) If c_nonce present: verify H(c_nonce) matches stored client_commitment, recompute pattern = PRF(c_nonce || s_nonce), decode frames, run per-region color matching + spatial differentiation check against expected pattern, store liveness result. 3) Reject if commitment mismatch or spatial check fails. 4) Add to ProveResponse: color_challenge_passed: bool, region_match_scores: Vec<RegionScore>, spatial_differentiation_score: f64. 5) Keep existing Halo2 ZK proof + Laplacian smoothness as-is.")
+  (phase "phase-2-integration")
+  (estimate "1.5h"))
+
+(given task-spatial-flash-frontend)
+(meta task-spatial-flash-frontend
+  (title "Mobile Spatial Flash Frontend")
+  (description "Update demo/web/ for mobile-friendly spatial flash capture: 1) New performSpatialFlash(pattern: FlashPattern, video: HTMLVideoElement) -> SpatialCapture in screenFlash.ts. For each round, render a split-screen overlay: top half = round.top_color, bottom half = round.bottom_color. Capture frame after 350ms settle. Total: baseline + 3 round captures in ~1.3s. 2) In authentication screen: show face positioning guide with oval outline ('Center your face, hold still'), generate c_nonce via crypto.getRandomValues(32), compute client_commitment = SHA-256(c_nonce) via SubtleCrypto, send with challenge request. After receiving s_nonce: compute pattern = HKDF-SHA256(c_nonce || s_nonce) client-side (port same logic, or use SubtleCrypto HKDF), run spatial flash, send c_nonce + frames with prove request. 3) Mobile UX: progress dots during flash (3 dots, each fills as round completes), smooth transitions between rounds (crossfade, no jarring full-black between flashes), portrait orientation assumed, flash overlay uses CSS grid with 2 rows. 4) Photosensitive safety (WCAG 2.3.1): enforce minimum 300ms between flash transitions (keeps rate < 3/sec), show brief 'Liveness check will flash colors briefly' consent notice before starting (allow user to dismiss or opt out), use prefers-reduced-motion media query to offer a fallback (longer, gentler transitions at cost of weaker liveness signal). 5) Keep existing single white flash as fallback when client_commitment is absent.")
+  (phase "phase-2-integration")
+  (estimate "2.5h"))
+
+(given task-update-verify-ui)
+(meta task-update-verify-ui
+  (title "Update Verification UI for Spatial Liveness Results")
+  (description "Update verification screen: 1) Show pass/fail for spatial liveness check, 2) Show the 3 flash rounds as mini split-color cards (top/bottom colored rectangles), 3) Per-region match confidence as colored indicators, 4) Spatial differentiation score visualization, 5) Add to 'What was proven': 'Face reflects spatially structured light consistent with 3D geometry' and to 'What stayed private': 'Per-region reflectance signals'. Update VerifyResponse / VerificationDetails.")
+  (phase "phase-2-integration")
+  (estimate "1h"))
+
+; =============================================================================
+; PHASE 3: TESTING & DOCUMENTATION
+; Goal: End-to-end validation and security documentation
+; =============================================================================
+
+(given task-e2e-tests)
+(meta task-e2e-tests
+  (title "End-to-End Integration Tests")
+  (description "Test the full protocol: 1) Happy path: enroll -> challenge w/ commitment -> spatial flash -> prove -> verify (pass), 2) Wrong c_nonce: commitment mismatch -> reject, 3) Wrong colors: flash arbitrary colors -> region matching fails, 4) Replay attack: reuse frames from different session -> nonce changed, colors different, fails, 5) Uniform flash: single color on both halves -> spatial differentiation fails, 6) No liveness: omit client_commitment -> backwards compatible, skip liveness, 7) Timing: challenge expiry still works. 8) Test on simulated portrait-orientation frames with face centered.")
+  (phase "phase-3-validation")
+  (estimate "1.5h"))
+
+(given task-security-docs)
+(meta task-security-docs
+  (title "Security Analysis and README Update")
+  (description "Update demo/README.md Security Model section: 1) Document the coin-flip spatial protocol step by step, 2) Trust assumptions: neither party controls randomness, spatial patterns verify 3D geometry, client controls capture, 3) Message space analysis: 6 independent challenges ≈ 30 bits, plus spatial consistency, 4) Attack analysis: pre-computation infeasible (don't know colors), real-time synthesis requires spatially-correct multi-illumination rendering, flat surfaces fail spatial check regardless, 5) Mobile UX considerations, 6) Remaining limitations and hardware mitigations.")
+  (phase "phase-3-validation")
+  (estimate "1h"))
+
+; =============================================================================
+; READINESS RULES
+; =============================================================================
+
+; Phase 1: linear chain
+(normally r-ready-flash-prf
+  (and task-flash-prf no-deps-flash-prf)
+  ready-flash-prf)
+
+(normally r-ready-region-color-matching
+  (and task-region-color-matching completed-flash-prf)
+  ready-region-color-matching)
+
+(normally r-ready-phase1-tests
+  (and task-phase1-tests completed-flash-prf completed-region-color-matching)
+  ready-phase1-tests)
+
+(normally r-phase1-complete
+  (and completed-flash-prf completed-region-color-matching completed-phase1-tests)
+  completed-phase1)
+
+; Phase 2: endpoints can parallelize, frontend needs both
+(normally r-ready-update-challenge
+  (and task-update-challenge-endpoint completed-phase1)
+  ready-update-challenge-endpoint)
+
+(normally r-ready-update-prove
+  (and task-update-prove-endpoint completed-phase1)
+  ready-update-prove-endpoint)
+
+(normally r-ready-spatial-flash-frontend
+  (and task-spatial-flash-frontend
+       completed-update-challenge-endpoint
+       completed-update-prove-endpoint)
+  ready-spatial-flash-frontend)
+
+(normally r-ready-update-verify-ui
+  (and task-update-verify-ui completed-spatial-flash-frontend)
+  ready-update-verify-ui)
+
+(normally r-phase2-complete
+  (and completed-update-challenge-endpoint
+       completed-update-prove-endpoint
+       completed-spatial-flash-frontend
+       completed-update-verify-ui)
+  completed-phase2)
+
+; Phase 3: tests + docs can parallelize after phase 2
+(normally r-ready-e2e-tests
+  (and task-e2e-tests completed-phase2)
+  ready-e2e-tests)
+
+(normally r-ready-security-docs
+  (and task-security-docs completed-phase2)
+  ready-security-docs)
+
+(normally r-phase3-complete
+  (and completed-e2e-tests completed-security-docs)
+  completed-phase3)
+
+; Project completion
+(normally r-project-complete
+  completed-phase3
+  project-complete)
+
+; =============================================================================
+; ASSIGNMENT RULES
+; =============================================================================
+
+; Phase 1
+(normally r-assign-flash-prf
+  (and ready-flash-prf agent-claude-available)
+  assign-to-flash-prf-claude)
+
+(normally r-assign-region-color-matching
+  (and ready-region-color-matching agent-claude-available)
+  assign-to-region-color-matching-claude)
+
+(normally r-assign-phase1-tests
+  (and ready-phase1-tests agent-claude-available)
+  assign-to-phase1-tests-claude)
+
+; Phase 2
+(normally r-assign-update-challenge
+  (and ready-update-challenge-endpoint agent-claude-available)
+  assign-to-update-challenge-endpoint-claude)
+
+(normally r-assign-update-prove
+  (and ready-update-prove-endpoint agent-claude-available)
+  assign-to-update-prove-endpoint-claude)
+
+(normally r-assign-spatial-flash-frontend
+  (and ready-spatial-flash-frontend agent-claude-available)
+  assign-to-spatial-flash-frontend-claude)
+
+(normally r-assign-update-verify-ui
+  (and ready-update-verify-ui agent-claude-available)
+  assign-to-update-verify-ui-claude)
+
+; Phase 3
+(normally r-assign-e2e-tests
+  (and ready-e2e-tests agent-claude-available)
+  assign-to-e2e-tests-claude)
+
+(normally r-assign-security-docs
+  (and ready-security-docs agent-claude-available)
+  assign-to-security-docs-claude)
+
+(claims agent:claude
+  :at "2026-02-12T10:49:34Z"
+  (given claim-v1-flash-prf)
+  (normally r-state-v1-flash-prf claim-v1-flash-prf state-claimed-v1-flash-prf)
+  (normally r-chain-v1-flash-prf state-claimed-v1-flash-prf claimed-flash-prf))

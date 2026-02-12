@@ -1,0 +1,280 @@
+; ZK Liveness Circuit — Prove Spatial Color Challenge in Zero Knowledge
+;
+; Extends the existing FaceVerificationCircuit with a LivenessCheckChip
+; that proves spatial flash liveness properties using Hamming distance on
+; quantized delta fingerprints, without revealing facial reflectance data.
+;
+; Architecture:
+;   Prover (client-side):
+;     1. Capture frames, compute per-region mean RGB deltas
+;     2. Quantize each delta to a 16-bit fingerprint:
+;        [channel_order: 3 bits | ratio_mid/max: 4 bits | ratio_min/max: 4 bits | magnitude: 5 bits]
+;     3. Pass fingerprints as private witness to circuit
+;
+;   Circuit (Halo2):
+;     For each round r in {0,1,2}:
+;       a. COLOR MATCH:  hd(upper_fp[r], expected_top[r]) <= color_threshold
+;       b. COLOR MATCH:  hd(lower_fp[r], expected_bot[r]) <= color_threshold
+;       c. SPATIAL DIFF: hd(upper_fp[r], lower_fp[r])     >= spatial_threshold
+;       d. MAGNITUDE:    magnitude_bits[r]                 >= min_magnitude
+;     Output: 1 bit (pass/fail)
+;
+;   Verifier: learns only pass/fail + expected pattern (derivable from HKDF)
+;
+; Reuses existing infrastructure:
+;   - GateChip arithmetic (bit decomposition, XOR, boolean constraints)
+;   - BaseCircuitBuilder with K=14
+;   - ProverSHPLONK / VerifierSHPLONK
+;   - Blake2b Fiat-Shamir transcript
+;
+; Files affected:
+;   core/src/zk/halo2/liveness.rs     (NEW - LivenessCheckChip)
+;   core/src/zk/halo2/mod.rs          (export new module)
+;   core/src/zk/halo2/proof.rs        (extend prover/verifier)
+;   demo/server/src/flash_challenge.rs (fingerprint quantization in Rust)
+;   demo/server/src/handlers.rs       (pass fingerprints instead of raw frames)
+;   demo/web/src/crypto/flashChallenge.ts (fingerprint quantization in TS)
+;   demo/web/src/main.ts              (send fingerprints, not raw frames)
+
+; =============================================================================
+; AGENTS
+; =============================================================================
+
+(given agent-claude-available)
+
+; =============================================================================
+; PHASE 1: FINGERPRINT QUANTIZATION + CIRCUIT CORE
+; Goal: Delta fingerprint encoding + LivenessCheckChip circuit
+; =============================================================================
+
+(given task-fingerprint-quantizer)
+(meta task-fingerprint-quantizer
+  (title "Implement Delta Fingerprint Quantizer")
+  (description "Implement quantize_delta_fingerprint([f64; 3]) -> u16 in demo/server/src/flash_challenge.rs (Rust) and demo/web/src/crypto/flashChallenge.ts (TypeScript). The 16-bit fingerprint encodes: channel_order (3 bits, which of 6 permutations is dominant/mid/weak), ratio_mid_over_max (4 bits, quantized to 0-15), ratio_min_over_max (4 bits, quantized to 0-15), magnitude (5 bits, quantized ||delta|| to 0-31). Both implementations must produce identical output for the same input. Include quantize_expected_color(RgbColor) -> u16 that quantizes an expected flash color to the same fingerprint space (for public inputs). Add unit tests: determinism, known vectors, Rust/TS parity (test vectors in comments).")
+  (phase "phase-1-core")
+  (estimate "1.5h"))
+
+(given task-liveness-chip)
+(meta task-liveness-chip
+  (title "Implement LivenessCheckChip in Halo2")
+  (description "Create core/src/zk/halo2/liveness.rs with LivenessCheckCircuit. Circuit takes: PRIVATE: 6 delta fingerprints (u16 each, 3 rounds x 2 regions: upper/lower), 6 magnitude values (u8). PUBLIC: 6 expected color fingerprints (u16, from HKDF pattern), color_match_threshold (u8), spatial_diff_threshold (u8), min_magnitude (u8). Circuit logic per round: (1) Decompose each fingerprint to 16 bits using boolean constraints, (2) Compute Hamming distance between delta_fp and expected_fp using XOR+popcount (reuse pattern from hamming.rs), (3) Check hd <= color_match_threshold (range check like threshold_check.rs), (4) Compute Hamming distance between upper_fp and lower_fp, (5) Check hd >= spatial_diff_threshold (reversed comparison), (6) Check magnitude >= min_magnitude. Aggregate: AND all 6 color checks, AND all 3 spatial checks, AND all 6 magnitude checks -> single result bit. Export LivenessCheckCircuit and LivenessResult. Follow existing patterns: GateChip, BaseCircuitBuilder, ctx.load_witness for private, assigned_instances for public. Use K=14 same as existing circuit.")
+  (phase "phase-1-core")
+  (estimate "3h"))
+
+(given task-liveness-chip-tests)
+(meta task-liveness-chip-tests
+  (title "Unit Tests for LivenessCheckChip")
+  (description "Add tests in core/src/zk/halo2/liveness.rs: (1) Valid fingerprints pass — synthetic delta fingerprints with correct color directions and spatial differentiation, (2) Wrong color direction fails — fingerprint pointing in wrong direction exceeds color_match_threshold, (3) No spatial differentiation fails — upper==lower fingerprints exceed spatial_diff_threshold, (4) Low magnitude fails — magnitude below min_magnitude, (5) Mixed: 2 of 3 rounds pass spatial diff (configurable min passing), (6) Circuit satisfiability — MockProver::run verifies constraints, (7) Proof generation + verification roundtrip with real prover. Run with: rustup run nightly cargo test --features halo2 -p sable-core liveness")
+  (phase "phase-1-core")
+  (estimate "1.5h"))
+
+; Phase 1 dependencies
+(given no-deps-fingerprint-quantizer)
+
+; =============================================================================
+; PHASE 2: PROVER/VERIFIER INTEGRATION + DEMO WIRING
+; Goal: Extend proof system and wire into demo
+; =============================================================================
+
+(given task-extend-prover)
+(meta task-extend-prover
+  (title "Extend FaceVerificationProver for Liveness")
+  (description "Modify core/src/zk/halo2/proof.rs: (1) Add liveness parameters to prove(): prove(distance, threshold, liveness: Option<LivenessWitness>) where LivenessWitness = { delta_fingerprints: [u16; 6], magnitudes: [u8; 6], expected_fingerprints: [u16; 6], color_threshold: u8, spatial_threshold: u8, min_magnitude: u8 }. (2) Extend build_threshold_check_circuit to optionally include liveness circuit constraints when liveness witness is Some. (3) Add liveness_result to public inputs: [face_result, threshold, liveness_result]. liveness_result is 1 (pass) or 0 (fail). When liveness is None, set liveness_result=1 (backwards compatible). (4) Extend FaceVerificationVerifier to extract liveness_result from public_inputs[2]. (5) Update Proof struct to include optional liveness_passed field. (6) Ensure backwards compatibility: existing tests with prove(distance, threshold) still work by passing None for liveness.")
+  (phase "phase-2-integration")
+  (estimate "2h"))
+
+(given task-server-fingerprint-integration)
+(meta task-server-fingerprint-integration
+  (title "Server: Compute Fingerprints and Pass to Prover")
+  (description "Modify demo/server/src/handlers.rs auth_prove: (1) After verify_spatial_flash passes, compute delta fingerprints from the captured frames using quantize_delta_fingerprint (add to flash_challenge.rs). Compute mean delta per region (upper/lower) for each round — reuse the compute_mean_delta logic already in flash_challenge.rs. (2) Compute expected fingerprints from the flash pattern colors using quantize_expected_color. (3) Build LivenessWitness and pass to prover.prove(distance, threshold, Some(witness)). (4) The plaintext spatial verification can stay as a sanity check but the ZK proof is now the authoritative liveness result. (5) Update ProveResponse: liveness_proved_in_zk: bool. (6) In verify handler: extract liveness_result from proof public inputs, show in VerificationDetails.")
+  (phase "phase-2-integration")
+  (estimate "1.5h"))
+
+(given task-frontend-fingerprint)
+(meta task-frontend-fingerprint
+  (title "Frontend: Compute and Display ZK Liveness")
+  (description "Update demo/web: (1) In verification screen: update 'What was proven' to include 'Spatial liveness verified in zero knowledge (Halo2 ZK-SNARK)'. Update 'What stayed private' to include 'Per-region facial reflectance signals (proven without revealing)'. (2) Show ZK liveness badge on verification screen when liveness_proved_in_zk is true. (3) Minor: no need to send raw frames if fingerprints are computed server-side (frames are still sent for the plaintext sanity check; this can be optimized later). (4) Update api.ts types for new response fields.")
+  (phase "phase-2-integration")
+  (estimate "1h"))
+
+; =============================================================================
+; PHASE 3: VALIDATION
+; Goal: End-to-end tests and performance verification
+; =============================================================================
+
+(given task-e2e-zk-liveness)
+(meta task-e2e-zk-liveness
+  (title "End-to-End ZK Liveness Tests")
+  (description "Integration tests: (1) Full pipeline: derive pattern -> capture synthetic frames -> quantize fingerprints -> prove with liveness -> verify, checking liveness_result=1 in proof public inputs. (2) Wrong fingerprints: tampered delta fingerprints -> liveness_result=0. (3) Backwards compatibility: prove without liveness witness -> liveness_result=1 (default pass). (4) Performance: measure proof generation time with liveness vs without — should add <15% overhead (target: still under 1000ms total). (5) Proof size: should remain under 10KB. Run with: rustup run nightly cargo test --features halo2 -p sable-core --test integration")
+  (phase "phase-3-validation")
+  (estimate "1.5h"))
+
+(given task-perf-validation)
+(meta task-perf-validation
+  (title "Performance Validation and README Update")
+  (description "Run performance benchmarks in release mode: (1) Proof generation with liveness (target: <=1000ms), (2) Verification with liveness (target: <=50ms), (3) Proof size (target: <=10KB). Compare against baseline without liveness. Update demo/README.md performance table with new timings. Update the ZK proof description to note liveness is now proven in zero knowledge. Update 'What was proven' / 'What stayed private' sections.")
+  (phase "phase-3-validation")
+  (estimate "1h"))
+
+; =============================================================================
+; READINESS RULES
+; =============================================================================
+
+; Phase 1: linear chain
+(normally r-ready-fingerprint-quantizer
+  (and task-fingerprint-quantizer no-deps-fingerprint-quantizer)
+  ready-fingerprint-quantizer)
+
+(normally r-ready-liveness-chip
+  (and task-liveness-chip completed-fingerprint-quantizer)
+  ready-liveness-chip)
+
+(normally r-ready-liveness-chip-tests
+  (and task-liveness-chip-tests completed-liveness-chip)
+  ready-liveness-chip-tests)
+
+(normally r-phase1-complete
+  (and completed-fingerprint-quantizer completed-liveness-chip completed-liveness-chip-tests)
+  completed-phase1)
+
+; Phase 2: prover first, then server + frontend can parallelize
+(normally r-ready-extend-prover
+  (and task-extend-prover completed-phase1)
+  ready-extend-prover)
+
+(normally r-ready-server-fingerprint
+  (and task-server-fingerprint-integration completed-extend-prover)
+  ready-server-fingerprint-integration)
+
+(normally r-ready-frontend-fingerprint
+  (and task-frontend-fingerprint completed-server-fingerprint-integration)
+  ready-frontend-fingerprint)
+
+(normally r-phase2-complete
+  (and completed-extend-prover completed-server-fingerprint-integration completed-frontend-fingerprint)
+  completed-phase2)
+
+; Phase 3: both can run after phase 2
+(normally r-ready-e2e-zk-liveness
+  (and task-e2e-zk-liveness completed-phase2)
+  ready-e2e-zk-liveness)
+
+(normally r-ready-perf-validation
+  (and task-perf-validation completed-phase2)
+  ready-perf-validation)
+
+(normally r-phase3-complete
+  (and completed-e2e-zk-liveness completed-perf-validation)
+  completed-phase3)
+
+; Project completion
+(normally r-project-complete
+  completed-phase3
+  project-complete)
+
+; =============================================================================
+; ASSIGNMENT RULES
+; =============================================================================
+
+; Phase 1
+(normally r-assign-fingerprint-quantizer
+  (and ready-fingerprint-quantizer agent-claude-available)
+  assign-to-fingerprint-quantizer-claude)
+
+(normally r-assign-liveness-chip
+  (and ready-liveness-chip agent-claude-available)
+  assign-to-liveness-chip-claude)
+
+(normally r-assign-liveness-chip-tests
+  (and ready-liveness-chip-tests agent-claude-available)
+  assign-to-liveness-chip-tests-claude)
+
+; Phase 2
+(normally r-assign-extend-prover
+  (and ready-extend-prover agent-claude-available)
+  assign-to-extend-prover-claude)
+
+(normally r-assign-server-fingerprint
+  (and ready-server-fingerprint-integration agent-claude-available)
+  assign-to-server-fingerprint-integration-claude)
+
+(normally r-assign-frontend-fingerprint
+  (and ready-frontend-fingerprint agent-claude-available)
+  assign-to-frontend-fingerprint-claude)
+
+; Phase 3
+(normally r-assign-e2e-zk-liveness
+  (and ready-e2e-zk-liveness agent-claude-available)
+  assign-to-e2e-zk-liveness-claude)
+
+(normally r-assign-perf-validation
+  (and ready-perf-validation agent-claude-available)
+  assign-to-perf-validation-claude)
+
+(claims agent:claude
+  :at "2026-02-12T12:03:08Z"
+  (given completed-liveness-chip))
+
+(claims agent:system
+  :at "2026-02-12T12:03:33Z"
+  (given claim-v1-liveness-chip-tests)
+  (normally r-state-v1-liveness-chip-tests claim-v1-liveness-chip-tests state-claimed-v1-liveness-chip-tests)
+  (normally r-chain-v1-liveness-chip-tests state-claimed-v1-liveness-chip-tests claimed-liveness-chip-tests))
+
+(claims agent:claude
+  :at "2026-02-12T12:05:21Z"
+  (given completed-liveness-chip-tests))
+
+(claims agent:claude
+  :at "2026-02-12T12:05:33Z"
+  (given completed-fingerprint-quantizer))
+
+(claims agent:system
+  :at "2026-02-12T12:05:37Z"
+  (given claim-v1-extend-prover)
+  (normally r-state-v1-extend-prover claim-v1-extend-prover state-claimed-v1-extend-prover)
+  (normally r-chain-v1-extend-prover state-claimed-v1-extend-prover claimed-extend-prover))
+
+(claims agent:claude
+  :at "2026-02-12T12:14:12Z"
+  (given completed-extend-prover))
+
+(claims agent:system
+  :at "2026-02-12T12:14:17Z"
+  (given claim-v1-server-fingerprint-integration)
+  (normally r-state-v1-server-fingerprint-integration claim-v1-server-fingerprint-integration state-claimed-v1-server-fingerprint-integration)
+  (normally r-chain-v1-server-fingerprint-integration state-claimed-v1-server-fingerprint-integration claimed-server-fingerprint-integration))
+
+(claims agent:claude
+  :at "2026-02-12T12:17:50Z"
+  (given completed-server-fingerprint-integration))
+
+(claims agent:system
+  :at "2026-02-12T12:17:54Z"
+  (given claim-v1-frontend-fingerprint)
+  (normally r-state-v1-frontend-fingerprint claim-v1-frontend-fingerprint state-claimed-v1-frontend-fingerprint)
+  (normally r-chain-v1-frontend-fingerprint state-claimed-v1-frontend-fingerprint claimed-frontend-fingerprint))
+
+(claims agent:claude
+  :at "2026-02-12T12:19:08Z"
+  (given completed-frontend-fingerprint))
+
+(claims agent:system
+  :at "2026-02-12T12:19:14Z"
+  (given claim-v1-e2e-zk-liveness)
+  (normally r-state-v1-e2e-zk-liveness claim-v1-e2e-zk-liveness state-claimed-v1-e2e-zk-liveness)
+  (normally r-chain-v1-e2e-zk-liveness state-claimed-v1-e2e-zk-liveness claimed-e2e-zk-liveness))
+
+(claims agent:system
+  :at "2026-02-12T12:19:15Z"
+  (given claim-v1-perf-validation)
+  (normally r-state-v1-perf-validation claim-v1-perf-validation state-claimed-v1-perf-validation)
+  (normally r-chain-v1-perf-validation state-claimed-v1-perf-validation claimed-perf-validation))
+
+(claims agent:claude
+  :at "2026-02-12T12:21:20Z"
+  (given completed-e2e-zk-liveness))
+
+(claims agent:claude
+  :at "2026-02-12T12:23:02Z"
+  (given completed-perf-validation))
