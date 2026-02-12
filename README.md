@@ -9,7 +9,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Rust](https://img.shields.io/badge/rust-nightly-brightgreen.svg)](https://www.rust-lang.org)
 [![Coverage](https://img.shields.io/badge/coverage-89%25-brightgreen.svg)](https://codeberg.org/anuna/sable)
-[![Tests](https://img.shields.io/badge/tests-484%20passing-brightgreen.svg)](https://codeberg.org/anuna/sable)
+[![Tests](https://img.shields.io/badge/tests-519%20passing-brightgreen.svg)](https://codeberg.org/anuna/sable)
 [![Mobile](https://img.shields.io/badge/platform-Android%20%7C%20iOS-lightgrey.svg)](https://codeberg.org/anuna/sable)
 
 </div>
@@ -61,7 +61,7 @@ None of these combine true zero-knowledge proofs over biometric data with offlin
 
 To our knowledge, SABLE is the first open-source system to combine all of these:
 
-- **True zero-knowledge proofs** -- Halo2 proofs over biometric data (~450ms generation, ~2ms verification), not statistical matching on encrypted fragments
+- **True zero-knowledge proofs** -- Halo2 proofs over biometric data (~250ms generation, ~2ms verification), not statistical matching on encrypted fragments
 - **Fully offline** -- peer-to-peer verification via NFC/BLE with no cloud, blockchain, or internet dependency
 - **Selective disclosure** -- optional government-issued Verifiable Credentials with BBS+ signatures let you prove predicates (e.g. "over 18") without revealing underlying data
 - **No special hardware** -- works with any smartphone camera, using screen flash liveness detection to prevent spoofing
@@ -116,7 +116,7 @@ cargo build --release
 # Build with Halo2 ZK features
 cargo build --release --features halo2
 
-# Run the test suite (484 tests, 77 halo2-specific)
+# Run the test suite (519 tests, 77 halo2-specific)
 cargo test --features halo2 -p sable-core --lib --test integration
 ```
 
@@ -159,7 +159,7 @@ Biometric data never leaves the user's device. Only mathematical proofs and sele
 |-------|-----------|---|----------|
 | **Issue** *(optional)* | Receive Verifiable Credential from government | ← | -- |
 | **Enroll** | Capture face, extract 1024-dim embedding | → | Hash with Poseidon, create Pedersen commitment |
-| **Auth** | Recapture face + screen flash liveness | → | Generate Halo2 ZK proof (~450ms, 2KB) |
+| **Auth** | Recapture face + spatial flash liveness | → | Generate Halo2 ZK proof (~250ms, 2KB) |
 | **Present** *(optional)* | Select attributes to disclose (e.g. "≥ 18") | → | Receive only chosen predicates |
 | **Verify** | Receive pass/fail result | ← | Verify composite proof (~2ms) |
 
@@ -180,16 +180,28 @@ The Halo2 proof simultaneously covers biometric match *and* credential predicate
 
 ### Liveness detection
 
-Screen flash liveness uses controlled-illumination reflectance analysis:
+SABLE uses a spatial flash challenge-response protocol to make it significantly harder to spoof authentication with a photo, video, or screen replay. It is not foolproof -- sophisticated 3D masks or real-time video manipulation may still defeat it -- but it raises the bar well beyond static presentation attacks.
 
-1. Capture baseline frame under ambient lighting
-2. Flash the screen white
-3. Capture a second frame during the flash
-4. Analyze the reflectance ratio map (flash / baseline)
+**Protocol:**
 
-**Key insight:** A real 3D face produces a smooth reflectance ratio (low Laplacian energy) because both ambient and flash illumination vary smoothly over the face geometry. A photo displayed on a screen produces high-frequency ratio variation because the displayed image modulates the baseline denominator. The ratio-Laplacian energy discriminates between these cases.
+1. **Unpredictable challenge** -- Both client and server contribute random 32-byte nonces. The client commits to its nonce (SHA-256) before the server reveals its own. Their combined hash (HKDF-SHA256) determines the color pattern -- neither side can predict or replay it. The challenge expires after 30 seconds and can only be used once.
 
-This is combined with the core library's `ScreenFlashExtractor` which computes reflectance variance, gradient, highlight softness, and channel consistency signals.
+2. **Split-screen color flash** -- The screen flashes a *different color on top vs. bottom* across 3 rounds. The colors are derived deterministically from the HKDF output, with photosensitive safety clamping (WCAG 2.3.1) and minimum angular distance enforcement between paired colors.
+
+3. **3D geometry detection** -- The camera captures how light reflects off the face in each round. The server checks that the upper and lower face regions respond *differently* to the different colors (cosine similarity between delta vectors must be below a threshold). A real 3D face reflects split-screen colors differently in forehead vs. chin regions due to geometry; a flat photo or screen reflects them identically.
+
+4. **ZK proof of liveness** -- The per-region color responses are quantized into 16-bit delta fingerprints (encoding channel ordering, ratios, and magnitude). These fingerprints are fed into the Halo2 circuit alongside the face-match check, producing a single composite proof. The verifier learns only pass/fail -- no raw reflectance data is exposed.
+
+**Fingerprint encoding** (16-bit, identical in Rust and TypeScript):
+```
+[order:3 | mid_ratio:4 | min_ratio:4 | magnitude:5]
+```
+
+**Limitations:**
+- Defeats static photos and simple screen replays
+- Not a substitute for depth sensors or infrared
+- Sophisticated 3D masks or real-time video manipulation are not addressed
+- Calibrated for typical webcam distances (~40-80cm); extreme distances may affect accuracy
 
 ### Verification flow
 
@@ -258,7 +270,7 @@ sable/
 │   └── src/
 │       ├── biometric/       # Face/palm feature extraction, liveness, screen flash
 │       ├── crypto/          # Pedersen, Poseidon, RNG
-│       ├── zk/halo2/        # Halo2 circuits (quantizer, poseidon, hamming, threshold)
+│       ├── zk/halo2/        # Halo2 circuits (quantizer, poseidon, hamming, threshold, liveness)
 │       ├── mobile/          # Android/iOS FFI, keystore, sensors
 │       ├── p2p/             # NFC, BLE, WiFi Direct, session management
 │       └── attestation/     # X.509 certificates, chain validation, trust store
@@ -290,8 +302,8 @@ sable/
 | Elliptic curve | BLS12-381 / BN254 | Pedersen commitments, 128-bit security |
 | Hash | Poseidon | ZK-friendly hash for feature vectors (~10x faster than SHA-256 in circuits) |
 | Commitments | Pedersen | Hiding commitment acts as "biometric public key" |
-| ZK proofs | Halo2 | Transparent setup, ~450ms proof gen, ~2ms verification, 2KB proofs |
-| Liveness | Screen flash | Ratio-Laplacian reflectance analysis (Tang et al., NDSS 2018) |
+| ZK proofs | Halo2 | Transparent setup, ~250ms proof gen, ~2ms verification, 2KB proofs |
+| Liveness | Spatial flash | Split-screen color challenge-response with 3D geometry detection (Tang et al., NDSS 2018) |
 | Biometrics | Face / Palm | 1024-dim embeddings, Gabor filters, multi-modal fusion |
 | P2P | NFC/BLE/WiFi Direct | X25519 ECDH + ChaCha20-Poly1305 AEAD |
 | Attestation | X.509 / Verifiable Credentials | Government identity binding with selective disclosure |
@@ -300,10 +312,10 @@ sable/
 
 | Operation | Target | Achieved |
 |-----------|--------|----------|
-| Proof generation | ≤ 1000ms | ~450ms |
-| Verification | ≤ 50ms | ~2.2ms |
+| Proof generation (face + liveness) | ≤ 1000ms | ~250ms |
+| Verification | ≤ 50ms | ~1.8ms |
 | Proof size | ≤ 10KB | 2.08KB |
-| Liveness check | -- | ~25ms |
+| Spatial flash challenge | -- | 3 rounds, ~1s total |
 
 ## Security
 
@@ -321,16 +333,17 @@ sable/
 - **Government surveillance** -- officials cannot access citizen biometric data during attestation
 - **Over-disclosure** -- selective disclosure reveals only requested predicates, not full credentials
 - **Replay attacks** -- 30-second temporal constraints and 256-bit challenge nonces prevent reuse
-- **Presentation attacks** -- screen flash liveness detects photos and screen displays
+- **Presentation attacks** -- spatial flash liveness makes it significantly harder to spoof with photos and screen replays (not foolproof against 3D masks)
 - **Man-in-the-middle** -- ECDH session keys and nonce binding protect against interception
 - **Biometric template extraction** -- Pedersen commitments cryptographically hide enrolled data
 
 ### Replay attack protection
 
-- **30-second proof lifetime** enforced by Halo2 circuit timestamp constraints
+- **30-second challenge TTL** -- each liveness challenge expires after 30 seconds and is single-use (consumed on first attempt)
+- **Commit-reveal nonce protocol** -- client commits H(c_nonce) before server reveals s_nonce, preventing either side from manipulating the flash pattern
+- **HKDF-derived color patterns** -- deterministic but unpredictable flash sequences from combined nonces
 - **Fresh biometric capture** required for each proof (no static replay)
-- **Screen flash liveness** prevents photo/video replay of biometric data
-- **Challenge-response protocol** with 256-bit nonces bound to specific sessions
+- **Spatial flash liveness** makes photo/video replay significantly harder by requiring 3D face geometry
 - **Ephemeral session keys** via ECDH for P2P communication channels
 
 ### Assumptions and limitations
@@ -361,13 +374,13 @@ sable/
 
 **Active development.** The core library is feature-complete across all milestones but has not been audited for production use.
 
-**484 tests passing | 77 Halo2-specific tests | Interactive demo with liveness detection**
+**519 tests passing | 77 Halo2-specific tests | Interactive demo with ZK liveness detection**
 
 | Milestone | Status |
 |-----------|--------|
 | Core cryptography (BLS12-381, Poseidon, Pedersen, RNG) | Complete |
 | Halo2 ZK face verification (transparent setup, demo server) | Complete |
-| Screen flash liveness detection (ratio-Laplacian analysis) | Complete |
+| Spatial flash liveness with ZK proof (challenge-response, 3D geometry) | Complete |
 | Interactive demo (enrollment, auth, liveness, verification) | Complete |
 | Palm biometrics (vein + print extraction, fusion) | Complete |
 | Mobile integration (Android JNI, iOS Swift, FFI) | Complete |
