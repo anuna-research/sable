@@ -55,10 +55,13 @@ const MAX_THRESHOLD_BITS: usize = 16;
 pub struct Proof {
     /// The serialized proof bytes
     pub proof_bytes: Vec<u8>,
-    /// Public inputs: [face_result, threshold, liveness_result]
+    /// Public inputs: [face_result, threshold, liveness_result, challenge_digest]
     pub public_inputs: Vec<Fr>,
     /// Whether liveness was proven in ZK (derived from public_inputs[2]).
     pub liveness_passed: bool,
+    /// Packed liveness challenge parameters (expected fingerprints + thresholds).
+    /// The verifier checks this against independently computed HKDF-derived values.
+    pub challenge_digest: Fr,
 }
 
 impl Proof {
@@ -154,7 +157,15 @@ impl FaceVerificationProver {
             let mut builder =
                 BaseCircuitBuilder::new(false).use_params(self.setup.circuit_params.clone());
 
-            build_combined_circuit(&mut builder, 0, 1, &LivenessWitness::dummy_pass());
+            let dummy_witness = LivenessWitness::dummy_pass();
+            let (face_result, threshold_assigned, liveness_result, liveness_digest) =
+                build_combined_circuit(&mut builder, 0, 1, &dummy_witness);
+
+            // Set public instances: [face_result, threshold, liveness_result, challenge_digest]
+            builder.assigned_instances[0].push(face_result);
+            builder.assigned_instances[0].push(threshold_assigned);
+            builder.assigned_instances[0].push(liveness_result);
+            builder.assigned_instances[0].push(liveness_digest);
 
             // Generate verification key
             let vk = keygen_vk(&self.setup.params, &builder).map_err(|e| {
@@ -181,9 +192,10 @@ impl FaceVerificationProver {
 
     /// Generate a proof that distance <= threshold, optionally including liveness.
     ///
-    /// Public inputs: `[face_result, threshold, liveness_result]`
+    /// Public inputs: `[face_result, threshold, liveness_result, challenge_digest]`
     /// - When `liveness` is `None`, liveness_result = 1 (backwards compatible)
     /// - When `liveness` is `Some(witness)`, liveness_result = circuit output
+    /// - `challenge_digest` is always present, packing the liveness parameters
     pub fn prove_with_liveness(
         &mut self,
         distance: u64,
@@ -199,19 +211,21 @@ impl FaceVerificationProver {
         let mut builder =
             BaseCircuitBuilder::new(false).use_params(self.setup.circuit_params.clone());
 
-        let (result, threshold_assigned, liveness_result) =
+        let (result, threshold_assigned, liveness_result, liveness_digest) =
             build_combined_circuit(&mut builder, distance, threshold, &liveness_witness);
 
-        // Set public instances: [face_result, threshold, liveness_result]
+        // Set public instances: [face_result, threshold, liveness_result, challenge_digest]
         builder.assigned_instances[0].push(result);
         builder.assigned_instances[0].push(threshold_assigned);
         builder.assigned_instances[0].push(liveness_result);
+        builder.assigned_instances[0].push(liveness_digest);
 
         // Get public input values
         let result_value = *result.value();
         let threshold_value = *threshold_assigned.value();
         let liveness_value = *liveness_result.value();
-        let public_inputs = vec![result_value, threshold_value, liveness_value];
+        let digest_value = *liveness_digest.value();
+        let public_inputs = vec![result_value, threshold_value, liveness_value, digest_value];
 
         // Extract liveness result
         let liveness_bytes = liveness_value.to_bytes();
@@ -237,6 +251,7 @@ impl FaceVerificationProver {
             proof_bytes,
             public_inputs,
             liveness_passed: liveness_u64 == 1,
+            challenge_digest: digest_value,
         })
     }
 
@@ -341,10 +356,18 @@ impl<'a> FaceVerificationVerifier<'a> {
             true // backwards compatible: old proofs without liveness default to pass
         };
 
+        // Extract challenge digest (fourth public input)
+        let challenge_digest = if proof.public_inputs.len() > 3 {
+            proof.public_inputs[3]
+        } else {
+            Fr::from(0u64)
+        };
+
         Ok(VerificationDetails {
             face_match,
             threshold,
             liveness_passed,
+            challenge_digest,
         })
     }
 }
@@ -358,17 +381,20 @@ pub struct VerificationDetails {
     pub threshold: u64,
     /// Whether liveness was verified in ZK.
     pub liveness_passed: bool,
+    /// Packed liveness challenge parameters (public input from the proof).
+    /// The verifier checks this against independently computed HKDF-derived values.
+    pub challenge_digest: Fr,
 }
 
 /// Build the combined threshold check + liveness circuit.
 ///
-/// Returns (face_result, threshold, liveness_result).
+/// Returns (face_result, threshold, liveness_result, challenge_digest).
 fn build_combined_circuit(
     builder: &mut BaseCircuitBuilder<Fr>,
     distance: u64,
     threshold: u64,
     liveness: &LivenessWitness,
-) -> (AssignedValue<Fr>, AssignedValue<Fr>, AssignedValue<Fr>) {
+) -> (AssignedValue<Fr>, AssignedValue<Fr>, AssignedValue<Fr>, AssignedValue<Fr>) {
     // --- Threshold check ---
     let ctx = builder.main(0);
     let gate = GateChip::<Fr>::default();
@@ -379,9 +405,9 @@ fn build_combined_circuit(
 
     // --- Liveness check ---
     let liveness_circuit = LivenessCheckCircuit::new(liveness.clone());
-    let liveness_result = liveness_circuit.build_circuit(builder);
+    let (liveness_result, liveness_digest) = liveness_circuit.build_circuit(builder);
 
-    (face_result, threshold_assigned, liveness_result)
+    (face_result, threshold_assigned, liveness_result, liveness_digest)
 }
 
 /// Compare if a <= b (same as threshold_check.rs implementation).
@@ -454,6 +480,7 @@ fn compare_less_than_or_equal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::liveness::challenge_digest;
 
     #[test]
     fn test_proof_setup() {
@@ -551,7 +578,11 @@ mod tests {
         let proof = prover.prove(100, 200).expect("Should generate proof");
 
         assert!(proof.liveness_passed, "Backwards-compatible prove should have liveness_passed=true");
-        assert_eq!(proof.public_inputs.len(), 3, "Should have 3 public inputs");
+        assert_eq!(proof.public_inputs.len(), 4, "Should have 4 public inputs");
+
+        // challenge_digest should match dummy witness
+        let dummy_digest = challenge_digest(&LivenessWitness::dummy_pass());
+        assert_eq!(proof.challenge_digest, dummy_digest, "Digest should match dummy witness");
 
         let verifier =
             FaceVerificationVerifier::from_prover(&mut prover).expect("Should create verifier");
@@ -559,6 +590,7 @@ mod tests {
         assert!(details.face_match, "Face should match");
         assert!(details.liveness_passed, "Liveness should pass");
         assert_eq!(details.threshold, 200);
+        assert_eq!(details.challenge_digest, dummy_digest, "Verification details should include digest");
     }
 
     #[test]
@@ -573,17 +605,21 @@ mod tests {
             min_magnitude: 5,
         };
 
+        let expected_digest = challenge_digest(&liveness);
+
         let proof = prover
             .prove_with_liveness(100, 200, Some(liveness))
             .expect("Should generate proof with liveness");
 
         assert!(proof.liveness_passed, "Liveness should pass");
+        assert_eq!(proof.challenge_digest, expected_digest, "Digest should match liveness witness");
 
         let verifier =
             FaceVerificationVerifier::from_prover(&mut prover).expect("Should create verifier");
         let details = verifier.verify_full(&proof).expect("Should verify");
         assert!(details.face_match, "Face should match");
         assert!(details.liveness_passed, "Liveness should pass in verification");
+        assert_eq!(details.challenge_digest, expected_digest, "Verification digest should match");
     }
 
     #[test]

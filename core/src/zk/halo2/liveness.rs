@@ -105,6 +105,33 @@ pub struct LivenessResult {
     pub passed: bool,
 }
 
+/// Pack all liveness challenge parameters into a single Fr field element (CPU-side).
+///
+/// Packing format (LSB first):
+/// ```text
+/// fp[0] | fp[1] | fp[2] | fp[3] | fp[4] | fp[5] | color_t | spatial_t | min_mag
+///  16b     16b     16b     16b     16b     16b      8b        8b          8b
+/// ```
+/// Total: 120 bits. Fits in the 254-bit BN254 scalar field.
+///
+/// The verifier independently computes this from the HKDF-derived parameters
+/// and checks it matches the public input, ensuring the prover used correct values.
+pub fn challenge_digest(witness: &LivenessWitness) -> Fr {
+    let mut value: u128 = 0;
+    for (i, &fp) in witness.expected_fingerprints.iter().enumerate() {
+        value |= (fp as u128) << (16 * i);
+    }
+    value |= (witness.color_threshold as u128) << 96;
+    value |= (witness.spatial_threshold as u128) << 104;
+    value |= (witness.min_magnitude as u128) << 112;
+
+    // Convert u128 to Fr via little-endian bytes
+    let bytes = value.to_le_bytes();
+    let mut fr_bytes = [0u8; 32];
+    fr_bytes[..16].copy_from_slice(&bytes);
+    Fr::from_bytes(&fr_bytes).unwrap()
+}
+
 /// Liveness check circuit.
 ///
 /// Proves that private delta fingerprints satisfy color matching,
@@ -164,8 +191,12 @@ impl LivenessCheckCircuit {
 
     /// Build the liveness check circuit.
     ///
-    /// Returns the result (1 = all checks pass, 0 = at least one fails).
-    pub fn build_circuit(&self, builder: &mut BaseCircuitBuilder<Fr>) -> AssignedValue<Fr> {
+    /// Returns `(liveness_result, challenge_digest)`:
+    /// - `liveness_result`: 1 = all checks pass, 0 = at least one fails
+    /// - `challenge_digest`: packed field element of expected fingerprints + thresholds,
+    ///   exposed as a public input so the verifier can check the prover used correct
+    ///   HKDF-derived challenge parameters.
+    pub fn build_circuit(&self, builder: &mut BaseCircuitBuilder<Fr>) -> (AssignedValue<Fr>, AssignedValue<Fr>) {
         let ctx = builder.main(0);
         let gate = GateChip::<Fr>::default();
         let w = &self.witness;
@@ -174,6 +205,15 @@ impl LivenessCheckCircuit {
 
         // Start with result = 1 (all pass), AND with each check
         let mut result = ctx.load_constant(Fr::from(1u64));
+
+        // Load threshold witnesses ONCE, reuse everywhere (checks + digest).
+        // This ensures the prover cannot use different values for checks vs digest.
+        let color_thresh_witness = ctx.load_witness(Fr::from(w.color_threshold as u64));
+        let spatial_thresh_witness = ctx.load_witness(Fr::from(w.spatial_threshold as u64));
+        let min_mag_witness = ctx.load_witness(Fr::from(w.min_magnitude as u64));
+
+        // Collect all expected fingerprint witnesses for digest packing
+        let mut expected_witnesses: Vec<AssignedValue<Fr>> = Vec::with_capacity(NUM_FINGERPRINTS);
 
         for r in 0..NUM_ROUNDS {
             let upper_idx = r * 2;
@@ -187,6 +227,9 @@ impl LivenessCheckCircuit {
             let expected_upper = ctx.load_witness(Fr::from(w.expected_fingerprints[upper_idx] as u64));
             let expected_lower = ctx.load_witness(Fr::from(w.expected_fingerprints[lower_idx] as u64));
 
+            expected_witnesses.push(expected_upper);
+            expected_witnesses.push(expected_lower);
+
             // Decompose all four fingerprints to bits
             let delta_upper_bits = decompose_u16(ctx, &gate, delta_upper, w.delta_fingerprints[upper_idx]);
             let delta_lower_bits = decompose_u16(ctx, &gate, delta_lower, w.delta_fingerprints[lower_idx]);
@@ -197,8 +240,7 @@ impl LivenessCheckCircuit {
             // HD(delta_upper, expected_upper) <= color_threshold
             let xor_upper = xor_bits(ctx, &gate, &delta_upper_bits, &expected_upper_bits);
             let hd_color_upper = popcount(ctx, &gate, &xor_upper);
-            let color_thresh = ctx.load_witness(Fr::from(w.color_threshold as u64));
-            let color_upper_ok = compare_le(ctx, &gate, hd_color_upper, color_thresh,
+            let color_upper_ok = compare_le(ctx, &gate, hd_color_upper, color_thresh_witness,
                 hamming_u16(w.delta_fingerprints[upper_idx], w.expected_fingerprints[upper_idx]) as u64,
                 w.color_threshold as u64);
             result = gate.mul(ctx, result, color_upper_ok);
@@ -206,8 +248,7 @@ impl LivenessCheckCircuit {
             // HD(delta_lower, expected_lower) <= color_threshold
             let xor_lower = xor_bits(ctx, &gate, &delta_lower_bits, &expected_lower_bits);
             let hd_color_lower = popcount(ctx, &gate, &xor_lower);
-            let color_thresh2 = ctx.load_witness(Fr::from(w.color_threshold as u64));
-            let color_lower_ok = compare_le(ctx, &gate, hd_color_lower, color_thresh2,
+            let color_lower_ok = compare_le(ctx, &gate, hd_color_lower, color_thresh_witness,
                 hamming_u16(w.delta_fingerprints[lower_idx], w.expected_fingerprints[lower_idx]) as u64,
                 w.color_threshold as u64);
             result = gate.mul(ctx, result, color_lower_ok);
@@ -217,8 +258,7 @@ impl LivenessCheckCircuit {
             // Equivalently: spatial_threshold <= HD
             let xor_spatial = xor_bits(ctx, &gate, &delta_upper_bits, &delta_lower_bits);
             let hd_spatial = popcount(ctx, &gate, &xor_spatial);
-            let spatial_thresh = ctx.load_witness(Fr::from(w.spatial_threshold as u64));
-            let spatial_ok = compare_le(ctx, &gate, spatial_thresh, hd_spatial,
+            let spatial_ok = compare_le(ctx, &gate, spatial_thresh_witness, hd_spatial,
                 w.spatial_threshold as u64,
                 hamming_u16(w.delta_fingerprints[upper_idx], w.delta_fingerprints[lower_idx]) as u64);
             result = gate.mul(ctx, result, spatial_ok);
@@ -228,17 +268,15 @@ impl LivenessCheckCircuit {
             // magnitude = sum of bits[0..5] * 2^i (already decomposed)
             let mag_upper_val = sum_low_bits(ctx, &gate, &delta_upper_bits, MAGNITUDE_BITS);
             let mag_lower_val = sum_low_bits(ctx, &gate, &delta_lower_bits, MAGNITUDE_BITS);
-            let min_mag = ctx.load_witness(Fr::from(w.min_magnitude as u64));
-            let min_mag2 = ctx.load_witness(Fr::from(w.min_magnitude as u64));
 
             // min_magnitude <= magnitude_upper
-            let mag_upper_ok = compare_le(ctx, &gate, min_mag, mag_upper_val,
+            let mag_upper_ok = compare_le(ctx, &gate, min_mag_witness, mag_upper_val,
                 w.min_magnitude as u64,
                 (w.delta_fingerprints[upper_idx] & 0x1F) as u64);
             result = gate.mul(ctx, result, mag_upper_ok);
 
             // min_magnitude <= magnitude_lower
-            let mag_lower_ok = compare_le(ctx, &gate, min_mag2, mag_lower_val,
+            let mag_lower_ok = compare_le(ctx, &gate, min_mag_witness, mag_lower_val,
                 w.min_magnitude as u64,
                 (w.delta_fingerprints[lower_idx] & 0x1F) as u64);
             result = gate.mul(ctx, result, mag_lower_ok);
@@ -250,21 +288,58 @@ impl LivenessCheckCircuit {
         let zero = ctx.load_constant(Fr::from(0u64));
         ctx.constrain_equal(&bool_check, &zero);
 
-        result
+        // ---- Build challenge digest in-circuit ----
+        // Pack: fp[0..6] at 16-bit offsets, then color_t, spatial_t, min_mag at 8-bit offsets.
+        // digest = sum(fp[i] * 2^(16*i)) + color_t * 2^96 + spatial_t * 2^104 + min_mag * 2^112
+        //
+        // Uses the SAME witness values as the checks above, so the prover cannot
+        // substitute different values for the digest vs the checks.
+        let mut digest = ctx.load_constant(Fr::from(0u64));
+
+        // Compute 2^n in Fr using repeated doubling (avoids u64 overflow for n >= 64)
+        let pow2_fr = |n: usize| -> Fr {
+            let mut s = Fr::from(1u64);
+            for _ in 0..n { s = s + s; }
+            s
+        };
+
+        // Add expected fingerprints (each at 16-bit boundaries)
+        for (i, &fp_witness) in expected_witnesses.iter().enumerate() {
+            let shift_const = ctx.load_constant(pow2_fr(16 * i));
+            let term = gate.mul(ctx, fp_witness, shift_const);
+            digest = gate.add(ctx, digest, term);
+        }
+
+        // Add thresholds (same witnesses used in the checks above)
+        let shift_96_const = ctx.load_constant(pow2_fr(96));
+        let color_term = gate.mul(ctx, color_thresh_witness, shift_96_const);
+        digest = gate.add(ctx, digest, color_term);
+
+        let shift_104_const = ctx.load_constant(pow2_fr(104));
+        let spatial_term = gate.mul(ctx, spatial_thresh_witness, shift_104_const);
+        digest = gate.add(ctx, digest, spatial_term);
+
+        let shift_112_const = ctx.load_constant(pow2_fr(112));
+        let min_mag_term = gate.mul(ctx, min_mag_witness, shift_112_const);
+        digest = gate.add(ctx, digest, min_mag_term);
+
+        (result, digest)
     }
 
     /// Test the circuit using the mock prover.
     pub fn test_circuit(&self) -> Result<bool> {
         let mut builder = BaseCircuitBuilder::new(false).use_params(Self::circuit_params());
-        let result = self.build_circuit(&mut builder);
+        let (result, digest) = self.build_circuit(&mut builder);
 
-        // Make result a public instance
+        // Make result and digest public instances
         builder.assigned_instances[0].push(result);
+        builder.assigned_instances[0].push(digest);
 
         let result_value = *result.value();
+        let digest_value = *digest.value();
 
         // Run mock prover
-        let prover = MockProver::run(K, &builder, vec![vec![result_value]])
+        let prover = MockProver::run(K, &builder, vec![vec![result_value, digest_value]])
             .map_err(|e| SableError::ProofGeneration(format!("Mock prover failed: {:?}", e)))?;
 
         prover.verify().map_err(|e| {
@@ -741,7 +816,7 @@ mod tests {
         };
 
         let witness = passing_witness();
-        let circuit = LivenessCheckCircuit::new(witness);
+        let circuit = LivenessCheckCircuit::new(witness.clone());
         assert!(circuit.should_pass(), "Witness should pass CPU check");
 
         let params = ParamsKZG::<Bn256>::setup(K, rand_core::OsRng);
@@ -749,9 +824,15 @@ mod tests {
 
         // Build circuit for keygen
         let mut builder = BaseCircuitBuilder::new(false).use_params(circuit_params.clone());
-        let result = circuit.build_circuit(&mut builder);
+        let (result, digest) = circuit.build_circuit(&mut builder);
         builder.assigned_instances[0].push(result);
+        builder.assigned_instances[0].push(digest);
         let result_value = *result.value();
+        let digest_value = *digest.value();
+
+        // Verify digest matches CPU-side computation
+        let expected_digest = challenge_digest(&witness);
+        assert_eq!(digest_value, expected_digest, "In-circuit digest should match CPU-side");
 
         // Keygen
         let vk = keygen_vk(&params, &builder)
@@ -761,7 +842,7 @@ mod tests {
 
         // Prove
         let mut transcript = Blake2bWrite::<_, G1Affine, Challenge255<_>>::init(vec![]);
-        let public_inputs = vec![result_value];
+        let public_inputs = vec![result_value, digest_value];
 
         create_proof::<KZGCommitmentScheme<Bn256>, ProverSHPLONK<_>, _, _, _, _>(
             &params,
@@ -822,9 +903,11 @@ mod tests {
         let circuit_params = LivenessCheckCircuit::circuit_params();
 
         let mut builder = BaseCircuitBuilder::new(false).use_params(circuit_params.clone());
-        let result = circuit.build_circuit(&mut builder);
+        let (result, digest) = circuit.build_circuit(&mut builder);
         builder.assigned_instances[0].push(result);
+        builder.assigned_instances[0].push(digest);
         let result_value = *result.value();
+        let digest_value = *digest.value();
 
         // Keygen
         let vk = keygen_vk(&params, &builder).expect("VK generation should succeed");
@@ -832,7 +915,7 @@ mod tests {
 
         // Prove
         let mut transcript = Blake2bWrite::<_, G1Affine, Challenge255<_>>::init(vec![]);
-        let public_inputs = vec![result_value];
+        let public_inputs = vec![result_value, digest_value];
 
         create_proof::<KZGCommitmentScheme<Bn256>, ProverSHPLONK<_>, _, _, _, _>(
             &params,
@@ -903,5 +986,45 @@ mod tests {
 
         let result = circuit.test_circuit().expect("Circuit should be satisfiable");
         assert!(result, "Max fingerprints should pass in circuit");
+    }
+
+    #[test]
+    fn test_challenge_digest_packing() {
+        // Verify the CPU-side challenge_digest packing is correct.
+        let witness = passing_witness();
+        let digest = challenge_digest(&witness);
+
+        // Manually compute expected value
+        let mut expected: u128 = 0;
+        for (i, &fp) in witness.expected_fingerprints.iter().enumerate() {
+            expected |= (fp as u128) << (16 * i);
+        }
+        expected |= (witness.color_threshold as u128) << 96;
+        expected |= (witness.spatial_threshold as u128) << 104;
+        expected |= (witness.min_magnitude as u128) << 112;
+
+        let expected_bytes = expected.to_le_bytes();
+        let mut fr_bytes = [0u8; 32];
+        fr_bytes[..16].copy_from_slice(&expected_bytes);
+        let expected_fr = Fr::from_bytes(&fr_bytes).unwrap();
+
+        assert_eq!(digest, expected_fr, "challenge_digest should match manual packing");
+    }
+
+    #[test]
+    fn test_challenge_digest_circuit_matches_cpu() {
+        // Verify the in-circuit digest matches the CPU-side computation.
+        let witness = passing_witness();
+        let expected_digest = challenge_digest(&witness);
+
+        let circuit = LivenessCheckCircuit::new(witness);
+        let mut builder = BaseCircuitBuilder::new(false)
+            .use_params(LivenessCheckCircuit::circuit_params());
+        let (_result, digest) = circuit.build_circuit(&mut builder);
+
+        assert_eq!(
+            *digest.value(), expected_digest,
+            "In-circuit digest should match CPU-side challenge_digest"
+        );
     }
 }

@@ -483,7 +483,7 @@ mod halo2_integration {
         let proof = prover.prove(100, 200).expect("Should generate proof");
 
         assert!(proof.liveness_passed, "Default liveness should be true");
-        assert_eq!(proof.public_inputs.len(), 3, "Should have 3 public inputs");
+        assert_eq!(proof.public_inputs.len(), 4, "Should have 4 public inputs");
 
         let verifier = FaceVerificationVerifier::from_prover(&mut prover)
             .expect("Should create verifier");

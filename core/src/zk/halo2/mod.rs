@@ -89,7 +89,7 @@ pub use proof::{FaceVerificationProver, FaceVerificationVerifier, Proof, ProofSe
 pub use quantizer::{FeatureQuantizer, QuantizedEmbedding, FACE_EMBEDDING_DIM};
 pub use threshold::{ThresholdConfig, VerificationResult, precomputed};
 pub use threshold_check::{ThresholdCheckCircuit, FaceVerificationCircuit};
-pub use liveness::{LivenessCheckCircuit, LivenessWitness, LivenessResult};
+pub use liveness::{LivenessCheckCircuit, LivenessWitness, LivenessResult, challenge_digest};
 
 // Re-export types needed for external use
 pub use halo2_base::halo2_proofs::halo2curves::bn256::Fr as Halo2Fr;
