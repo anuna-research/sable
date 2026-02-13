@@ -155,11 +155,13 @@ Biometric data never leaves the user's device. Only mathematical proofs and sele
 
 ### Protocol flow
 
-| Phase | You (User) | | Verifier |
+| Phase | You (Prover) | | Verifier |
 |-------|-----------|---|----------|
 | **Issue** *(optional)* | Receive Verifiable Credential from government | ← | -- |
 | **Enroll** | Capture face, extract 1024-dim embedding | → | Hash with Poseidon, create Pedersen commitment |
-| **Auth** | Recapture face + spatial flash liveness | → | Generate Halo2 ZK proof (~250ms, 2KB) |
+| **Challenge** | Generate c_nonce, send H(c_nonce) | → | Generate s_nonce, send back |
+| **Liveness** | Derive flash pattern from HKDF(c_nonce ‖ s_nonce), display 3 split-screen rounds, capture frames | | |
+| **Prove** | Generate Halo2 ZK proof (~250ms, 2KB) with face match + liveness fingerprints | → | Verify H(c_nonce), re-derive pattern, check spatial flash |
 | **Present** *(optional)* | Select attributes to disclose (e.g. "≥ 18") | → | Receive only chosen predicates |
 | **Verify** | Receive pass/fail result | ← | Verify composite proof (~2ms) |
 
@@ -207,46 +209,58 @@ SABLE uses a spatial flash challenge-response protocol to make it significantly 
 
 ```mermaid
 sequenceDiagram
-    participant V as Verifier Device
-    participant P as Prover Device
-    participant PB as Biometrics
+    participant V as Verifier
+    participant P as Prover
     participant SC as SABLE Crypto
-    participant PKI as Government PKI
 
-    Note over V,PKI: SABLE Biometric Identity Verification Flow
+    Note over V,SC: SABLE Biometric Verification with Coin-Flip Liveness
 
     V->>P: 1. Initiate verification request (NFC/BLE/WiFi)
-    V->>P: 2. Send challenge nonce (256-bit)
 
-    P->>PB: 3. Capture live biometric image
-    PB->>PB: 4. Screen flash liveness detection
-    PB->>PB: 5. Extract features (1024-dim embedding)
-    PB->>P: 6. Return biometric features
-
-    P->>SC: 7. Hash features with Poseidon
-    SC->>SC: 8. Generate salt (256-bit RNG)
-    SC->>SC: 9. Create Pedersen commitment C = g^f * h^s
-
-    P->>SC: 10. Generate Halo2 ZK proof
-    Note over SC: Proves: biometric match + liveness + quality<br/>without revealing biometric data
-    SC->>SC: 11. Include challenge nonce in proof
-    SC->>P: 12. Return proof + commitment
-
-    alt Government-Attested Identity (Optional)
-        P->>PKI: 13. Retrieve Verifiable Credential
-        PKI->>P: 14. Return BBS+ signed credential
-        P->>P: 15. Select attributes to disclose
+    rect rgb(255, 248, 240)
+    Note over V,P: Coin-Flip Challenge (commit-reveal)
+    P->>P: 2. Generate random c_nonce (256-bit)
+    P->>P: 3. Compute commitment H(c_nonce) = SHA-256(c_nonce)
+    P->>V: 4. Send H(c_nonce)
+    Note right of P: Prover commits before<br/>seeing verifier's nonce
+    V->>V: 5. Generate random s_nonce (256-bit)
+    V->>P: 6. Send s_nonce
+    Note over V,P: Flash pattern = HKDF-SHA256(c_nonce ‖ s_nonce)<br/>Neither side could predict or precompute it
     end
 
-    P->>V: 16. Send commitment + proof + selective disclosure (optional)
-    V->>SC: 17. Verify Halo2 proof locally (~2ms)
-    SC->>SC: 18. Validate proof against commitment
-    SC->>SC: 19. Check challenge nonce binding
-    SC->>V: 20. Return verification result
+    rect rgb(240, 255, 240)
+    Note over P,SC: Spatial Flash Liveness
+    P->>P: 7. Derive flash pattern from HKDF(c_nonce ‖ s_nonce)
+    P->>P: 8. Display 3 rounds of split-screen colors (top ≠ bottom)
+    P->>P: 9. Capture baseline + 3 flash frames via camera
+    P->>P: 10. Recapture face embedding (live scan)
+    end
 
-    V->>P: 21. Send verification response
+    rect rgb(248, 240, 255)
+    Note over P,SC: ZK Proof Generation
+    P->>SC: 11. Hash features with Poseidon, create Pedersen commitment
+    P->>SC: 12. Quantize per-region reflectance deltas → 16-bit fingerprints
+    P->>SC: 13. Generate Halo2 ZK proof (~250ms, 2KB)
+    Note over SC: Proves: face match + liveness + quality<br/>without revealing biometric data
+    SC->>P: 14. Return proof + commitment
+    end
 
-    Note over V,PKI: Privacy preserved: biometric data never transmitted<br/>Only disclosed predicates revealed
+    P->>V: 15. Send c_nonce + commitment + proof + flash frames
+
+    rect rgb(240, 248, 255)
+    Note over V,SC: Verification
+    V->>V: 16. Verify SHA-256(c_nonce) = H(c_nonce) ✓
+    V->>V: 17. Re-derive flash pattern from HKDF(c_nonce ‖ s_nonce)
+    V->>V: 18. Verify spatial flash (3D geometry from reflectance deltas)
+    V->>SC: 19. Verify Halo2 proof locally (~2ms)
+    SC->>SC: 20. Validate proof against commitment
+    SC->>SC: 21. Check challenge digest binding
+    SC->>V: 22. Return verification result
+    end
+
+    V->>P: 23. Send verification response ✓/✗
+
+    Note over V,SC: Privacy preserved: biometric data never transmitted<br/>Only ZK proof + pass/fail crosses the boundary
 ```
 
 ### Remote verification
