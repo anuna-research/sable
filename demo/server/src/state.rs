@@ -56,7 +56,7 @@ pub struct AppState {
     pub challenges: Arc<RwLock<HashMap<String, AuthChallenge>>>,
     /// Halo2 ZK prover (shared for setup reuse)
     pub halo2_prover: Arc<RwLock<FaceVerificationProver>>,
-    /// Liveness results by session_id
+    /// Pending liveness results by challenge_id (single-use)
     pub liveness_results: Arc<RwLock<HashMap<String, LivenessResult>>>,
 }
 
@@ -100,14 +100,19 @@ impl AppState {
         challenges.remove(challenge_id)
     }
 
-    pub fn store_liveness_result(&self, session_id: String, result: LivenessResult) {
+    pub fn store_liveness_result(&self, challenge_id: String, result: LivenessResult) {
         let mut results = self.liveness_results.write();
-        results.insert(session_id, result);
+        results.insert(challenge_id, result);
     }
 
-    pub fn get_liveness_result(&self, session_id: &str) -> Option<LivenessResult> {
+    pub fn get_liveness_result(&self, challenge_id: &str) -> Option<LivenessResult> {
         let results = self.liveness_results.read();
-        results.get(session_id).cloned()
+        results.get(challenge_id).cloned()
+    }
+
+    pub fn take_liveness_result(&self, challenge_id: &str) -> Option<LivenessResult> {
+        let mut results = self.liveness_results.write();
+        results.remove(challenge_id)
     }
 }
 

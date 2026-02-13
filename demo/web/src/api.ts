@@ -72,6 +72,7 @@ export interface ProveResponse {
 export interface VerifyRequest {
   proof_hex: string;
   public_inputs_hex: string[];
+  challenge_id?: string;
   session_id?: string;
 }
 
@@ -89,7 +90,8 @@ export interface VerificationDetails {
 }
 
 export interface LivenessRequest {
-  session_id: string;
+  challenge_id: string;
+  session_id?: string;
   baseline_image: string;
   flash_image: string;
 }

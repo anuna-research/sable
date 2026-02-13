@@ -574,6 +574,7 @@ async function handleVerify(): Promise<void> {
     const result = await api.verify({
       proof_hex: state.proof.proof_hex,
       public_inputs_hex: state.proof.public_inputs_hex,
+      challenge_id: state.challenge?.challenge_id,
       session_id: state.sessionId ?? undefined,
     });
     state.verifyResult = result;

@@ -312,6 +312,8 @@ pub async fn auth_prove(
 
     // Check challenge hasn't expired (30 second window)
     if challenge.created_at.elapsed().as_secs() > 30 {
+        // Clear any pending liveness tied to this challenge.
+        let _ = state.take_liveness_result(&challenge.challenge_id);
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -402,9 +404,9 @@ pub async fn auth_prove(
         hamming_dist, threshold, hamming_dist <= threshold
     );
 
-    // Check for stored liveness result
-    let liveness_passed = state
-        .get_liveness_result(&challenge.session_id)
+    // Consume challenge-bound liveness result (single-use).
+    let mut liveness_passed = state
+        .take_liveness_result(&challenge.challenge_id)
         .map(|r| r.passed);
 
     // ========================================================================
@@ -571,8 +573,9 @@ pub async fn auth_prove(
             min_magnitude: 3,      // minimum magnitude for flash response
         });
 
-        // h. Store result, set response fields
+        // h. Set response fields
         color_challenge_passed = Some(spatial_result.passed);
+        liveness_passed = Some(spatial_result.passed);
         spatial_differentiation_score = Some(spatial_result.overall_spatial_score);
         region_match_scores = Some(
             spatial_result
@@ -588,18 +591,7 @@ pub async fn auth_prove(
         );
 
         // Spatial color challenge is the primary liveness mechanism.
-        // When present, it supersedes any legacy single-flash result.
-        state.store_liveness_result(
-            challenge.session_id.clone(),
-            LivenessResult {
-                passed: spatial_result.passed,
-                reflectance_variance: 0.0,
-                reflectance_gradient: 0.0,
-                highlight_softness: 0.0,
-                channel_consistency: 0.0,
-                checked_at: Instant::now(),
-            },
-        );
+        // It is reflected directly in this proof response.
     }
 
     // ========================================================================
@@ -728,7 +720,10 @@ pub struct VerifyRequest {
     pub proof_hex: String,
     #[allow(dead_code)]
     pub public_inputs_hex: Vec<String>,
-    /// Optional session ID to look up liveness result
+    /// Optional challenge ID to look up pending liveness result.
+    pub challenge_id: Option<String>,
+    /// Backwards-compatible field (no longer used for liveness lookup).
+    #[allow(dead_code)]
     pub session_id: Option<String>,
 }
 
@@ -829,11 +824,11 @@ pub async fn verify(
 
     let verification_time = start.elapsed();
 
-    // Look up liveness result if session_id provided
+    // Look up liveness result if challenge_id provided.
     let liveness_check = req
-        .session_id
+        .challenge_id
         .as_deref()
-        .and_then(|sid| state.get_liveness_result(sid))
+        .and_then(|cid| state.get_liveness_result(cid))
         .map(|r| r.passed);
 
     match verification_result {
@@ -900,8 +895,10 @@ pub async fn health() -> Json<HealthResponse> {
 
 #[derive(Debug, Deserialize)]
 pub struct ScreenFlashRequest {
-    /// Session ID to associate liveness result with
-    pub session_id: String,
+    /// Challenge ID to bind liveness to a single authentication attempt.
+    pub challenge_id: String,
+    /// Optional session ID for client-side consistency checks.
+    pub session_id: Option<String>,
     /// Baseline image (before flash) as base64-encoded JPEG
     pub baseline_image: String,
     /// Flash image (during flash) as base64-encoded JPEG
@@ -929,8 +926,39 @@ pub async fn screen_flash_check(
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let start = Instant::now();
 
+    // Verify challenge exists (liveness is challenge-bound and single-use).
+    let challenge = state.get_challenge(&req.challenge_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Challenge not found or expired".to_string(),
+            }),
+        )
+    })?;
+
+    if challenge.created_at.elapsed().as_secs() > 30 {
+        let _ = state.take_liveness_result(&req.challenge_id);
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Challenge expired".to_string(),
+            }),
+        ));
+    }
+
+    if let Some(session_id) = &req.session_id {
+        if session_id != &challenge.session_id {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Session does not match challenge".to_string(),
+                }),
+            ));
+        }
+    }
+
     // Verify session exists
-    state.get_session(&req.session_id).ok_or_else(|| {
+    state.get_session(&challenge.session_id).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -1007,9 +1035,9 @@ pub async fn screen_flash_check(
         timing.as_secs_f64() * 1000.0
     );
 
-    // Store result for the session
+    // Store result for this specific challenge (single-use in auth_prove).
     state.store_liveness_result(
-        req.session_id,
+        req.challenge_id,
         LivenessResult {
             passed,
             reflectance_variance: variance_f,

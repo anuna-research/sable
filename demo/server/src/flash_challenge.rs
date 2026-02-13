@@ -475,6 +475,13 @@ pub fn compute_liveness_fingerprints(
 /// while accommodating real webcam geometry.
 const REGION_COLOR_MATCH_THRESHOLD: f64 = 0.2;
 
+/// Minimum margin by which each region must match its expected half-screen
+/// color better than the opposite half's color.
+///
+/// This prevents swapped-top/bottom presentations from passing when both
+/// colors are still somewhat correlated in RGB space.
+const REGION_ASSIGNMENT_MARGIN: f64 = 0.10;
+
 /// Maximum cosine similarity between upper and lower delta vectors.
 /// Values above this indicate both halves responded identically (flat surface).
 ///
@@ -488,8 +495,11 @@ const REGION_COLOR_MATCH_THRESHOLD: f64 = 0.2;
 /// - Flat photos/screens: ~0.999-1.0 → FAIL
 const SPATIAL_DIFF_MAX_SIMILARITY: f64 = 0.998;
 
-/// Minimum number of rounds that must pass the spatial differentiation check.
-const SPATIAL_DIFF_MIN_PASSING_ROUNDS: usize = 2;
+/// Minimum number of rounds that must pass each spatial/color check.
+///
+/// Requiring all 3 rounds significantly reduces accidental replay acceptance
+/// when independently derived patterns happen to overlap on 1-2 rounds.
+const SPATIAL_DIFF_MIN_PASSING_ROUNDS: usize = 3;
 
 /// Face region margin: 20% on each side, leaving center 60%.
 const FACE_MARGIN_FRACTION: f64 = 0.20;
@@ -575,6 +585,9 @@ pub fn verify_spatial_flash(
 
     // --- Per-round analysis -------------------------------------------------
     let mut region_scores = Vec::with_capacity(3);
+    let mut color_match_passing = 0usize;
+    let mut assignment_passing = 0usize;
+    let mut spatial_diff_passing = 0usize;
 
     for (round_idx, flash_frame) in flash_frames.iter().enumerate() {
         let round = &pattern.rounds[round_idx];
@@ -615,8 +628,30 @@ pub fn verify_spatial_flash(
         let upper_score = cosine_similarity(&upper_delta, &top_color_vec);
         // Cosine similarity: lower delta vs expected bottom color
         let lower_score = cosine_similarity(&lower_delta, &bottom_color_vec);
+        // Cross-checks used to enforce top/bottom assignment.
+        let upper_wrong_score = cosine_similarity(&upper_delta, &bottom_color_vec);
+        let lower_wrong_score = cosine_similarity(&lower_delta, &top_color_vec);
         // Spatial differentiation: cosine similarity between upper and lower deltas
         let spatial_diff_score = cosine_similarity(&upper_delta, &lower_delta);
+
+        // Region color presence check.
+        if upper_score > REGION_COLOR_MATCH_THRESHOLD
+            && lower_score > REGION_COLOR_MATCH_THRESHOLD
+        {
+            color_match_passing += 1;
+        }
+
+        // Assignment check: each region should match its expected half-screen
+        // color better than the opposite half by a margin.
+        if upper_score > upper_wrong_score + REGION_ASSIGNMENT_MARGIN
+            && lower_score > lower_wrong_score + REGION_ASSIGNMENT_MARGIN
+        {
+            assignment_passing += 1;
+        }
+
+        if spatial_diff_score < SPATIAL_DIFF_MAX_SIMILARITY {
+            spatial_diff_passing += 1;
+        }
 
         region_scores.push(RegionMatchScore {
             round: round_idx,
@@ -635,24 +670,17 @@ pub fn verify_spatial_flash(
     // must have both upper and lower scores above threshold. At typical webcam
     // distances one round can occasionally get poor lower-face illumination,
     // so requiring all 3 is too strict.
-    let color_match_passing = region_scores
-        .iter()
-        .filter(|s| {
-            s.upper_score > REGION_COLOR_MATCH_THRESHOLD
-                && s.lower_score > REGION_COLOR_MATCH_THRESHOLD
-        })
-        .count();
     let all_regions_match = color_match_passing >= SPATIAL_DIFF_MIN_PASSING_ROUNDS;
+
+    // Assignment check: at least SPATIAL_DIFF_MIN_PASSING_ROUNDS rounds must
+    // match the correct top/bottom mapping with margin, not just any color.
+    let assignment_ok = assignment_passing >= SPATIAL_DIFF_MIN_PASSING_ROUNDS;
 
     // Spatial differentiation: at least SPATIAL_DIFF_MIN_PASSING_ROUNDS rounds
     // must have upper/lower deltas that differ (similarity < threshold)
-    let spatial_diff_passing = region_scores
-        .iter()
-        .filter(|s| s.spatial_diff_score < SPATIAL_DIFF_MAX_SIMILARITY)
-        .count();
     let spatial_diff_ok = spatial_diff_passing >= SPATIAL_DIFF_MIN_PASSING_ROUNDS;
 
-    let passed = all_regions_match && spatial_diff_ok;
+    let passed = all_regions_match && assignment_ok && spatial_diff_ok;
 
     Ok(SpatialVerificationResult {
         passed,
