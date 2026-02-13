@@ -607,13 +607,13 @@ pub async fn auth_prove(
     // ========================================================================
     let proof_start = Instant::now();
 
-    let (proof_bytes, halo2_result, liveness_proved_in_zk) = {
+    let (proof_bytes, halo2_result, liveness_proved_in_zk, proof_challenge_digest) = {
         let mut prover = state.halo2_prover.write();
         match prover.prove_with_liveness(hamming_dist, threshold, liveness_witness) {
             Ok(proof) => {
                 let result = hamming_dist <= threshold;
                 let liveness_zk = proof.liveness_passed;
-                (proof.proof_bytes, result, liveness_zk)
+                (proof.proof_bytes, result, liveness_zk, proof.challenge_digest)
             }
             Err(e) => {
                 return Err((
@@ -648,12 +648,17 @@ pub async fn auth_prove(
     }
 
     // Public inputs from the proof
+    let digest_hex = {
+        use ff::PrimeField;
+        hex::encode(proof_challenge_digest.to_repr())
+    };
     let public_inputs = vec![
         hex::encode(session.commitment_bytes),
         hex::encode(challenge.nonce),
         format!("{:016x}", threshold), // Threshold used
         format!("{}", if halo2_result { "1" } else { "0" }), // Result: 1=match, 0=no match
         format!("{}", if liveness_proved_in_zk { "1" } else { "0" }), // Liveness result
+        digest_hex, // Challenge digest (Fr field element, for verification)
     ];
 
     let total_time = total_start.elapsed();
@@ -782,9 +787,21 @@ pub async fn verify(
         1 // backwards compatible: old proofs default to liveness pass
     };
 
-    // Use dummy witness digest for verification endpoint reconstruction.
+    // Parse challenge digest from public inputs (index 5), or fall back to dummy.
     // In production, the verifier would independently compute this from HKDF parameters.
-    let digest_val = compute_challenge_digest(&LivenessWitness::dummy_pass());
+    let digest_val = if req.public_inputs_hex.len() >= 6 {
+        let digest_bytes = hex::decode(&req.public_inputs_hex[5]).unwrap_or_default();
+        if digest_bytes.len() == 32 {
+            use ff::PrimeField;
+            let mut repr = <Halo2Fr as PrimeField>::Repr::default();
+            repr.as_mut().copy_from_slice(&digest_bytes);
+            Halo2Fr::from_repr(repr).unwrap_or_else(|| compute_challenge_digest(&LivenessWitness::dummy_pass()))
+        } else {
+            compute_challenge_digest(&LivenessWitness::dummy_pass())
+        }
+    } else {
+        compute_challenge_digest(&LivenessWitness::dummy_pass())
+    };
 
     // Reconstruct public inputs as Fr field elements
     let public_inputs = vec![
