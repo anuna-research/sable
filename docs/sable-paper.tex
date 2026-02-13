@@ -292,6 +292,126 @@ SABLE does not claim to defeat all presentation attacks:
 \textbf{Anonymous credentials.} BBS+ signatures~\cite{boneh2004,camenisch2016} enable selective disclosure of credential attributes. The W3C Verifiable Credentials standard provides an interoperability framework. SABLE's architecture supports BBS+ credentials anchored to the biometric Pedersen commitment, enabling composite proofs that simultaneously attest biometric match and credential predicates.
 
 %======================================================================
+\section{Comparison with Homomorphic Encryption}
+\label{sec:he-comparison}
+
+Homomorphic encryption (HE) is the most widely studied cryptographic technique for privacy-preserving biometrics. Yang et al.~\cite{yang2023} provide a comprehensive survey of HE-based approaches across face, iris, fingerprint, gait, voice, and signature modalities. In HE-based systems, biometric templates are encrypted and matching is performed in the ciphertext domain --- the server computes on encrypted data without ever observing the plaintext. SABLE takes a fundamentally different approach: matching is performed locally on the prover's device, and only a succinct zero-knowledge proof of the result is transmitted to the verifier. This section compares the two paradigms across several dimensions.
+
+\subsection{Architectural Model}
+
+In the HE paradigm, the server stores encrypted biometric templates and performs matching on ciphertexts, relying on the hardness of the underlying problem (e.g., RLWE for BFV/BGV/CKKS) to prevent the server from learning the plaintext. The server is a \emph{computing party} that processes biometric data, albeit in encrypted form.
+
+In SABLE, the server stores only a Pedersen commitment $C = g^h \cdot h_r^s$ (48 bytes), which is information-theoretically hiding. The server is a \emph{verifying party} that checks a proof --- it never processes biometric data in any form. This distinction has practical implications: HE-based systems require server-side HE libraries and substantial compute resources for ciphertext operations, whereas SABLE's verifier performs only a fast proof check (${\sim}1.8$\,ms).
+
+\subsection{Computational Efficiency}
+
+Table~\ref{tab:he-comparison} compares SABLE against representative HE-based face verification systems from the literature.
+
+\begin{table}[t]
+\centering
+\caption{Comparison with HE-Based Face Verification Systems}
+\label{tab:he-comparison}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+System & Match Time & Template Size & Scheme \\
+\midrule
+Boddeti~\cite{boddeti2018} & 0.15\,s & 32\,KB & BFV \\
+Drozdowski et al.~\cite{drozdowski2019} & 0.4\,s & 65\,KB & BFV \\
+Pradel et al.~\cite{pradel2021} & 47\,s & 512\,KB & BGV \\
+Sun et al.~\cite{sun2022} & 0.06\,s & 16\,KB & CKKS \\
+\midrule
+SABLE & 0.25\,s & 2.08\,KB & Halo2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Yang et al.\ identify computational complexity as a primary challenge: ``the computing time of some HE-based biometric systems could take more than 10\,s,'' and note that ``ciphertext size is typically larger than the plaintext size, so encrypted biometric data require more computational resources and storage space''~\cite{yang2023}. SABLE's 2.08\,KB proof is 8--250$\times$ smaller than HE ciphertext templates, and the 250\,ms proof generation is competitive with the fastest HE matching times while simultaneously proving liveness.
+
+\subsection{Privacy Strength}
+
+Both approaches satisfy the three ISO/IEC 24745 requirements for biometric template protection: irreversibility, unlinkability, and renewability. However, they differ in the degree of server-side exposure:
+
+\begin{itemize}
+\item \textbf{HE}: The server holds encrypted templates and computes encrypted distances. If the decryption key is compromised (the ``fully compromised'' scenario), all templates are exposed. Shahreza et al.~\cite{shahreza2022} address this by combining cancelable biometrics with HE, but this adds implementation complexity.
+
+\item \textbf{SABLE}: The server holds only Pedersen commitments and never processes biometric data. Key compromise does not expose templates because no encrypted templates exist on the server. The zero-knowledge property ensures that even a malicious verifier learns only the boolean match result and the public threshold.
+\end{itemize}
+
+\subsection{Liveness Detection}
+
+The HE literature largely treats liveness detection as orthogonal to template protection. Among the works surveyed by Yang et al., only Salem et al.~\cite{salem2021} mention liveness, and only in the context of a separate processing stage. HE-based liveness would require proving properties of reflectance data over encrypted values --- operations (e.g., channel ordering, bit-level Hamming distance, conditional branching) that are expensive or infeasible with standard HE schemes limited to addition and multiplication.
+
+SABLE integrates liveness directly into the ZK proof circuit. The Halo2 arithmetic circuit naturally supports the bit decomposition, XOR-based Hamming distance, range checks, and conditional logic required for the spatial flash protocol, adding only ${\sim}3{,}200$ constraints to the circuit. This integration ensures that liveness and face-match are cryptographically bound: a prover cannot present a valid face-match proof without simultaneously proving liveness.
+
+\subsection{Operational Requirements}
+
+\begin{itemize}
+\item \textbf{Server infrastructure}: HE matching requires server-side HE libraries (SEAL, HElib, OpenFHE) and non-trivial compute resources. SABLE requires only proof verification (${\sim}1.8$\,ms, no specialized libraries beyond the verifier).
+
+\item \textbf{Network}: HE systems require client-server communication to transmit encrypted queries and receive encrypted results. SABLE operates fully offline via peer-to-peer channels.
+
+\item \textbf{Hardware}: Yang et al.\ note that ``advanced and specialised hardware platforms have to be chosen for HE schemes applied to biometric security.'' SABLE runs on commodity mobile hardware with no specialized sensors.
+
+\item \textbf{Trusted setup}: HE requires key management infrastructure (public/private key pairs, potential key escrow). SABLE uses Halo2 with transparent setup --- no trusted ceremony or centralized key authority.
+\end{itemize}
+
+\subsection{Where HE Retains Advantages}
+
+HE-based approaches offer capabilities that SABLE's ZK architecture does not currently address:
+
+\begin{itemize}
+\item \textbf{1:$N$ identification}: HE allows a server to search across encrypted templates for a matching identity. SABLE's ZK proofs are inherently 1:1 --- the prover must know which enrolled commitment to prove against. Server-side biometric search over ZK commitments would require additional techniques such as private information retrieval.
+
+\item \textbf{Floating-point fidelity}: The CKKS scheme supports approximate real arithmetic natively, preserving full embedding precision. SABLE's 8-bit quantization introduces a maximum per-dimension error of ${\sim}0.004$, which may affect decision boundaries at extreme similarity thresholds.
+
+\item \textbf{Encrypted inference}: HE integrates naturally with neural network inference on encrypted data~\cite{wingarz2022,sun2022}, enabling privacy-preserving feature extraction on the server side. SABLE assumes feature extraction occurs locally on the user's device.
+\end{itemize}
+
+\subsection{Comparison with ZK-Based Biometric Systems}
+
+Two recent systems also apply zero-knowledge proofs to biometric authentication: ZABA~\cite{mao2025} and BioZero~\cite{lai2024}. Table~\ref{tab:zk-comparison} compares SABLE against both.
+
+\begin{table}[t]
+\centering
+\caption{Comparison with ZK-Based Biometric Authentication Systems}
+\label{tab:zk-comparison}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Property & SABLE & BioZero~\cite{lai2024} & ZABA~\cite{mao2025} \\
+\midrule
+ZK scheme & Halo2 (PLONK) & Groth16 & Sigma protocol \\
+Trusted setup & No & Yes (per-circuit) & Yes (trusted entity) \\
+Prove time & ${\sim}250$\,ms & $O(\text{s})$\textsuperscript{$\dagger$} & ${\sim}78$\,ms \\
+Verify time & ${\sim}1.8$\,ms & On-chain\textsuperscript{$\ddagger$} & ${\sim}140$\,ms \\
+Proof size & 2.08\,KB & ${\sim}256$\,B & $O(n)$\textsuperscript{$\S$} \\
+Distance metric & Hamming & Euclidean & Euclidean \\
+Modalities & Face & Face & Face+Finger+Iris \\
+Liveness detection & Yes (ZK-proved) & No & No \\
+Offline capable & Yes (P2P) & No (Ethereum) & No (server) \\
+Verifier learns & Boolean result & Boolean result & Boolean result \\
+Infrastructure & None & Blockchain node & Auth server \\
+Post-quantum & No\textsuperscript{$\|$} & No & No \\
+\bottomrule
+\multicolumn{4}{@{}l}{\footnotesize $\dagger$~Groth16 proving is dominated by FFT and MSM; typically seconds for}\\
+\multicolumn{4}{@{}l}{\footnotesize \phantom{$\dagger$~}moderate circuits.}\\
+\multicolumn{4}{@{}l}{\footnotesize $\ddagger$~On-chain Groth16 verification costs ${\sim}200$--$300$k gas on Ethereum.}\\
+\multicolumn{4}{@{}l}{\footnotesize $\S$~Sigma protocol transcripts grow linearly with witness size.}\\
+\multicolumn{4}{@{}l}{\footnotesize $\|$~All three systems rely on elliptic curve assumptions vulnerable to}\\
+\multicolumn{4}{@{}l}{\footnotesize \phantom{$\|$~}Shor's algorithm.}\\
+\end{tabular}%
+}
+\end{table}
+
+\textbf{BioZero} verifies biometric Euclidean distance on Ethereum via Groth16 proofs over homomorphic Pedersen commitments. Groth16 yields the most compact proofs (${\sim}256$ bytes, three group elements), but requires a per-circuit trusted setup ceremony --- if the circuit changes (e.g., to add liveness checks or adjust embedding dimensions), the ceremony must be repeated. More critically, BioZero's reliance on Ethereum for verification introduces gas costs, internet dependency, and transaction latency on every authentication attempt. SABLE's Halo2 verification is local, free, and completes in 1.8\,ms with no network round-trip.
+
+\textbf{ZABA} uses Pedersen vector commitments with Sigma-protocol-style proofs over multimodal cancelable biometrics (fingerprint, face, and iris). Its ${\sim}78$\,ms proving time is fast, but its ${\sim}140$\,ms verification time is approximately 78$\times$ slower than SABLE's 1.8\,ms. Sigma protocol transcripts grow linearly with the witness size, whereas SABLE's PLONK-based proofs are succinct (constant 2.08\,KB regardless of circuit complexity). ZABA also requires an online authentication server and a trusted entity to generate public parameters.
+
+Neither BioZero nor ZABA addresses liveness detection. Adding liveness to BioZero would require modifying the Groth16 circuit and repeating the trusted setup; adding it to ZABA's Sigma protocol would require extending the proof to cover non-algebraic operations (bit decomposition, channel ordering, conditional logic) that are not naturally expressible in Sigma protocols. SABLE's Halo2 arithmetic circuits accommodate liveness at the cost of ${\sim}3{,}200$ additional constraints within the same transparent-setup framework.
+
+\noindent Overall, HE and ZK proofs represent complementary approaches to biometric privacy. HE is suited to scenarios requiring server-side computation on encrypted biometric databases, whereas ZK proofs are suited to client-side verification where biometric data should never leave the device. Among ZK-based systems, SABLE is distinguished by its combination of transparent setup, succinct proofs, integrated liveness, and offline operation. The principal trade-off is the absence of 1:$N$ identification, where HE's encrypted database search and BioZero's on-chain lookup have a structural advantage.
+
+%======================================================================
 \section{Conclusion}
 \label{sec:conclusion}
 
@@ -302,7 +422,7 @@ SABLE is open-source under the Apache 2.0 license. Future work includes post-qua
 %======================================================================
 \bibliographystyle{IEEEtran}
 
-\begin{thebibliography}{13}
+\begin{thebibliography}{21}
 
 \bibitem{tang2018}
 S.~Tang, X.~Wang, X.~Lv, T.~X.~Han, J.~Keller, Z.~He, M.~Skubic, and S.~Lao,
@@ -368,6 +488,41 @@ in \emph{Proc.\ CRYPTO}, 2004, pp.~41--55.
 J.~Camenisch, M.~Drijvers, and A.~Lehmann,
 ``Anonymous attestation using the strong Diffie-Hellman assumption revisited,''
 in \emph{Proc.\ Trust and Trustworthy Computing}, 2016.
+
+\bibitem{yang2023}
+W.~Yang, S.~Wang, H.~Cui, Z.~Tang, and Y.~Li,
+``A review of homomorphic encryption for privacy-preserving biometrics,''
+\emph{Sensors}, vol.~23, no.~7, p.~3566, 2023.
+
+\bibitem{drozdowski2019}
+P.~Drozdowski, N.~Buchmann, C.~Rathgeb, M.~Margraf, and C.~Busch,
+``On the application of homomorphic encryption to face identification,''
+in \emph{Proc.\ Int.\ Conf.\ Information Security Theory and Practice}, 2019, pp.~16--30.
+
+\bibitem{pradel2021}
+G.~Pradel, C.~Mitchell, and T.~Mayberry,
+``Privacy-preserving biometric authentication,''
+in \emph{Proc.\ ACM Workshop on Privacy in the Electronic Society}, 2021.
+
+\bibitem{sun2022}
+J.~Sun, J.~Yang, C.~Xu, and X.~Kang,
+``Secure face recognition based on homomorphic encryption,''
+in \emph{Proc.\ IEEE Int.\ Conf.\ Multimedia and Expo}, 2022.
+
+\bibitem{shahreza2022}
+H.~O.~Shahreza, V.~K.~Hahn, and S.~Marcel,
+``Face template protection using deep learning,''
+in \emph{Proc.\ IEEE Int.\ Joint Conf.\ Biometrics}, 2022.
+
+\bibitem{salem2021}
+M.~Salem, S.~Taheri, and J.~S.~Yuan,
+``A cloud-based multi-party privacy-preserving biometric recognition system using HE,''
+\emph{IEEE Access}, vol.~9, pp.~142534--142549, 2021.
+
+\bibitem{wingarz2022}
+T.~Wingarz, M.~Gomez-Barrero, C.~Rathgeb, and C.~Busch,
+``Privacy-preserving convolutional neural network for face recognition,''
+in \emph{Proc.\ Int.\ Workshop on Biometrics and Forensics}, 2022.
 
 \end{thebibliography}
 
