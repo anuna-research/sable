@@ -1,4 +1,4 @@
-const API_BASE = '/api';
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 export interface EnrollRequest {
   user_id: string;
@@ -48,8 +48,10 @@ export interface ProveTimings {
 
 export interface RegionMatchScore {
   round: number;
-  upper_score: number;
-  lower_score: number;
+  tl_score: number;
+  tr_score: number;
+  bl_score: number;
+  br_score: number;
   spatial_diff_score: number;
 }
 

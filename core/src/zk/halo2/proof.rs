@@ -598,8 +598,8 @@ mod tests {
         let mut prover = FaceVerificationProver::new();
 
         let liveness = LivenessWitness {
-            delta_fingerprints: [0x0014, 0xA014, 0x4014, 0xA014, 0xA014, 0x0014],
-            expected_fingerprints: [0x0014, 0xA014, 0x4014, 0xA014, 0xA014, 0x0014],
+            delta_fingerprints: [0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014],
+            expected_fingerprints: [0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014],
             color_threshold: 3,
             spatial_threshold: 2,
             min_magnitude: 5,
@@ -626,10 +626,10 @@ mod tests {
     fn test_prove_with_liveness_failing() {
         let mut prover = FaceVerificationProver::new();
 
-        // Liveness fails: same upper/lower (no spatial diff)
+        // Liveness fails: same quadrants per round (no spatial diff)
         let liveness = LivenessWitness {
-            delta_fingerprints: [100, 100, 200, 200, 300, 300],
-            expected_fingerprints: [100, 100, 200, 200, 300, 300],
+            delta_fingerprints: [100, 100, 100, 100, 200, 200, 200, 200, 300, 300, 300, 300],
+            expected_fingerprints: [100, 100, 100, 100, 200, 200, 200, 200, 300, 300, 300, 300],
             color_threshold: 3,
             spatial_threshold: 1,
             min_magnitude: 1,
@@ -656,8 +656,8 @@ mod tests {
         let start = Instant::now();
         let mut prover_with = FaceVerificationProver::new();
         let liveness = LivenessWitness {
-            delta_fingerprints: [0x0014, 0xA014, 0x4014, 0xA014, 0xA014, 0x0014],
-            expected_fingerprints: [0x0014, 0xA014, 0x4014, 0xA014, 0xA014, 0x0014],
+            delta_fingerprints: [0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014],
+            expected_fingerprints: [0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014],
             color_threshold: 3,
             spatial_threshold: 2,
             min_magnitude: 5,

@@ -47,8 +47,8 @@ const LOOKUP_BITS: usize = 13;
 /// Number of flash rounds.
 const NUM_ROUNDS: usize = 3;
 
-/// Number of fingerprints: 2 per round (upper + lower).
-const NUM_FINGERPRINTS: usize = NUM_ROUNDS * 2;
+/// Number of fingerprints: 4 per round (TL, TR, BL, BR).
+const NUM_FINGERPRINTS: usize = NUM_ROUNDS * 4;
 
 /// Number of bits in a fingerprint.
 const FINGERPRINT_BITS: usize = 16;
@@ -66,9 +66,9 @@ const MAX_THRESHOLD_BITS: usize = 5; // max HD on 16-bit values = 16, fits in 5 
 /// Private + public witness data for the liveness ZK circuit.
 #[derive(Debug, Clone)]
 pub struct LivenessWitness {
-    /// 6 delta fingerprints (private): [round0_upper, round0_lower, round1_upper, ...]
+    /// 12 delta fingerprints (private): [r0_tl, r0_tr, r0_bl, r0_br, r1_tl, ...]
     pub delta_fingerprints: [u16; NUM_FINGERPRINTS],
-    /// 6 expected color fingerprints (public, derivable from HKDF pattern).
+    /// 12 expected color fingerprints (public, derivable from HKDF pattern).
     pub expected_fingerprints: [u16; NUM_FINGERPRINTS],
     /// Maximum Hamming distance for color match (public).
     pub color_threshold: u8,
@@ -86,11 +86,22 @@ impl LivenessWitness {
     pub fn dummy_pass() -> Self {
         // Use fingerprints that trivially pass:
         // - Same delta as expected (color HD = 0, within any threshold)
-        // - Different upper/lower (spatial HD > 0)
+        // - Adjacent quadrants differ (spatial HD > 0)
         // - Magnitude = 20 (well above any reasonable min_magnitude)
+        //
+        // Per round: [TL, TR, BL, BR] with sufficient pairwise Hamming distance
+        // between adjacent pairs (TL-TR, TL-BL, TR-BR, BL-BR).
         Self {
-            delta_fingerprints: [0x0014, 0xA014, 0x4014, 0xA014, 0xA014, 0x0014],
-            expected_fingerprints: [0x0014, 0xA014, 0x4014, 0xA014, 0xA014, 0x0014],
+            delta_fingerprints: [
+                0x0014, 0xA014, 0x6014, 0xC014, // round 0
+                0x0014, 0xA014, 0x6014, 0xC014, // round 1
+                0x0014, 0xA014, 0x6014, 0xC014, // round 2
+            ],
+            expected_fingerprints: [
+                0x0014, 0xA014, 0x6014, 0xC014,
+                0x0014, 0xA014, 0x6014, 0xC014,
+                0x0014, 0xA014, 0x6014, 0xC014,
+            ],
             color_threshold: 3,
             spatial_threshold: 2,
             min_magnitude: 5,
@@ -109,27 +120,29 @@ pub struct LivenessResult {
 ///
 /// Packing format (LSB first):
 /// ```text
-/// fp[0] | fp[1] | fp[2] | fp[3] | fp[4] | fp[5] | color_t | spatial_t | min_mag
-///  16b     16b     16b     16b     16b     16b      8b        8b          8b
+/// fp[0] | fp[1] | ... | fp[11] | color_t | spatial_t | min_mag
+///  16b     16b    ...    16b       8b        8b          8b
 /// ```
-/// Total: 120 bits. Fits in the 254-bit BN254 scalar field.
+/// Total: 12×16 + 3×8 = 216 bits. Fits in the 254-bit BN254 scalar field.
 ///
 /// The verifier independently computes this from the HKDF-derived parameters
 /// and checks it matches the public input, ensuring the prover used correct values.
 pub fn challenge_digest(witness: &LivenessWitness) -> Fr {
-    let mut value: u128 = 0;
-    for (i, &fp) in witness.expected_fingerprints.iter().enumerate() {
-        value |= (fp as u128) << (16 * i);
-    }
-    value |= (witness.color_threshold as u128) << 96;
-    value |= (witness.spatial_threshold as u128) << 104;
-    value |= (witness.min_magnitude as u128) << 112;
+    // Compute 2^n in Fr using repeated doubling
+    let pow2 = |n: usize| -> Fr {
+        let mut s = Fr::from(1u64);
+        for _ in 0..n { s = s + s; }
+        s
+    };
 
-    // Convert u128 to Fr via little-endian bytes
-    let bytes = value.to_le_bytes();
-    let mut fr_bytes = [0u8; 32];
-    fr_bytes[..16].copy_from_slice(&bytes);
-    Fr::from_bytes(&fr_bytes).unwrap()
+    let mut digest = Fr::from(0u64);
+    for (i, &fp) in witness.expected_fingerprints.iter().enumerate() {
+        digest = digest + Fr::from(fp as u64) * pow2(16 * i);
+    }
+    digest = digest + Fr::from(witness.color_threshold as u64) * pow2(192);
+    digest = digest + Fr::from(witness.spatial_threshold as u64) * pow2(200);
+    digest = digest + Fr::from(witness.min_magnitude as u64) * pow2(208);
+    digest
 }
 
 /// Liveness check circuit.
@@ -151,27 +164,36 @@ impl LivenessCheckCircuit {
     pub fn should_pass(&self) -> bool {
         let w = &self.witness;
         for r in 0..NUM_ROUNDS {
-            let upper_idx = r * 2;
-            let lower_idx = r * 2 + 1;
+            let base = r * 4;
+            let tl = base;
+            let tr = base + 1;
+            let bl = base + 2;
+            let br = base + 3;
 
-            // Color match: HD(delta, expected) <= color_threshold
-            let hd_upper = hamming_u16(w.delta_fingerprints[upper_idx], w.expected_fingerprints[upper_idx]);
-            let hd_lower = hamming_u16(w.delta_fingerprints[lower_idx], w.expected_fingerprints[lower_idx]);
-            if hd_upper > w.color_threshold as u32 || hd_lower > w.color_threshold as u32 {
-                return false;
+            // Color match: HD(delta, expected) <= color_threshold for all 4 quadrants
+            for idx in [tl, tr, bl, br] {
+                let hd = hamming_u16(w.delta_fingerprints[idx], w.expected_fingerprints[idx]);
+                if hd > w.color_threshold as u32 {
+                    return false;
+                }
             }
 
-            // Spatial diff: HD(upper, lower) >= spatial_threshold
-            let hd_spatial = hamming_u16(w.delta_fingerprints[upper_idx], w.delta_fingerprints[lower_idx]);
-            if hd_spatial < w.spatial_threshold as u32 {
-                return false;
+            // Spatial diff: HD >= spatial_threshold for 4 adjacent pairs
+            // TL-TR, TL-BL, TR-BR, BL-BR
+            let adjacent_pairs = [(tl, tr), (tl, bl), (tr, br), (bl, br)];
+            for (a, b) in adjacent_pairs {
+                let hd = hamming_u16(w.delta_fingerprints[a], w.delta_fingerprints[b]);
+                if hd < w.spatial_threshold as u32 {
+                    return false;
+                }
             }
 
-            // Magnitude: low 5 bits >= min_magnitude
-            let mag_upper = w.delta_fingerprints[upper_idx] & 0x1F;
-            let mag_lower = w.delta_fingerprints[lower_idx] & 0x1F;
-            if mag_upper < w.min_magnitude as u16 || mag_lower < w.min_magnitude as u16 {
-                return false;
+            // Magnitude: low 5 bits >= min_magnitude for all 4 quadrants
+            for idx in [tl, tr, bl, br] {
+                let mag = w.delta_fingerprints[idx] & 0x1F;
+                if mag < w.min_magnitude as u16 {
+                    return false;
+                }
             }
         }
         true
@@ -207,7 +229,6 @@ impl LivenessCheckCircuit {
         let mut result = ctx.load_constant(Fr::from(1u64));
 
         // Load threshold witnesses ONCE, reuse everywhere (checks + digest).
-        // This ensures the prover cannot use different values for checks vs digest.
         let color_thresh_witness = ctx.load_witness(Fr::from(w.color_threshold as u64));
         let spatial_thresh_witness = ctx.load_witness(Fr::from(w.spatial_threshold as u64));
         let min_mag_witness = ctx.load_witness(Fr::from(w.min_magnitude as u64));
@@ -215,71 +236,56 @@ impl LivenessCheckCircuit {
         // Collect all expected fingerprint witnesses for digest packing
         let mut expected_witnesses: Vec<AssignedValue<Fr>> = Vec::with_capacity(NUM_FINGERPRINTS);
 
+        // Adjacent pair indices within a round (TL=0, TR=1, BL=2, BR=3):
+        // TL-TR, TL-BL, TR-BR, BL-BR
+        let adjacent_pairs: [(usize, usize); 4] = [(0, 1), (0, 2), (1, 3), (2, 3)];
+
         for r in 0..NUM_ROUNDS {
-            let upper_idx = r * 2;
-            let lower_idx = r * 2 + 1;
+            let base = r * 4;
 
-            // Load private delta fingerprints
-            let delta_upper = ctx.load_witness(Fr::from(w.delta_fingerprints[upper_idx] as u64));
-            let delta_lower = ctx.load_witness(Fr::from(w.delta_fingerprints[lower_idx] as u64));
+            // Load private delta and public expected fingerprints for all 4 quadrants
+            let mut delta_vals = Vec::with_capacity(4);
+            let mut delta_bits_all = Vec::with_capacity(4);
+            let mut expected_bits_all = Vec::with_capacity(4);
 
-            // Load public expected fingerprints
-            let expected_upper = ctx.load_witness(Fr::from(w.expected_fingerprints[upper_idx] as u64));
-            let expected_lower = ctx.load_witness(Fr::from(w.expected_fingerprints[lower_idx] as u64));
+            for q in 0..4 {
+                let idx = base + q;
+                let delta = ctx.load_witness(Fr::from(w.delta_fingerprints[idx] as u64));
+                let expected = ctx.load_witness(Fr::from(w.expected_fingerprints[idx] as u64));
+                expected_witnesses.push(expected);
 
-            expected_witnesses.push(expected_upper);
-            expected_witnesses.push(expected_lower);
+                let delta_bits = decompose_u16(ctx, &gate, delta, w.delta_fingerprints[idx]);
+                let expected_bits = decompose_u16(ctx, &gate, expected, w.expected_fingerprints[idx]);
 
-            // Decompose all four fingerprints to bits
-            let delta_upper_bits = decompose_u16(ctx, &gate, delta_upper, w.delta_fingerprints[upper_idx]);
-            let delta_lower_bits = decompose_u16(ctx, &gate, delta_lower, w.delta_fingerprints[lower_idx]);
-            let expected_upper_bits = decompose_u16(ctx, &gate, expected_upper, w.expected_fingerprints[upper_idx]);
-            let expected_lower_bits = decompose_u16(ctx, &gate, expected_lower, w.expected_fingerprints[lower_idx]);
+                // ---- Color match check ----
+                let xor_color = xor_bits(ctx, &gate, &delta_bits, &expected_bits);
+                let hd_color = popcount(ctx, &gate, &xor_color);
+                let color_ok = compare_le(ctx, &gate, hd_color, color_thresh_witness,
+                    hamming_u16(w.delta_fingerprints[idx], w.expected_fingerprints[idx]) as u64,
+                    w.color_threshold as u64);
+                result = gate.mul(ctx, result, color_ok);
 
-            // ---- Color match checks ----
-            // HD(delta_upper, expected_upper) <= color_threshold
-            let xor_upper = xor_bits(ctx, &gate, &delta_upper_bits, &expected_upper_bits);
-            let hd_color_upper = popcount(ctx, &gate, &xor_upper);
-            let color_upper_ok = compare_le(ctx, &gate, hd_color_upper, color_thresh_witness,
-                hamming_u16(w.delta_fingerprints[upper_idx], w.expected_fingerprints[upper_idx]) as u64,
-                w.color_threshold as u64);
-            result = gate.mul(ctx, result, color_upper_ok);
+                // ---- Magnitude check ----
+                let mag_val = sum_low_bits(ctx, &gate, &delta_bits, MAGNITUDE_BITS);
+                let mag_ok = compare_le(ctx, &gate, min_mag_witness, mag_val,
+                    w.min_magnitude as u64,
+                    (w.delta_fingerprints[idx] & 0x1F) as u64);
+                result = gate.mul(ctx, result, mag_ok);
 
-            // HD(delta_lower, expected_lower) <= color_threshold
-            let xor_lower = xor_bits(ctx, &gate, &delta_lower_bits, &expected_lower_bits);
-            let hd_color_lower = popcount(ctx, &gate, &xor_lower);
-            let color_lower_ok = compare_le(ctx, &gate, hd_color_lower, color_thresh_witness,
-                hamming_u16(w.delta_fingerprints[lower_idx], w.expected_fingerprints[lower_idx]) as u64,
-                w.color_threshold as u64);
-            result = gate.mul(ctx, result, color_lower_ok);
+                delta_vals.push(delta);
+                delta_bits_all.push(delta_bits);
+                expected_bits_all.push(expected_bits);
+            }
 
-            // ---- Spatial differentiation check ----
-            // HD(delta_upper, delta_lower) >= spatial_threshold
-            // Equivalently: spatial_threshold <= HD
-            let xor_spatial = xor_bits(ctx, &gate, &delta_upper_bits, &delta_lower_bits);
-            let hd_spatial = popcount(ctx, &gate, &xor_spatial);
-            let spatial_ok = compare_le(ctx, &gate, spatial_thresh_witness, hd_spatial,
-                w.spatial_threshold as u64,
-                hamming_u16(w.delta_fingerprints[upper_idx], w.delta_fingerprints[lower_idx]) as u64);
-            result = gate.mul(ctx, result, spatial_ok);
-
-            // ---- Magnitude checks ----
-            // Extract magnitude from low 5 bits of each delta fingerprint.
-            // magnitude = sum of bits[0..5] * 2^i (already decomposed)
-            let mag_upper_val = sum_low_bits(ctx, &gate, &delta_upper_bits, MAGNITUDE_BITS);
-            let mag_lower_val = sum_low_bits(ctx, &gate, &delta_lower_bits, MAGNITUDE_BITS);
-
-            // min_magnitude <= magnitude_upper
-            let mag_upper_ok = compare_le(ctx, &gate, min_mag_witness, mag_upper_val,
-                w.min_magnitude as u64,
-                (w.delta_fingerprints[upper_idx] & 0x1F) as u64);
-            result = gate.mul(ctx, result, mag_upper_ok);
-
-            // min_magnitude <= magnitude_lower
-            let mag_lower_ok = compare_le(ctx, &gate, min_mag_witness, mag_lower_val,
-                w.min_magnitude as u64,
-                (w.delta_fingerprints[lower_idx] & 0x1F) as u64);
-            result = gate.mul(ctx, result, mag_lower_ok);
+            // ---- Spatial differentiation checks (4 adjacent pairs) ----
+            for &(a, b) in &adjacent_pairs {
+                let xor_spatial = xor_bits(ctx, &gate, &delta_bits_all[a], &delta_bits_all[b]);
+                let hd_spatial = popcount(ctx, &gate, &xor_spatial);
+                let spatial_ok = compare_le(ctx, &gate, spatial_thresh_witness, hd_spatial,
+                    w.spatial_threshold as u64,
+                    hamming_u16(w.delta_fingerprints[base + a], w.delta_fingerprints[base + b]) as u64);
+                result = gate.mul(ctx, result, spatial_ok);
+            }
         }
 
         // Constrain result to be boolean
@@ -289,14 +295,13 @@ impl LivenessCheckCircuit {
         ctx.constrain_equal(&bool_check, &zero);
 
         // ---- Build challenge digest in-circuit ----
-        // Pack: fp[0..6] at 16-bit offsets, then color_t, spatial_t, min_mag at 8-bit offsets.
-        // digest = sum(fp[i] * 2^(16*i)) + color_t * 2^96 + spatial_t * 2^104 + min_mag * 2^112
+        // Pack: fp[0..12] at 16-bit offsets, then color_t, spatial_t, min_mag at 8-bit offsets.
+        // digest = sum(fp[i] * 2^(16*i)) + color_t * 2^192 + spatial_t * 2^200 + min_mag * 2^208
         //
-        // Uses the SAME witness values as the checks above, so the prover cannot
-        // substitute different values for the digest vs the checks.
+        // Uses the SAME witness values as the checks above.
         let mut digest = ctx.load_constant(Fr::from(0u64));
 
-        // Compute 2^n in Fr using repeated doubling (avoids u64 overflow for n >= 64)
+        // Compute 2^n in Fr using repeated doubling
         let pow2_fr = |n: usize| -> Fr {
             let mut s = Fr::from(1u64);
             for _ in 0..n { s = s + s; }
@@ -310,17 +315,17 @@ impl LivenessCheckCircuit {
             digest = gate.add(ctx, digest, term);
         }
 
-        // Add thresholds (same witnesses used in the checks above)
-        let shift_96_const = ctx.load_constant(pow2_fr(96));
-        let color_term = gate.mul(ctx, color_thresh_witness, shift_96_const);
+        // Add thresholds
+        let shift_192_const = ctx.load_constant(pow2_fr(192));
+        let color_term = gate.mul(ctx, color_thresh_witness, shift_192_const);
         digest = gate.add(ctx, digest, color_term);
 
-        let shift_104_const = ctx.load_constant(pow2_fr(104));
-        let spatial_term = gate.mul(ctx, spatial_thresh_witness, shift_104_const);
+        let shift_200_const = ctx.load_constant(pow2_fr(200));
+        let spatial_term = gate.mul(ctx, spatial_thresh_witness, shift_200_const);
         digest = gate.add(ctx, digest, spatial_term);
 
-        let shift_112_const = ctx.load_constant(pow2_fr(112));
-        let min_mag_term = gate.mul(ctx, min_mag_witness, shift_112_const);
+        let shift_208_const = ctx.load_constant(pow2_fr(208));
+        let min_mag_term = gate.mul(ctx, min_mag_witness, shift_208_const);
         digest = gate.add(ctx, digest, min_mag_term);
 
         (result, digest)
@@ -525,20 +530,33 @@ fn hamming_u16(a: u16, b: u16) -> u32 {
 mod tests {
     use super::*;
 
-    /// Helper: create a passing witness with distinct upper/lower fingerprints.
+    /// Helper: create a passing witness with distinct quadrant fingerprints.
     ///
     /// Fingerprint layout: [order:3 | mid_ratio:4 | min_ratio:4 | magnitude:5]
     ///   0x0014 = order 0 (R>=G>=B), ratios 0, magnitude 20
     ///   0xA014 = order 5 (B>=G>=R), ratios 0, magnitude 20
+    ///   0x4014 = order 2 (G>=R>=B), ratios 0, magnitude 20
+    ///   0xE014 = order 7→clamped=7 (actually order=7 is invalid, use 0x6014 order=3)
     ///
-    /// Hamming distances between pairs:
-    ///   HD(0x0014, 0xA014) = 2  (bits 13,15 differ)
-    ///   HD(0x4014, 0xA014) = 3  (bits 13,14,15 differ)
+    /// Actually let's use:
+    ///   0x0014 (TL) order=0, 0xA014 (TR) order=5, 0x4014 (BL) order=2, 0x6014 (BR) order=3
+    ///   All have magnitude 20 and sufficient pairwise HD for spatial checks.
     fn passing_witness() -> LivenessWitness {
+        // Per round: [0x0014, 0xA014, 0x6014, 0xC014]
+        //   All adjacent pairs have HD = 2 ≥ spatial_threshold(2)
+        //   All magnitudes = 0x14 = 20 ≥ min_magnitude(5)
+        //   delta == expected → color HD = 0 ≤ color_threshold(3)
         LivenessWitness {
-            // [round0_upper, round0_lower, round1_upper, round1_lower, round2_upper, round2_lower]
-            delta_fingerprints: [0x0014, 0xA014, 0x4014, 0xA014, 0xA014, 0x0014],
-            expected_fingerprints: [0x0014, 0xA014, 0x4014, 0xA014, 0xA014, 0x0014],
+            delta_fingerprints: [
+                0x0014, 0xA014, 0x6014, 0xC014, // round 0
+                0x0014, 0xA014, 0x6014, 0xC014, // round 1
+                0x0014, 0xA014, 0x6014, 0xC014, // round 2
+            ],
+            expected_fingerprints: [
+                0x0014, 0xA014, 0x6014, 0xC014,
+                0x0014, 0xA014, 0x6014, 0xC014,
+                0x0014, 0xA014, 0x6014, 0xC014,
+            ],
             color_threshold: 3,
             spatial_threshold: 2,
             min_magnitude: 5,
@@ -558,16 +576,15 @@ mod tests {
     #[test]
     fn test_liveness_exact_match() {
         // Exact match: delta == expected, HD = 0
+        // Need 4 distinct values per round so adjacent pairs have HD >= 1
+        // Values chosen so that (v & 0x1F) >= 1 for all v (800 & 0x1F = 0, so use 801)
         let witness = LivenessWitness {
-            delta_fingerprints: [100, 200, 300, 400, 500, 600],
-            expected_fingerprints: [100, 200, 300, 400, 500, 600],
+            delta_fingerprints: [101, 201, 301, 401, 501, 601, 701, 801, 101, 201, 301, 401],
+            expected_fingerprints: [101, 201, 301, 401, 501, 601, 701, 801, 101, 201, 301, 401],
             color_threshold: 3,
-            spatial_threshold: 1, // upper != lower, so some HD > 0
+            spatial_threshold: 1,
             min_magnitude: 1,
         };
-        // Check spatial diff: HD(100, 200) should be sufficient
-        let hd = hamming_u16(100, 200);
-        assert!(hd >= 1, "upper/lower should differ: HD={}", hd);
 
         let circuit = LivenessCheckCircuit::new(witness);
         assert!(circuit.should_pass());
@@ -578,11 +595,20 @@ mod tests {
 
     #[test]
     fn test_liveness_wrong_color() {
-        // Wrong color: delta fingerprints are very different from expected
+        // Wrong color: delta fingerprints are adjacent-swapped from expected.
+        // HD(0x0014, 0xA014) = popcount(0xA000) = 2, which exceeds color_threshold=1.
         let witness = LivenessWitness {
-            delta_fingerprints: [0x0014, 0x4014, 0x2014, 0x0014, 0x4014, 0x2014],
-            expected_fingerprints: [0x4014, 0x0014, 0x0014, 0x4014, 0x2014, 0x4014], // swapped
-            color_threshold: 1, // very strict
+            delta_fingerprints: [
+                0x0014, 0xA014, 0x6014, 0xC014,
+                0x0014, 0xA014, 0x6014, 0xC014,
+                0x0014, 0xA014, 0x6014, 0xC014,
+            ],
+            expected_fingerprints: [
+                0xA014, 0x0014, 0xC014, 0x6014, // adjacent-swapped
+                0xA014, 0x0014, 0xC014, 0x6014,
+                0xA014, 0x0014, 0xC014, 0x6014,
+            ],
+            color_threshold: 1, // very strict — HD=2 exceeds this
             spatial_threshold: 1,
             min_magnitude: 5,
         };
@@ -595,17 +621,16 @@ mod tests {
 
     #[test]
     fn test_liveness_no_spatial_diff() {
-        // Upper == lower in every round → spatial differentiation fails
+        // All quadrants identical in every round → spatial differentiation fails
         let witness = LivenessWitness {
-            delta_fingerprints: [100, 100, 200, 200, 300, 300], // same upper/lower
-            expected_fingerprints: [100, 100, 200, 200, 300, 300],
+            delta_fingerprints: [100, 100, 100, 100, 200, 200, 200, 200, 300, 300, 300, 300],
+            expected_fingerprints: [100, 100, 100, 100, 200, 200, 200, 200, 300, 300, 300, 300],
             color_threshold: 3,
-            spatial_threshold: 1, // require at least HD=1 between upper and lower
+            spatial_threshold: 1, // require at least HD=1 between adjacent pairs
             min_magnitude: 1,
         };
         let circuit = LivenessCheckCircuit::new(witness);
-        // HD(upper, lower) = 0 for every round, but threshold requires >= 1
-        assert!(!circuit.should_pass(), "Identical upper/lower should fail spatial check");
+        assert!(!circuit.should_pass(), "Identical quadrants should fail spatial check");
 
         let result = circuit.test_circuit().expect("Circuit should be satisfiable");
         assert!(!result, "No spatial diff should output 0");
@@ -615,22 +640,15 @@ mod tests {
     fn test_liveness_low_magnitude() {
         // Magnitude field (low 5 bits) is too small
         let witness = LivenessWitness {
-            // Fingerprints with magnitude = 1 (low 5 bits = 00001)
             delta_fingerprints: [
-                0b_000_0000_0000_00001, // mag=1
-                0b_101_0000_0000_00001, // mag=1
-                0b_010_0000_0000_00001,
-                0b_000_0000_0000_00001,
-                0b_101_0000_0000_00001,
-                0b_010_0000_0000_00001,
+                0b_000_0000_0000_00001, 0b_101_0000_0000_00001, 0b_010_0000_0000_00001, 0b_110_0000_0000_00001,
+                0b_000_0000_0000_00001, 0b_101_0000_0000_00001, 0b_010_0000_0000_00001, 0b_110_0000_0000_00001,
+                0b_000_0000_0000_00001, 0b_101_0000_0000_00001, 0b_010_0000_0000_00001, 0b_110_0000_0000_00001,
             ],
             expected_fingerprints: [
-                0b_000_0000_0000_00001,
-                0b_101_0000_0000_00001,
-                0b_010_0000_0000_00001,
-                0b_000_0000_0000_00001,
-                0b_101_0000_0000_00001,
-                0b_010_0000_0000_00001,
+                0b_000_0000_0000_00001, 0b_101_0000_0000_00001, 0b_010_0000_0000_00001, 0b_110_0000_0000_00001,
+                0b_000_0000_0000_00001, 0b_101_0000_0000_00001, 0b_010_0000_0000_00001, 0b_110_0000_0000_00001,
+                0b_000_0000_0000_00001, 0b_101_0000_0000_00001, 0b_010_0000_0000_00001, 0b_110_0000_0000_00001,
             ],
             color_threshold: 3,
             spatial_threshold: 2,
@@ -650,8 +668,16 @@ mod tests {
             passing_witness(),
             // Tight color threshold
             LivenessWitness {
-                delta_fingerprints: [0x0014, 0xA014, 0x4014, 0x0014, 0xA014, 0x4014],
-                expected_fingerprints: [0x0014, 0xA014, 0x4014, 0x0014, 0xA014, 0x4014],
+                delta_fingerprints: [
+                    0x0014, 0xA014, 0x6014, 0xC014,
+                    0x0014, 0xA014, 0x6014, 0xC014,
+                    0x0014, 0xA014, 0x6014, 0xC014,
+                ],
+                expected_fingerprints: [
+                    0x0014, 0xA014, 0x6014, 0xC014,
+                    0x0014, 0xA014, 0x6014, 0xC014,
+                    0x0014, 0xA014, 0x6014, 0xC014,
+                ],
                 color_threshold: 0, // exact match required
                 spatial_threshold: 2,
                 min_magnitude: 5,
@@ -682,21 +708,20 @@ mod tests {
     fn test_liveness_partial_round_failure() {
         // Round 0: passes (color + spatial + magnitude all ok)
         // Round 1: passes
-        // Round 2: FAILS spatial diff (upper == lower)
-        // Circuit requires ALL rounds to pass, so overall = fail
+        // Round 2: FAILS spatial diff (all quadrants same)
         let witness = LivenessWitness {
             delta_fingerprints: [
-                0x0014, 0xA014, // round 0: different upper/lower ✓
-                0x4014, 0xA014, // round 1: different upper/lower ✓
-                0x0014, 0x0014, // round 2: SAME upper/lower ✗
+                0x0014, 0xA014, 0x6014, 0xC014, // round 0: distinct quadrants ✓
+                0x4014, 0xA014, 0x0014, 0xE014, // round 1: distinct quadrants ✓
+                0x0014, 0x0014, 0x0014, 0x0014, // round 2: ALL SAME ✗
             ],
             expected_fingerprints: [
-                0x0014, 0xA014,
-                0x4014, 0xA014,
-                0x0014, 0x0014,
+                0x0014, 0xA014, 0x6014, 0xC014,
+                0x4014, 0xA014, 0x0014, 0xE014,
+                0x0014, 0x0014, 0x0014, 0x0014,
             ],
             color_threshold: 3,
-            spatial_threshold: 2, // requires HD >= 2 between upper/lower
+            spatial_threshold: 2,
             min_magnitude: 5,
         };
         let circuit = LivenessCheckCircuit::new(witness);
@@ -708,12 +733,20 @@ mod tests {
 
     #[test]
     fn test_liveness_color_threshold_boundary() {
-        // Color match with HD exactly at threshold (should pass)
+        // Color match with HD exactly at threshold (should pass).
+        // Delta values differ from expected by exactly 1 bit (bit 0 flipped).
         let w = passing_witness();
-        // HD(0x0014, 0x0015) = 1 (differ in bit 0)
         let witness_at_boundary = LivenessWitness {
-            delta_fingerprints: [0x0015, 0xA015, 0x4015, 0xA015, 0xA015, 0x0015],
-            expected_fingerprints: [0x0014, 0xA014, 0x4014, 0xA014, 0xA014, 0x0014],
+            delta_fingerprints: [
+                0x0015, 0xA015, 0x6015, 0xC015,
+                0x0015, 0xA015, 0x6015, 0xC015,
+                0x0015, 0xA015, 0x6015, 0xC015,
+            ],
+            expected_fingerprints: [
+                0x0014, 0xA014, 0x6014, 0xC014,
+                0x0014, 0xA014, 0x6014, 0xC014,
+                0x0014, 0xA014, 0x6014, 0xC014,
+            ],
             color_threshold: 1, // HD=1 exactly at threshold
             spatial_threshold: w.spatial_threshold,
             min_magnitude: 5,
@@ -727,12 +760,20 @@ mod tests {
 
     #[test]
     fn test_liveness_color_threshold_just_over() {
-        // Color match with HD = threshold + 1 (should fail)
-        // HD(0x0014, 0x0017) = 2 (differ in bits 0,1), with threshold=1 → fail
+        // Color match with HD = threshold + 1 (should fail).
+        // HD(0x0017, 0x0014) = 2 (differ in bits 0,1), with threshold=1 → fail
         let w = passing_witness();
         let witness_over = LivenessWitness {
-            delta_fingerprints: [0x0017, 0xA014, 0x4014, 0xA014, 0xA014, 0x0014],
-            expected_fingerprints: [0x0014, 0xA014, 0x4014, 0xA014, 0xA014, 0x0014],
+            delta_fingerprints: [
+                0x0017, 0xA014, 0x6014, 0xC014, // round 0 TL has HD=2
+                0x0014, 0xA014, 0x6014, 0xC014,
+                0x0014, 0xA014, 0x6014, 0xC014,
+            ],
+            expected_fingerprints: [
+                0x0014, 0xA014, 0x6014, 0xC014,
+                0x0014, 0xA014, 0x6014, 0xC014,
+                0x0014, 0xA014, 0x6014, 0xC014,
+            ],
             color_threshold: 1, // HD=2 > threshold=1
             spatial_threshold: w.spatial_threshold,
             min_magnitude: 5,
@@ -747,10 +788,22 @@ mod tests {
     #[test]
     fn test_liveness_spatial_threshold_boundary() {
         // Spatial HD exactly at threshold (should pass: HD >= spatial_threshold)
-        // HD(0x0014, 0x2014) = 1 (only bit 13 differs)
+        // Use values where all adjacent pairs have HD=1:
+        // 0x0014 vs 0x2014: HD=1 (bit 13 differs)
+        // 0x0014 vs 0x4014: HD=1 (bit 14)
+        // 0x2014 vs 0x6014: HD=1 (bit 14)
+        // 0x4014 vs 0x6014: HD=1 (bit 13)
         let witness = LivenessWitness {
-            delta_fingerprints: [0x0014, 0x2014, 0x0014, 0x2014, 0x0014, 0x2014],
-            expected_fingerprints: [0x0014, 0x2014, 0x0014, 0x2014, 0x0014, 0x2014],
+            delta_fingerprints: [
+                0x0014, 0x2014, 0x4014, 0x6014,
+                0x0014, 0x2014, 0x4014, 0x6014,
+                0x0014, 0x2014, 0x4014, 0x6014,
+            ],
+            expected_fingerprints: [
+                0x0014, 0x2014, 0x4014, 0x6014,
+                0x0014, 0x2014, 0x4014, 0x6014,
+                0x0014, 0x2014, 0x4014, 0x6014,
+            ],
             color_threshold: 3,
             spatial_threshold: 1, // HD=1 exactly at threshold
             min_magnitude: 5,
@@ -765,16 +818,20 @@ mod tests {
     #[test]
     fn test_liveness_magnitude_boundary() {
         // Magnitude exactly at min_magnitude (should pass)
-        // magnitude = low 5 bits = 5 = 0b00101
-        let fp_mag5 = 0u16 | 5; // order=0, ratios=0, mag=5
-        let fp_mag5_alt = (5u16 << 13) | 5; // order=5, ratios=0, mag=5
+        // Orders chosen so all 4 adjacent pairs have HD ≥ 2:
+        //   fp0=0x0005 (order 0), fp1=0xA005 (order 5), fp2=0x6005 (order 3), fp3=0xC005 (order 6)
+        //   HD(0,1)=2, HD(0,2)=2, HD(1,3)=2, HD(2,3)=2
+        let fp0 = 0x0005u16;             // order=0, mag=5
+        let fp1 = 0xA005u16;             // order=5, mag=5
+        let fp2 = 0x6005u16;             // order=3, mag=5
+        let fp3 = 0xC005u16;             // order=6, mag=5
 
         let witness = LivenessWitness {
-            delta_fingerprints: [fp_mag5, fp_mag5_alt, fp_mag5, fp_mag5_alt, fp_mag5_alt, fp_mag5],
-            expected_fingerprints: [fp_mag5, fp_mag5_alt, fp_mag5, fp_mag5_alt, fp_mag5_alt, fp_mag5],
+            delta_fingerprints: [fp0, fp1, fp2, fp3, fp0, fp1, fp2, fp3, fp0, fp1, fp2, fp3],
+            expected_fingerprints: [fp0, fp1, fp2, fp3, fp0, fp1, fp2, fp3, fp0, fp1, fp2, fp3],
             color_threshold: 3,
             spatial_threshold: 2,
-            min_magnitude: 5, // exactly equals magnitude
+            min_magnitude: 5,
         };
         let circuit = LivenessCheckCircuit::new(witness);
         assert!(circuit.should_pass(), "Magnitude == min_magnitude should pass");
@@ -786,12 +843,14 @@ mod tests {
     #[test]
     fn test_liveness_magnitude_just_under() {
         // Magnitude = 4, min_magnitude = 5 (should fail)
-        let fp_mag4 = 0u16 | 4; // order=0, ratios=0, mag=4
-        let fp_mag4_alt = (5u16 << 13) | 4; // order=5, ratios=0, mag=4
+        let fp0 = 0x0004u16;
+        let fp1 = 0xA004u16;
+        let fp2 = 0x6004u16;
+        let fp3 = 0xC004u16;
 
         let witness = LivenessWitness {
-            delta_fingerprints: [fp_mag4, fp_mag4_alt, fp_mag4, fp_mag4_alt, fp_mag4_alt, fp_mag4],
-            expected_fingerprints: [fp_mag4, fp_mag4_alt, fp_mag4, fp_mag4_alt, fp_mag4_alt, fp_mag4],
+            delta_fingerprints: [fp0, fp1, fp2, fp3, fp0, fp1, fp2, fp3, fp0, fp1, fp2, fp3],
+            expected_fingerprints: [fp0, fp1, fp2, fp3, fp0, fp1, fp2, fp3, fp0, fp1, fp2, fp3],
             color_threshold: 3,
             spatial_threshold: 2,
             min_magnitude: 5, // 4 < 5, should fail
@@ -879,7 +938,7 @@ mod tests {
 
     #[test]
     fn test_liveness_real_prover_failing_witness() {
-        // Real prover with a witness that should fail (same upper/lower = no spatial diff)
+        // Real prover with a witness that should fail (all quadrants same = no spatial diff)
         use halo2_base::halo2_proofs::halo2curves::bn256::{Bn256, G1Affine};
         use halo2_base::halo2_proofs::plonk::{create_proof, keygen_pk, keygen_vk, verify_proof};
         use halo2_base::halo2_proofs::poly::kzg::commitment::{KZGCommitmentScheme, ParamsKZG};
@@ -890,8 +949,8 @@ mod tests {
         };
 
         let witness = LivenessWitness {
-            delta_fingerprints: [100, 100, 200, 200, 300, 300], // same upper/lower
-            expected_fingerprints: [100, 100, 200, 200, 300, 300],
+            delta_fingerprints: [100, 100, 100, 100, 200, 200, 200, 200, 300, 300, 300, 300],
+            expected_fingerprints: [100, 100, 100, 100, 200, 200, 200, 200, 300, 300, 300, 300],
             color_threshold: 3,
             spatial_threshold: 1, // requires >=1, but we have 0
             min_magnitude: 1,
@@ -953,14 +1012,13 @@ mod tests {
     fn test_liveness_all_zeros_witness() {
         // Edge case: all-zero fingerprints — magnitude = 0, spatial diff = 0
         let witness = LivenessWitness {
-            delta_fingerprints: [0; 6],
-            expected_fingerprints: [0; 6],
+            delta_fingerprints: [0; 12],
+            expected_fingerprints: [0; 12],
             color_threshold: 3,
             spatial_threshold: 1,
             min_magnitude: 1,
         };
         let circuit = LivenessCheckCircuit::new(witness);
-        // magnitude=0 < min_magnitude=1, and spatial diff=0 < 1 → fail
         assert!(!circuit.should_pass(), "All-zero should fail");
 
         let result = circuit.test_circuit().expect("Circuit should be satisfiable");
@@ -969,19 +1027,24 @@ mod tests {
 
     #[test]
     fn test_liveness_max_fingerprints() {
-        // Edge case: max value fingerprints (0xFFFF)
-        // magnitude = 0x1F = 31, all bits set
+        // Edge case: extreme fingerprint values with 4 distinct quadrants per round
+        // [0xFFFF, 0x0000, 0x5555, 0xAAAA] — all adjacent pairs have HD ≥ 2
         let witness = LivenessWitness {
-            delta_fingerprints: [0xFFFF, 0x0000, 0xFFFF, 0x0000, 0xFFFF, 0x0000],
-            expected_fingerprints: [0xFFFF, 0x0000, 0xFFFF, 0x0000, 0xFFFF, 0x0000],
+            delta_fingerprints: [
+                0xFFFF, 0x0000, 0x5555, 0xAAAA,
+                0xFFFF, 0x0000, 0x5555, 0xAAAA,
+                0xFFFF, 0x0000, 0x5555, 0xAAAA,
+            ],
+            expected_fingerprints: [
+                0xFFFF, 0x0000, 0x5555, 0xAAAA,
+                0xFFFF, 0x0000, 0x5555, 0xAAAA,
+                0xFFFF, 0x0000, 0x5555, 0xAAAA,
+            ],
             color_threshold: 3,
             spatial_threshold: 2,
-            min_magnitude: 0, // allow any magnitude (0x0000 has mag=0)
+            min_magnitude: 0,
         };
         let circuit = LivenessCheckCircuit::new(witness);
-        // HD(0xFFFF, 0x0000) = 16 >= spatial_threshold=2 ✓
-        // magnitude of 0x0000 = 0 >= 0 ✓
-        // color match: exact ✓
         assert!(circuit.should_pass(), "Max fingerprints should pass with min_magnitude=0");
 
         let result = circuit.test_circuit().expect("Circuit should be satisfiable");
@@ -994,21 +1057,22 @@ mod tests {
         let witness = passing_witness();
         let digest = challenge_digest(&witness);
 
-        // Manually compute expected value
-        let mut expected: u128 = 0;
+        // Manually compute expected value using Fr arithmetic
+        let pow2 = |n: usize| -> Fr {
+            let mut s = Fr::from(1u64);
+            for _ in 0..n { s = s + s; }
+            s
+        };
+
+        let mut expected = Fr::from(0u64);
         for (i, &fp) in witness.expected_fingerprints.iter().enumerate() {
-            expected |= (fp as u128) << (16 * i);
+            expected = expected + Fr::from(fp as u64) * pow2(16 * i);
         }
-        expected |= (witness.color_threshold as u128) << 96;
-        expected |= (witness.spatial_threshold as u128) << 104;
-        expected |= (witness.min_magnitude as u128) << 112;
+        expected = expected + Fr::from(witness.color_threshold as u64) * pow2(192);
+        expected = expected + Fr::from(witness.spatial_threshold as u64) * pow2(200);
+        expected = expected + Fr::from(witness.min_magnitude as u64) * pow2(208);
 
-        let expected_bytes = expected.to_le_bytes();
-        let mut fr_bytes = [0u8; 32];
-        fr_bytes[..16].copy_from_slice(&expected_bytes);
-        let expected_fr = Fr::from_bytes(&fr_bytes).unwrap();
-
-        assert_eq!(digest, expected_fr, "challenge_digest should match manual packing");
+        assert_eq!(digest, expected, "challenge_digest should match manual packing");
     }
 
     #[test]

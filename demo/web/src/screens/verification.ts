@@ -9,40 +9,44 @@ function rgbCss(color: [number, number, number]): string {
 }
 
 /**
- * Render a single flash round as a split-color card (top/bottom halves).
+ * Render a single flash round as a 2×2 quadrant card.
  */
 function renderFlashCard(round: FlashRound, index: number): string {
+  const splitX = 50 + (round.offsetX * 30 - 15);
+  const splitY = 50 + (round.offsetY * 30 - 15);
   return `
-    <div class="flash-card">
-      <div class="flash-card-top" style="background: ${rgbCss(round.topColor)};"></div>
-      <div class="flash-card-bottom" style="background: ${rgbCss(round.bottomColor)};"></div>
-      <div class="flash-card-label">Round ${index + 1}</div>
+    <div class="flash-card" style="display:grid; grid-template-columns:${splitX}% ${100-splitX}%; grid-template-rows:${splitY}% ${100-splitY}%; overflow:hidden;">
+      <div style="background:${rgbCss(round.tlColor)};"></div>
+      <div style="background:${rgbCss(round.trColor)};"></div>
+      <div style="background:${rgbCss(round.blColor)};"></div>
+      <div style="background:${rgbCss(round.brColor)};"></div>
+      <div class="flash-card-label" style="grid-column:1/-1; grid-row:1/-1; place-self:center;">Round ${index + 1}</div>
     </div>
   `;
 }
 
 /**
- * Render per-region match scores as horizontal bars.
+ * Render per-region match scores as horizontal bars (4 quadrants per round).
  */
 function renderRegionScores(scores: RegionMatchScore[]): string {
+  const renderBar = (label: string, value: number) => `
+    <div class="region-score-bar-group">
+      <span class="region-score-bar-label">${label}</span>
+      <div class="region-score-track">
+        <div class="region-score-fill" style="width: ${Math.min(value * 100, 100).toFixed(0)}%; background: ${value >= 0.5 ? 'var(--accent-success)' : 'var(--accent-error)'};"></div>
+      </div>
+      <span class="region-score-pct">${(value * 100).toFixed(0)}%</span>
+    </div>
+  `;
+
   return scores.map(s => `
     <div class="region-score-row">
       <div class="region-score-label">Round ${s.round}</div>
       <div class="region-score-bars">
-        <div class="region-score-bar-group">
-          <span class="region-score-bar-label">Upper</span>
-          <div class="region-score-track">
-            <div class="region-score-fill" style="width: ${Math.min(s.upper_score * 100, 100).toFixed(0)}%; background: ${s.upper_score >= 0.5 ? 'var(--accent-success)' : 'var(--accent-error)'};"></div>
-          </div>
-          <span class="region-score-pct">${(s.upper_score * 100).toFixed(0)}%</span>
-        </div>
-        <div class="region-score-bar-group">
-          <span class="region-score-bar-label">Lower</span>
-          <div class="region-score-track">
-            <div class="region-score-fill" style="width: ${Math.min(s.lower_score * 100, 100).toFixed(0)}%; background: ${s.lower_score >= 0.5 ? 'var(--accent-success)' : 'var(--accent-error)'};"></div>
-          </div>
-          <span class="region-score-pct">${(s.lower_score * 100).toFixed(0)}%</span>
-        </div>
+        ${renderBar('TL', s.tl_score)}
+        ${renderBar('TR', s.tr_score)}
+        ${renderBar('BL', s.bl_score)}
+        ${renderBar('BR', s.br_score)}
       </div>
     </div>
   `).join('');

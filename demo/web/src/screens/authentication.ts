@@ -178,9 +178,9 @@ function renderAuthPhase(
             text-align: center;
           ">
             <p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 0.75rem;">
-              Liveness check will flash colors briefly. The sequence uses split-screen
-              color patterns to verify a real 3D face via reflected light analysis
-              (Tang et al., NDSS 2018).
+              Liveness check will flash quadrant colors briefly. The sequence uses a
+              randomized 2&times;2 grid of colors to verify a real 3D face via reflected
+              light analysis (Tang et al., NDSS 2018).
             </p>
             <button class="btn btn-primary" id="liveness-consent-btn" style="font-size: 0.875rem;">
               OK, Start Liveness Check
@@ -309,7 +309,7 @@ function renderAuthPhase(
             <p style="font-size: 0.875rem;">
               <span style="color: ${proof.color_challenge_passed ? 'var(--accent-success)' : 'var(--accent-error)'};">
                 ${proof.color_challenge_passed
-                  ? 'Passed - split-screen color reflectance verified 3D face geometry'
+                  ? 'Passed - quadrant color reflectance verified 3D face geometry'
                   : 'Failed - spatial color challenge did not pass'}
               </span>
             </p>

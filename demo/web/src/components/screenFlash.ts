@@ -123,12 +123,12 @@ function prefersReducedMotion(): boolean {
 }
 
 /**
- * Perform spatial (split-screen top/bottom) multi-color flash capture.
+ * Perform spatial (2×2 quadrant) multi-color flash capture.
  *
  * Flow:
  * 1. Capture baseline frame (ambient lighting)
  * 2. For each of 3 rounds:
- *    a. Create split-screen overlay (top half = topColor, bottom half = bottomColor)
+ *    a. Create 2×2 grid overlay (TL, TR, BL, BR colors with per-round offset)
  *    b. Wait for camera to settle
  *    c. Capture frame
  *    d. Crossfade to next round (overlap overlays briefly)
@@ -136,7 +136,7 @@ function prefersReducedMotion(): boolean {
  *
  * Total sequence: ~1.3s
  *
- * @param rounds - 3 FlashRound objects with top/bottom RGB colors
+ * @param rounds - 3 FlashRound objects with 4 quadrant RGB colors and offsets
  * @param video - Active HTMLVideoElement with webcam stream
  * @returns Baseline and per-round frame data URLs
  */
@@ -156,8 +156,8 @@ export async function performSpatialFlash(
   for (let i = 0; i < rounds.length; i++) {
     const round = rounds[i];
 
-    // Create split-screen overlay for this round
-    const overlay = createSpatialOverlay(round.topColor, round.bottomColor, crossfadeDuration);
+    // Create quadrant overlay for this round
+    const overlay = createQuadrantOverlay(round, crossfadeDuration);
     document.body.appendChild(overlay);
 
     // Force reflow so the overlay is rendered
@@ -193,14 +193,17 @@ export async function performSpatialFlash(
 }
 
 /**
- * Create a full-screen split overlay with top half and bottom half colors.
- * Uses CSS grid with 2 rows (each 50vh).
+ * Create a full-screen 2×2 grid overlay with offset-shifted quadrant boundaries.
+ * The offset shifts the grid split point by ±15% from center.
  */
-function createSpatialOverlay(
-  topColor: [number, number, number],
-  bottomColor: [number, number, number],
+function createQuadrantOverlay(
+  round: FlashRound,
   crossfadeDuration: number
 ): HTMLDivElement {
+  // Compute split percentages (35%–65% range)
+  const splitX = 50 + (round.offsetX * 30 - 15);
+  const splitY = 50 + (round.offsetY * 30 - 15);
+
   const overlay = document.createElement('div');
   overlay.className = 'spatial-flash-overlay';
   overlay.style.cssText = `
@@ -214,21 +217,26 @@ function createSpatialOverlay(
     transition: opacity ${crossfadeDuration}ms ease-out;
     pointer-events: none;
     display: grid;
-    grid-template-rows: 1fr 1fr;
+    grid-template-columns: ${splitX}fr ${100 - splitX}fr;
+    grid-template-rows: ${splitY}fr ${100 - splitY}fr;
   `;
 
-  const topHalf = document.createElement('div');
-  topHalf.style.cssText = `
-    background: rgb(${topColor[0]}, ${topColor[1]}, ${topColor[2]});
-  `;
+  const tl = document.createElement('div');
+  tl.style.background = `rgb(${round.tlColor[0]}, ${round.tlColor[1]}, ${round.tlColor[2]})`;
 
-  const bottomHalf = document.createElement('div');
-  bottomHalf.style.cssText = `
-    background: rgb(${bottomColor[0]}, ${bottomColor[1]}, ${bottomColor[2]});
-  `;
+  const tr = document.createElement('div');
+  tr.style.background = `rgb(${round.trColor[0]}, ${round.trColor[1]}, ${round.trColor[2]})`;
 
-  overlay.appendChild(topHalf);
-  overlay.appendChild(bottomHalf);
+  const bl = document.createElement('div');
+  bl.style.background = `rgb(${round.blColor[0]}, ${round.blColor[1]}, ${round.blColor[2]})`;
+
+  const br = document.createElement('div');
+  br.style.background = `rgb(${round.brColor[0]}, ${round.brColor[1]}, ${round.brColor[2]})`;
+
+  overlay.appendChild(tl);
+  overlay.appendChild(tr);
+  overlay.appendChild(bl);
+  overlay.appendChild(br);
 
   return overlay;
 }

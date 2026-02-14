@@ -1,14 +1,15 @@
 // Flash Challenge Protocol — deterministic color pattern derivation for liveness detection.
 //
-// Derives a FlashPattern of 3 rounds (each with 2 RGB colors) from client and server
-// nonces using HKDF-SHA256. The construction is deterministic and designed to be
-// bit-for-bit identical to the Rust implementation in flash_challenge.rs.
+// Derives a FlashPattern of 3 rounds (each with 4 quadrant RGB colors and a
+// per-round grid offset) from client and server nonces using HKDF-SHA256.
+// The construction is deterministic and designed to be bit-for-bit identical
+// to the Rust implementation in flash_challenge.rs.
 //
 // HKDF-SHA256 Construction:
 //   IKM:    c_nonce || s_nonce (64 bytes)
 //   Salt:   "sable-flash-challenge-v1" (fixed, public)
 //   Info:   "flash-colors" (fixed, public)
-//   Output: 18 bytes (6 colors x 3 bytes each)
+//   Output: 42 bytes (12 colors × 3 bytes + 3 rounds × 2 offset bytes)
 
 // ---------------------------------------------------------------------------
 // Constants (must match Rust)
@@ -16,7 +17,7 @@
 
 const HKDF_SALT = 'sable-flash-challenge-v1';
 const HKDF_INFO = 'flash-colors';
-const HKDF_OUTPUT_LEN = 18;
+const HKDF_OUTPUT_LEN = 42;
 
 /** Maximum red channel value when green + blue are below the low threshold. */
 const RED_CAP = 204;
@@ -32,8 +33,12 @@ const MIN_ANGULAR_DISTANCE_DEG = 60.0;
 // ---------------------------------------------------------------------------
 
 export interface FlashRound {
-  topColor: [number, number, number];    // RGB tuple
-  bottomColor: [number, number, number]; // RGB tuple
+  tlColor: [number, number, number];  // top-left RGB
+  trColor: [number, number, number];  // top-right RGB
+  blColor: [number, number, number];  // bottom-left RGB
+  brColor: [number, number, number];  // bottom-right RGB
+  offsetX: number;  // [0, 1) grid offset
+  offsetY: number;  // [0, 1) grid offset
 }
 
 export interface FlashPattern {
@@ -47,6 +52,8 @@ export interface FlashPattern {
 /**
  * Derive a deterministic FlashPattern from client and server nonces using
  * HKDF-SHA256. Must produce bit-for-bit identical output to the Rust server.
+ *
+ * Returns 3 rounds, each with 4 quadrant colors and per-round grid offset.
  */
 export async function deriveFlashPattern(
   cNonce: Uint8Array,
@@ -57,14 +64,14 @@ export async function deriveFlashPattern(
   ikm.set(cNonce, 0);
   ikm.set(sNonce, 32);
 
-  // 2. HKDF-SHA256 extract + expand
+  // 2. HKDF-SHA256 extract + expand (42 bytes needs 2 HMAC blocks)
   const salt = new TextEncoder().encode(HKDF_SALT);
   const info = new TextEncoder().encode(HKDF_INFO);
   const okm = await hkdfSha256(salt, ikm, info, HKDF_OUTPUT_LEN);
 
-  // 3. Map each 3-byte group to a saturated RGB color
+  // 3. Map bytes 0..36 → 12 colors (4 per round × 3 rounds)
   const colors: Array<[number, number, number]> = [];
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 12; i++) {
     const offset = i * 3;
     colors.push(mapBytesToSaturatedColor(okm[offset], okm[offset + 1], okm[offset + 2]));
   }
@@ -74,18 +81,48 @@ export async function deriveFlashPattern(
     colors[i] = applyPhotosensitiveClamp(colors[i]);
   }
 
-  // 5. Ensure paired colors per round are visually distinct
+  // 5. Map bytes 36..42 → 3 × (offsetX, offsetY) as byte / 256.0
+  const offsets: Array<[number, number]> = [];
+  for (let i = 0; i < 3; i++) {
+    offsets.push([okm[36 + i * 2] / 256.0, okm[36 + i * 2 + 1] / 256.0]);
+  }
+
+  // 6. Ensure adjacent quadrant pairs per round are visually distinct
+  //    Adjacent pairs: TL-TR, TL-BL, TR-BR, BL-BR
   const rounds: FlashRound[] = [];
   for (let i = 0; i < 3; i++) {
-    const top = colors[i * 2];
-    let bottom = colors[i * 2 + 1];
+    const base = i * 4;
+    const quad: Array<[number, number, number]> = [
+      colors[base], colors[base + 1], colors[base + 2], colors[base + 3],
+    ];
 
-    if (angularDistanceDeg(top, bottom) < MIN_ANGULAR_DISTANCE_DEG) {
-      bottom = makeDistinct(top, bottom);
-      bottom = applyPhotosensitiveClamp(bottom);
+    // Each vertex has exactly 2 neighbors in the 2×2 grid.
+    // When fixing a vertex, find a color distinct from ALL its neighbors.
+    const neighborMap: Array<[number, number]> = [[1, 2], [0, 3], [0, 3], [1, 2]];
+    for (let pass = 0; pass < 4; pass++) {
+      let allOk = true;
+      for (let v = 0; v < 4; v++) {
+        const [n0, n1] = neighborMap[v];
+        const hasViolation =
+          angularDistanceDeg(quad[v], quad[n0]) < MIN_ANGULAR_DISTANCE_DEG ||
+          angularDistanceDeg(quad[v], quad[n1]) < MIN_ANGULAR_DISTANCE_DEG;
+        if (hasViolation) {
+          quad[v] = makeDistinctFromAll(quad[v], [quad[n0], quad[n1]]);
+          quad[v] = applyPhotosensitiveClamp(quad[v]);
+          allOk = false;
+        }
+      }
+      if (allOk) break;
     }
 
-    rounds.push({ topColor: top, bottomColor: bottom });
+    rounds.push({
+      tlColor: quad[0],
+      trColor: quad[1],
+      blColor: quad[2],
+      brColor: quad[3],
+      offsetX: offsets[i][0],
+      offsetY: offsets[i][1],
+    });
   }
 
   return rounds;
@@ -139,9 +176,11 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
  *
  * Extract: PRK = HMAC-SHA256(salt, IKM)
  * Expand:  T(1) = HMAC-SHA256(PRK, info || 0x01)
- *          Output = first `length` bytes of T(1)
+ *          T(2) = HMAC-SHA256(PRK, T(1) || info || 0x02)
+ *          ...
+ *          OKM  = T(1) || T(2) || ... truncated to `length` bytes
  *
- * For our use case, length <= 32 so a single expand block suffices.
+ * Supports multi-block expansion per RFC 5869.
  */
 async function hkdfSha256(
   salt: Uint8Array,
@@ -149,8 +188,10 @@ async function hkdfSha256(
   info: Uint8Array,
   length: number
 ): Promise<Uint8Array> {
-  if (length > 32) {
-    throw new Error('HKDF output length > 32 not supported in single-block expand');
+  const hashLen = 32; // SHA-256 output length
+  const numBlocks = Math.ceil(length / hashLen);
+  if (numBlocks > 255) {
+    throw new Error('HKDF output length too large');
   }
 
   // Extract: PRK = HMAC-SHA256(salt, IKM)
@@ -164,7 +205,7 @@ async function hkdfSha256(
   const prkBuffer = await crypto.subtle.sign('HMAC', extractKey, toArrayBuffer(ikm));
   const prk = new Uint8Array(prkBuffer);
 
-  // Expand: T(1) = HMAC-SHA256(PRK, info || 0x01)
+  // Expand: multi-block
   const expandKey = await crypto.subtle.importKey(
     'raw',
     toArrayBuffer(prk),
@@ -172,12 +213,24 @@ async function hkdfSha256(
     false,
     ['sign']
   );
-  const expandInput = new Uint8Array(info.length + 1);
-  expandInput.set(info, 0);
-  expandInput[info.length] = 0x01;
 
-  const t1Buffer = await crypto.subtle.sign('HMAC', expandKey, toArrayBuffer(expandInput));
-  return new Uint8Array(t1Buffer).slice(0, length);
+  const okm = new Uint8Array(numBlocks * hashLen);
+  let previousT = new Uint8Array(0);
+
+  for (let i = 1; i <= numBlocks; i++) {
+    // T(i) = HMAC-SHA256(PRK, T(i-1) || info || i)
+    const expandInput = new Uint8Array(previousT.length + info.length + 1);
+    expandInput.set(previousT, 0);
+    expandInput.set(info, previousT.length);
+    expandInput[previousT.length + info.length] = i;
+
+    const tBuffer = await crypto.subtle.sign('HMAC', expandKey, toArrayBuffer(expandInput));
+    const t = new Uint8Array(tBuffer);
+    okm.set(t, (i - 1) * hashLen);
+    previousT = t;
+  }
+
+  return okm.slice(0, length);
 }
 
 // ---------------------------------------------------------------------------
@@ -262,81 +315,48 @@ function angularDistanceDeg(
 }
 
 /**
- * Deterministically adjust `candidate` to be visually distinct from `anchor`.
- *
- * Mirrors the Rust `make_distinct` function exactly: tries a sequence of
- * deterministic transformations until angular distance exceeds the threshold.
+ * Find a replacement color for `candidate` that is at least MIN_ANGULAR_DISTANCE_DEG
+ * away from ALL colors in `neighbors`.  Mirrors the Rust `make_distinct_from_all`.
  */
-function makeDistinct(
-  anchor: [number, number, number],
-  candidate: [number, number, number]
+function makeDistinctFromAll(
+  candidate: [number, number, number],
+  neighbors: Array<[number, number, number]>
 ): [number, number, number] {
-  const candidates: Array<[number, number, number]> = [
-    // Rotation 1: R -> G, G -> B, B -> R
+  const allDistinct = (c: [number, number, number]): boolean =>
+    neighbors.every(n => angularDistanceDeg(n, c) >= MIN_ANGULAR_DISTANCE_DEG);
+
+  const transforms: Array<[number, number, number]> = [
     [candidate[2], candidate[0], candidate[1]],
-    // Rotation 2: R -> B, G -> R, B -> G
     [candidate[1], candidate[2], candidate[0]],
-    // Bitwise invert (JS bitwise NOT on u8 = ~x & 0xFF for unsigned byte behavior)
     [(~candidate[0]) & 0xFF, (~candidate[1]) & 0xFF, (~candidate[2]) & 0xFF],
-    // XOR with alternating pattern
     [candidate[0] ^ 0xAA, candidate[1] ^ 0x55, candidate[2] ^ 0xAA],
-    // Force perpendicular: set the anchor's weakest channel to 255, zero others
-    forcePerpendicularPrimary(anchor),
   ];
 
-  for (const c of candidates) {
-    if (angularDistanceDeg(anchor, c) >= MIN_ANGULAR_DISTANCE_DEG) {
+  for (const c of transforms) {
+    if (allDistinct(c)) {
       return c;
     }
   }
 
-  // Ultimate fallback: pick the edge color furthest from anchor
+  // Edge/primary fallback: pick the color with the greatest minimum distance
+  // to any neighbor.
   const edgeColors: Array<[number, number, number]> = [
-    [255, 0, 0],     // pure R
-    [0, 255, 0],     // pure G
-    [0, 0, 255],     // pure B
-    [255, 255, 0],   // R+G
-    [0, 255, 255],   // G+B
-    [255, 0, 255],   // R+B
+    [255, 0, 0], [0, 255, 0], [0, 0, 255],
+    [255, 255, 0], [0, 255, 255], [255, 0, 255],
   ];
 
   let bestColor = edgeColors[0];
-  let bestDist = angularDistanceDeg(anchor, edgeColors[0]);
+  let bestMinDist = Math.min(...neighbors.map(n => angularDistanceDeg(n, edgeColors[0])));
 
   for (let i = 1; i < edgeColors.length; i++) {
-    const dist = angularDistanceDeg(anchor, edgeColors[i]);
-    if (dist > bestDist) {
-      bestDist = dist;
+    const minDist = Math.min(...neighbors.map(n => angularDistanceDeg(n, edgeColors[i])));
+    if (minDist > bestMinDist) {
+      bestMinDist = minDist;
       bestColor = edgeColors[i];
     }
   }
 
   return bestColor;
-}
-
-/**
- * Create a pure primary-axis color based on the anchor's weakest channel.
- *
- * Mirrors the Rust `force_perpendicular_primary` function.
- */
-function forcePerpendicularPrimary(
-  anchor: [number, number, number]
-): [number, number, number] {
-  const channels = [anchor[0], anchor[1], anchor[2]];
-  let minIdx = 0;
-  let minVal = channels[0];
-  for (let i = 1; i < 3; i++) {
-    if (channels[i] < minVal) {
-      minVal = channels[i];
-      minIdx = i;
-    }
-  }
-
-  switch (minIdx) {
-    case 0: return [255, 0, 0];   // anchor weak in R -> pure R
-    case 1: return [0, 255, 0];   // anchor weak in G -> pure G
-    default: return [0, 0, 255];  // anchor weak in B -> pure B
-  }
 }
 
 // ---------------------------------------------------------------------------

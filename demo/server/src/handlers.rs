@@ -254,12 +254,15 @@ pub struct ProveRequest {
 pub struct RegionScoreResponse {
     /// Flash round index (0-based).
     pub round: usize,
-    /// Cosine similarity of upper-half delta vs. expected top color.
-    pub upper_score: f64,
-    /// Cosine similarity of lower-half delta vs. expected bottom color.
-    pub lower_score: f64,
-    /// Cosine similarity between upper and lower delta vectors.
-    /// Low values (< 0.95) indicate 3D geometry; high values indicate flat surface.
+    /// Cosine similarity of top-left delta vs. expected TL color.
+    pub tl_score: f64,
+    /// Cosine similarity of top-right delta vs. expected TR color.
+    pub tr_score: f64,
+    /// Cosine similarity of bottom-left delta vs. expected BL color.
+    pub bl_score: f64,
+    /// Cosine similarity of bottom-right delta vs. expected BR color.
+    pub br_score: f64,
+    /// Mean of 4 adjacent-pair spatial diff scores.
     pub spatial_diff_score: f64,
 }
 
@@ -532,8 +535,8 @@ pub async fn auth_prove(
 
         for score in &spatial_result.region_scores {
             tracing::info!(
-                "Spatial round {}: upper_score={:.4}, lower_score={:.4}, spatial_diff={:.4}",
-                score.round, score.upper_score, score.lower_score, score.spatial_diff_score,
+                "Spatial round {}: tl={:.4}, tr={:.4}, bl={:.4}, br={:.4}, spatial_diff={:.4}",
+                score.round, score.tl_score, score.tr_score, score.bl_score, score.br_score, score.spatial_diff_score,
             );
         }
         tracing::info!(
@@ -583,8 +586,10 @@ pub async fn auth_prove(
                 .iter()
                 .map(|s| RegionScoreResponse {
                     round: s.round,
-                    upper_score: s.upper_score,
-                    lower_score: s.lower_score,
+                    tl_score: s.tl_score,
+                    tr_score: s.tr_score,
+                    bl_score: s.bl_score,
+                    br_score: s.br_score,
                     spatial_diff_score: s.spatial_diff_score,
                 })
                 .collect(),
