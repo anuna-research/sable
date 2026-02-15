@@ -21,7 +21,7 @@
 //! // trust_store.add_root_certificate(gov_root_cert, TrustLevel::Government)?;
 //!
 //! // Validate certificate chain
-//! let validator = ChainValidator::new(&trust_store);
+//! let validator = ChainValidator::new();
 //! // let result = validator.validate_chain(&cert_chain)?;
 //!
 //! // Create SABLE certificate with commitment binding

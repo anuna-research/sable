@@ -22,8 +22,8 @@
 //! let mut session_manager = SessionManager::new();
 //!
 //! // Initiate a new session (prover side)
-//! let session = session_manager.create_session()
-//!     .expect("Session creation failed");
+//! let (session_id, public_key) = session_manager.initiate()
+//!     .expect("Session initiation failed");
 //!
 //! // Session provides encrypted channel for proof exchange
 //! // let encrypted = session.encrypt(&proof_bytes)?;

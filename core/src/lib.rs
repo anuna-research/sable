@@ -6,35 +6,19 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,no_run
-//! use sable_core::{crypto, biometric, types::Salt};
-//! use sable_core::crypto::rng::SecureRng;
-//! use sable_core::mobile::MobileSable;
-//!
-//! // Initialize SABLE for mobile use
-//! let sable = MobileSable::new().expect("Failed to initialize SABLE");
+//! ```rust
+//! use sable_core::crypto::{bls381::Fr, pedersen, rng::SecureRng};
+//! use sable_core::types::Salt;
 //!
 //! // Generate a random salt for the commitment
 //! let mut rng = SecureRng::new().expect("Failed to create RNG");
 //! let salt = Salt::random(&mut rng);
 //!
-//! // Example biometric features (512 normalized values from palm scan)
-//! let features: Vec<f64> = (0..512).map(|i| (i as f64) / 512.0).collect();
-//!
-//! // Generate a commitment (stored publicly, biometrics stay private)
-//! let commitment = sable.generate_commitment(&features, &salt)
-//!     .expect("Failed to generate commitment");
-//!
-//! // During verification, generate a zero-knowledge proof
-//! let threshold = sable_core::types::Distance::new(0.25);
-//! let timestamp = sable_core::types::Timestamp::now();
-//! let proof = sable.generate_proof(&features, &salt, &commitment, threshold, timestamp)
-//!     .expect("Failed to generate proof");
-//!
-//! // Verifier checks proof without seeing biometric data
-//! let valid = sable.verify_proof(&proof, &commitment, threshold, timestamp)
-//!     .expect("Failed to verify proof");
-//! assert!(valid);
+//! // Create a Pedersen commitment (stored publicly, biometrics stay private)
+//! let generators = pedersen::Generators::default();
+//! let message = Fr::from(42u64);
+//! let randomness = Fr::from(123u64);
+//! let commitment = pedersen::commit(message, randomness, &generators);
 //! ```
 //!
 //! ## Architecture Overview
