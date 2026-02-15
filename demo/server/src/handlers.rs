@@ -132,6 +132,7 @@ pub async fn enroll(
 
     let session = EnrollmentSession {
         session_id: session_id.clone(),
+        enrollment_mode: crate::state::EnrollmentMode::Pedersen,
         commitment,
         commitment_bytes,
         features,
@@ -139,6 +140,8 @@ pub async fn enroll(
         quantized_embedding,
         salt_bytes,
         created_at: Instant::now(),
+        fuzzy_helper_data: None,
+        fuzzy_commitment_hash: None,
     };
     state.store_session(session);
 
@@ -1314,4 +1317,309 @@ fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
     }
 
     dot_product / (norm_a * norm_b)
+}
+
+// ============================================================================
+// Fuzzy Commitment Endpoints
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct FuzzyEnrollRequest {
+    /// User identifier
+    pub user_id: String,
+    /// Face embedding from Human library (1024-dimensional)
+    pub face_embedding: Option<Vec<f64>>,
+    /// Error correction capacity per RS block (default: 40)
+    pub error_threshold: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FuzzyEnrollResponse {
+    pub session_id: String,
+    /// Deterministic commitment derived from the biometric (hex-encoded SHA-256)
+    pub commitment_hex: String,
+    /// Public helper data (hex-encoded, needed for future verification)
+    pub helper_data_hex: String,
+    pub quality_score: f32,
+    pub timings: FuzzyEnrollTimings,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FuzzyEnrollTimings {
+    pub feature_generation_ms: f64,
+    pub fuzzy_commitment_ms: f64,
+    pub total_ms: f64,
+}
+
+/// Enroll with fuzzy commitment mode.
+///
+/// This produces a deterministic commitment from the biometric that can be
+/// reproduced from a future noisy reading. Useful for unique-set enrollment
+/// (deduplication) where you need to check if a biometric already exists.
+pub async fn fuzzy_enroll(
+    State(state): State<AppState>,
+    Json(req): Json<FuzzyEnrollRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    use sable_core::crypto::fuzzy_commitment::{self, FuzzyParams};
+
+    let total_start = Instant::now();
+
+    // Generate features
+    let feature_start = Instant::now();
+    let (features, quality_score) = if let Some(embedding) = &req.face_embedding {
+        convert_face_embedding_to_features(embedding)?
+    } else {
+        let seed = hash_string_to_u64(&req.user_id);
+        let features = generate_simulated_features(seed);
+        let quality = calculate_quality_score(&features);
+        (features, quality)
+    };
+    let feature_time = feature_start.elapsed();
+
+    // Quantize features to u8 for fuzzy commitment
+    let features_f64: Vec<f64> = features.iter().map(|&f| f as f64 / 2.0).collect();
+    let quantized = FeatureQuantizer::quantize(&features_f64);
+
+    // Generate fuzzy commitment
+    let fuzzy_start = Instant::now();
+    let t = req.error_threshold.unwrap_or(40);
+    let params = FuzzyParams::new(t);
+    let enrollment = fuzzy_commitment::gen(&quantized, &params);
+    let fuzzy_time = fuzzy_start.elapsed();
+
+    let total_time = total_start.elapsed();
+
+    // Store session
+    let session_id = uuid::Uuid::new_v4().to_string();
+
+    // We still create a dummy Pedersen commitment for the session struct
+    // (the fuzzy commitment is stored separately)
+    let feature_hash = poseidon_hash(&features).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Poseidon hash failed: {}", e),
+            }),
+        )
+    })?;
+    let opening = CommitmentOpening::new_with_random_salt(feature_hash).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Commitment opening failed: {}", e),
+            }),
+        )
+    })?;
+    let generators = Generators::get();
+    let commitment = commit_with_opening(&opening, generators);
+    let commitment_bytes = commitment.to_bytes();
+    let salt_bytes = scalar_to_bytes(&opening.randomness);
+
+    let helper_data_bytes = enrollment.helper_data.to_bytes();
+
+    let session = EnrollmentSession {
+        session_id: session_id.clone(),
+        enrollment_mode: crate::state::EnrollmentMode::FuzzyCommitment,
+        commitment,
+        commitment_bytes,
+        features,
+        face_embedding: req.face_embedding.clone(),
+        quantized_embedding: quantized,
+        salt_bytes,
+        created_at: Instant::now(),
+        fuzzy_helper_data: Some(enrollment.helper_data),
+        fuzzy_commitment_hash: Some(enrollment.commitment),
+    };
+    state.store_session(session);
+
+    Ok(Json(FuzzyEnrollResponse {
+        session_id,
+        commitment_hex: hex::encode(enrollment.commitment),
+        helper_data_hex: hex::encode(&helper_data_bytes),
+        quality_score,
+        timings: FuzzyEnrollTimings {
+            feature_generation_ms: feature_time.as_secs_f64() * 1000.0,
+            fuzzy_commitment_ms: fuzzy_time.as_secs_f64() * 1000.0,
+            total_ms: total_time.as_secs_f64() * 1000.0,
+        },
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FuzzyVerifyRequest {
+    /// Session ID from enrollment (looks up stored helper data)
+    pub session_id: Option<String>,
+    /// Or provide helper data directly (hex-encoded)
+    pub helper_data_hex: Option<String>,
+    /// Face embedding to verify (1024-dimensional)
+    pub face_embedding: Option<Vec<f64>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FuzzyVerifyResponse {
+    pub matched: bool,
+    /// The reproduced commitment (hex), if matched
+    pub commitment_hex: Option<String>,
+    pub timing_ms: f64,
+}
+
+/// Verify a biometric against a fuzzy commitment.
+///
+/// Attempts to reproduce the commitment from a fresh biometric reading.
+/// Returns whether the biometric matches (is within the error threshold).
+pub async fn fuzzy_verify(
+    State(state): State<AppState>,
+    Json(req): Json<FuzzyVerifyRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    use sable_core::crypto::fuzzy_commitment::{self, HelperData};
+
+    let start = Instant::now();
+
+    // Get helper data from session or request
+    let helper_data = if let Some(session_id) = &req.session_id {
+        let session = state.get_session(session_id).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Session not found".to_string(),
+                }),
+            )
+        })?;
+        session.fuzzy_helper_data.ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Session was not enrolled with fuzzy commitment mode".to_string(),
+                }),
+            )
+        })?
+    } else if let Some(hex_str) = &req.helper_data_hex {
+        let bytes = hex::decode(hex_str).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Invalid helper data hex: {}", e),
+                }),
+            )
+        })?;
+        HelperData::from_bytes(&bytes).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Invalid helper data format".to_string(),
+                }),
+            )
+        })?
+    } else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Must provide either session_id or helper_data_hex".to_string(),
+            }),
+        ));
+    };
+
+    // Get features from face embedding or error
+    let (features, _quality) = if let Some(embedding) = &req.face_embedding {
+        convert_face_embedding_to_features(embedding)?
+    } else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "face_embedding is required for fuzzy verification".to_string(),
+            }),
+        ));
+    };
+
+    // Quantize
+    let features_f64: Vec<f64> = features.iter().map(|&f| f as f64 / 2.0).collect();
+    let quantized = FeatureQuantizer::quantize(&features_f64);
+
+    // Attempt to reproduce commitment
+    let result = fuzzy_commitment::rep(&quantized, &helper_data);
+    let timing = start.elapsed();
+
+    Ok(Json(FuzzyVerifyResponse {
+        matched: result.is_some(),
+        commitment_hex: result.map(|c| hex::encode(c)),
+        timing_ms: timing.as_secs_f64() * 1000.0,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FuzzyCheckUniqueRequest {
+    /// Face embedding to check (1024-dimensional)
+    pub face_embedding: Vec<f64>,
+    /// List of existing helper data (hex-encoded) to check against
+    pub existing_enrollments: Vec<String>,
+    /// Error correction threshold (default: 40)
+    pub error_threshold: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FuzzyCheckUniqueResponse {
+    /// Whether the biometric is unique (not found in existing set)
+    pub is_unique: bool,
+    /// Index of the matched enrollment, if any
+    pub matched_index: Option<usize>,
+    /// Reproduced commitment of the match (hex), if any
+    pub matched_commitment_hex: Option<String>,
+    pub timing_ms: f64,
+    pub checked_count: usize,
+}
+
+/// Check if a biometric is unique within a set of existing fuzzy enrollments.
+///
+/// This is the core deduplication use case: given a fresh biometric and a set
+/// of existing enrollments (helper data), check if the biometric matches any
+/// existing enrollment.
+pub async fn fuzzy_check_unique(
+    Json(req): Json<FuzzyCheckUniqueRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    use sable_core::crypto::fuzzy_commitment::{self, HelperData};
+
+    let start = Instant::now();
+
+    // Convert face embedding to quantized features
+    let (features, _quality) = convert_face_embedding_to_features(&req.face_embedding)?;
+    let features_f64: Vec<f64> = features.iter().map(|&f| f as f64 / 2.0).collect();
+    let quantized = FeatureQuantizer::quantize(&features_f64);
+
+    // Check against each existing enrollment
+    let checked_count = req.existing_enrollments.len();
+    for (idx, helper_hex) in req.existing_enrollments.iter().enumerate() {
+        let bytes = hex::decode(helper_hex).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Invalid helper data hex at index {}: {}", idx, e),
+                }),
+            )
+        })?;
+
+        let helper_data = match HelperData::from_bytes(&bytes) {
+            Some(hd) => hd,
+            None => continue, // Skip malformed entries
+        };
+
+        if let Some(commitment) = fuzzy_commitment::rep(&quantized, &helper_data) {
+            let timing = start.elapsed();
+            return Ok(Json(FuzzyCheckUniqueResponse {
+                is_unique: false,
+                matched_index: Some(idx),
+                matched_commitment_hex: Some(hex::encode(commitment)),
+                timing_ms: timing.as_secs_f64() * 1000.0,
+                checked_count,
+            }));
+        }
+    }
+
+    let timing = start.elapsed();
+    Ok(Json(FuzzyCheckUniqueResponse {
+        is_unique: true,
+        matched_index: None,
+        matched_commitment_hex: None,
+        timing_ms: timing.as_secs_f64() * 1000.0,
+        checked_count,
+    }))
 }

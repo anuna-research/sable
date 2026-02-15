@@ -280,6 +280,125 @@ fn test_deterministic_behavior() {
 }
 
 // ============================================================================
+// Fuzzy Commitment Integration Tests
+// ============================================================================
+
+mod fuzzy_commitment_integration {
+    use sable_core::crypto::fuzzy_commitment::{self, FuzzyParams, HelperData};
+
+    fn make_embedding(seed: u8) -> Vec<f64> {
+        (0..512)
+            .map(|i| {
+                let v = ((seed as f64 * 7.0 + i as f64 * 0.013).sin() * 0.8).clamp(-1.0, 1.0);
+                v
+            })
+            .collect()
+    }
+
+    fn quantize(embedding: &[f64]) -> Vec<u8> {
+        // Same quantization as FeatureQuantizer: map [-1,1] to [0,255]
+        embedding
+            .iter()
+            .map(|&v| {
+                let normalized = (v + 1.0) / 2.0; // [0, 1]
+                (normalized * 255.0).round().clamp(0.0, 255.0) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_fuzzy_enrollment_and_exact_reproduction() {
+        let params = FuzzyParams::new(30);
+        let embedding = make_embedding(42);
+        let quantized = quantize(&embedding);
+
+        let enrollment = fuzzy_commitment::gen(&quantized, &params);
+        let reproduced = fuzzy_commitment::rep(&quantized, &enrollment.helper_data);
+
+        assert_eq!(reproduced, Some(enrollment.commitment));
+    }
+
+    #[test]
+    fn test_fuzzy_noisy_reproduction() {
+        let params = FuzzyParams::new(30);
+        let embedding = make_embedding(42);
+        let quantized = quantize(&embedding);
+
+        let enrollment = fuzzy_commitment::gen(&quantized, &params);
+
+        // Add small noise (within threshold)
+        let mut noisy = quantized.clone();
+        for i in (0..40).step_by(2) {
+            noisy[i * 5] ^= 0x10;
+        }
+
+        let reproduced = fuzzy_commitment::rep(&noisy, &enrollment.helper_data);
+        assert_eq!(reproduced, Some(enrollment.commitment));
+    }
+
+    #[test]
+    fn test_fuzzy_different_person_fails() {
+        let params = FuzzyParams::new(30);
+        let person_a = quantize(&make_embedding(42));
+        let person_b = quantize(&make_embedding(99));
+
+        let enrollment = fuzzy_commitment::gen(&person_a, &params);
+        let result = fuzzy_commitment::rep(&person_b, &enrollment.helper_data);
+
+        assert_eq!(result, None, "different person should not reproduce commitment");
+    }
+
+    #[test]
+    fn test_fuzzy_helper_data_serialization() {
+        let params = FuzzyParams::new(20);
+        let bio = quantize(&make_embedding(42));
+
+        let enrollment = fuzzy_commitment::gen(&bio, &params);
+        let bytes = enrollment.helper_data.to_bytes();
+        let recovered = HelperData::from_bytes(&bytes).expect("deserialization should succeed");
+
+        // Verify reproduction works with deserialized helper data
+        let reproduced = fuzzy_commitment::rep(&bio, &recovered);
+        assert_eq!(reproduced, Some(enrollment.commitment));
+    }
+
+    #[test]
+    fn test_fuzzy_unique_set_deduplication() {
+        let params = FuzzyParams::new(30);
+
+        // Enroll 3 different people
+        let people: Vec<Vec<u8>> = (0..3).map(|i| quantize(&make_embedding(i * 30 + 10))).collect();
+        let enrollments: Vec<_> = people.iter().map(|bio| fuzzy_commitment::gen(bio, &params)).collect();
+
+        // Person 0 should match enrollment 0 but not 1 or 2
+        assert!(fuzzy_commitment::rep(&people[0], &enrollments[0].helper_data).is_some());
+        assert!(fuzzy_commitment::rep(&people[0], &enrollments[1].helper_data).is_none());
+        assert!(fuzzy_commitment::rep(&people[0], &enrollments[2].helper_data).is_none());
+
+        // Person 2 should match enrollment 2 but not 0 or 1
+        assert!(fuzzy_commitment::rep(&people[2], &enrollments[0].helper_data).is_none());
+        assert!(fuzzy_commitment::rep(&people[2], &enrollments[1].helper_data).is_none());
+        assert!(fuzzy_commitment::rep(&people[2], &enrollments[2].helper_data).is_some());
+    }
+
+    #[test]
+    fn test_fuzzy_pedersen_mode_unchanged() {
+        // Verify existing Pedersen enrollment still works after code changes
+        use sable_core::crypto::pedersen::{Generators, commit_with_opening, CommitmentOpening};
+        use sable_core::crypto::poseidon::poseidon_hash;
+
+        let features = [0.5f32; 512];
+        let hash = poseidon_hash(&features).unwrap();
+
+        let opening = CommitmentOpening::new_with_random_salt(hash).unwrap();
+        let generators = Generators::get();
+        let commitment = commit_with_opening(&opening, generators);
+
+        assert!(commitment.is_valid(), "Pedersen commitment should still work");
+    }
+}
+
+// ============================================================================
 // Halo2 Integration Tests (require "halo2" feature)
 // ============================================================================
 

@@ -37,7 +37,11 @@ async fn main() {
         .route("/auth/challenge", post(handlers::auth_challenge))
         .route("/auth/prove", post(handlers::auth_prove))
         .route("/liveness/screen-flash", post(handlers::screen_flash_check))
-        .route("/verify", post(handlers::verify));
+        .route("/verify", post(handlers::verify))
+        // Fuzzy commitment endpoints (optional enrollment mode)
+        .route("/fuzzy/enroll", post(handlers::fuzzy_enroll))
+        .route("/fuzzy/verify", post(handlers::fuzzy_verify))
+        .route("/fuzzy/check-unique", post(handlers::fuzzy_check_unique));
 
     // Build main router
     let app = Router::new()

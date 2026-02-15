@@ -38,7 +38,10 @@
 //! - **Side-channel resistant**: No secret-dependent branching or memory access
 
 pub mod bls381;
+pub mod fuzzy_commitment;
+pub mod gf256;
 pub mod hashing;
+pub mod reed_solomon;
 pub mod pedersen;
 pub mod poseidon;
 pub mod rng;

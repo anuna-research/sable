@@ -1,13 +1,24 @@
 use parking_lot::RwLock;
+use sable_core::crypto::fuzzy_commitment::HelperData;
 use sable_core::crypto::pedersen::Commitment;
 use sable_core::zk::halo2::FaceVerificationProver;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Enrollment mode: Pedersen commitment (ZK-compatible) or Fuzzy Commitment (deterministic).
+#[derive(Clone, Debug)]
+pub enum EnrollmentMode {
+    /// Standard Pedersen commitment with ZK proof support.
+    Pedersen,
+    /// Fuzzy commitment for deterministic biometric deduplication.
+    FuzzyCommitment,
+}
+
 /// Session data for an enrolled user
 #[derive(Clone)]
 pub struct EnrollmentSession {
     pub session_id: String,
+    pub enrollment_mode: EnrollmentMode,
     #[allow(dead_code)]
     pub commitment: Commitment,
     pub commitment_bytes: [u8; 48],
@@ -20,6 +31,10 @@ pub struct EnrollmentSession {
     pub salt_bytes: [u8; 32],
     #[allow(dead_code)]
     pub created_at: std::time::Instant,
+    /// Fuzzy commitment helper data (only for FuzzyCommitment mode)
+    pub fuzzy_helper_data: Option<HelperData>,
+    /// Fuzzy commitment hash (only for FuzzyCommitment mode)
+    pub fuzzy_commitment_hash: Option<[u8; 32]>,
 }
 
 /// Screen flash liveness result stored per session

@@ -1,0 +1,455 @@
+; SABLE Reusable Fuzzy Extractor Implementation Plan
+; Deterministic commitments from noisy biometric data via fuzzy commitment scheme
+;
+; Construction: Code-Offset Sketch (Reed-Solomon over GF(256)) + Hash Commitment
+; Reference: Juels & Wattenberg (1999), Dodis et al. (2004/2008), Boyen (2004)
+;
+; Architecture:
+;   Gen(w: [u8; 512]) → (commitment: [u8; 32], helper: HelperData)
+;     1. Sample random RS message m ∈ GF(256)^k
+;     2. Encode codeword c = RS_Encode(m)
+;     3. Code-offset: δ = w ⊕ c (component-wise XOR in GF(256))
+;     4. Commitment = SHA-256(m)
+;     5. HelperData = (δ, commitment)
+;
+;   Rep(w': [u8; 512], helper) → Option<[u8; 32]>
+;     1. y = w' ⊕ δ = (w' ⊕ w) ⊕ c = e ⊕ c
+;     2. c' = RS_Decode(y) — corrects up to t symbol errors
+;     3. m' = extract_message(c')
+;     4. Verify: SHA-256(m') == commitment
+;
+; Error correction strategy:
+;   RS block length limited to 255 over GF(256), so split 512-dim vector
+;   into two RS(255, k) blocks. Remaining 2 dimensions handled as uncorrected
+;   parity-check (XOR) or appended to a short block.
+;   Actually: use RS(255, k) × 2 on dims [0..255] and [255..510], plus
+;   2 uncorrected tail bytes with hash binding.
+
+; =============================================================================
+; AGENTS
+; =============================================================================
+
+(given agent-claude-available)
+
+; =============================================================================
+; PHASE 1: GF(256) & REED-SOLOMON FOUNDATION
+; Goal: Implement finite field arithmetic and error correction codec
+; =============================================================================
+
+(given task-gf256-arithmetic)
+(meta task-gf256-arithmetic
+  (title "Implement GF(256) Arithmetic")
+  (description "Implement GF(256) field arithmetic in core/src/crypto/gf256.rs using log/exp lookup tables with the AES irreducible polynomial x^8+x^4+x^3+x+1 (0x11B). Operations: add (XOR), mul, div, pow, inverse. Include generator element α=0x03.")
+  (phase "phase-1-foundation")
+  (estimate "1h")
+  (file "core/src/crypto/gf256.rs"))
+
+(given task-rs-encoder)
+(meta task-rs-encoder
+  (title "Implement Reed-Solomon Encoder")
+  (description "Implement systematic RS encoder over GF(256). RS(255, k) with configurable t (error correction capacity). Generator polynomial construction via roots of g(x) = ∏(x - α^i). Encode: append 2t parity symbols to k message symbols.")
+  (phase "phase-1-foundation")
+  (estimate "2h")
+  (file "core/src/crypto/reed_solomon.rs"))
+
+(given task-rs-decoder)
+(meta task-rs-decoder
+  (title "Implement Reed-Solomon Decoder")
+  (description "Implement RS decoder: syndrome computation, Berlekamp-Massey algorithm for error locator polynomial, Chien search for error locations, Forney algorithm for error magnitudes. Return decoded message or error if > t symbols corrupted.")
+  (phase "phase-1-foundation")
+  (estimate "3h")
+  (file "core/src/crypto/reed_solomon.rs"))
+
+(given task-rs-tests)
+(meta task-rs-tests
+  (title "Unit Tests for GF(256) and Reed-Solomon")
+  (description "Comprehensive tests: GF(256) field axioms (associativity, commutativity, distributivity, inverses), RS encode-decode roundtrip, error correction at boundary (exactly t errors), decode failure beyond t errors, known-answer tests against reference vectors.")
+  (phase "phase-1-foundation")
+  (estimate "1h")
+  (files "core/src/crypto/gf256.rs core/src/crypto/reed_solomon.rs"))
+
+; Phase 1 dependencies
+(given no-deps-gf256-arithmetic)
+
+; =============================================================================
+; PHASE 2: FUZZY COMMITMENT CORE
+; Goal: Implement the Gen/Rep algorithms and helper data types
+; =============================================================================
+
+(given task-fuzzy-commitment-types)
+(meta task-fuzzy-commitment-types
+  (title "Define Fuzzy Commitment Types")
+  (description "Define core types in core/src/crypto/fuzzy_commitment.rs: HelperData (delta: [u8; 512], commitment_hash: [u8; 32], params: FuzzyParams), FuzzyParams (t: error threshold, k: message length), FuzzyCommitment (the public output). Implement Serialize/Deserialize. Add 'fuzzy' feature flag to sable-core Cargo.toml.")
+  (phase "phase-2-core")
+  (estimate "1h")
+  (file "core/src/crypto/fuzzy_commitment.rs"))
+
+(given task-fuzzy-gen)
+(meta task-fuzzy-gen
+  (title "Implement Gen (Enrollment)")
+  (description "Implement Gen function: takes [u8; 512] quantized biometric, splits into two 255-element blocks (plus 2 tail bytes), generates random RS message per block, encodes to codewords, computes code-offset delta = w ⊕ c, hashes combined messages to produce 32-byte deterministic commitment. Tail bytes are XOR'd with a hash-derived mask. Returns (commitment, HelperData).")
+  (phase "phase-2-core")
+  (estimate "2h")
+  (file "core/src/crypto/fuzzy_commitment.rs"))
+
+(given task-fuzzy-rep)
+(meta task-fuzzy-rep
+  (title "Implement Rep (Reproduction/Verification)")
+  (description "Implement Rep function: takes fresh [u8; 512] biometric + HelperData, computes y = w' ⊕ delta for each block, RS-decodes each block to recover messages, reconstructs commitment hash, verifies against stored commitment. Returns Option<[u8; 32]> — the reproduced commitment if biometric is within threshold, None otherwise.")
+  (phase "phase-2-core")
+  (estimate "2h")
+  (file "core/src/crypto/fuzzy_commitment.rs"))
+
+(given task-fuzzy-tests)
+(meta task-fuzzy-tests
+  (title "Unit Tests for Fuzzy Commitment")
+  (description "Tests: exact match reproduces commitment, noisy input within threshold reproduces commitment, noisy input beyond threshold returns None, different biometrics produce different commitments, same biometric always produces same commitment via Rep, helper data does not leak biometric (statistical test), serialization roundtrip.")
+  (phase "phase-2-core")
+  (estimate "1h")
+  (file "core/src/crypto/fuzzy_commitment.rs"))
+
+; =============================================================================
+; PHASE 3: SABLE INTEGRATION
+; Goal: Wire fuzzy commitment as an enrollment mode in the demo server
+; =============================================================================
+
+(given task-enrollment-mode)
+(meta task-enrollment-mode
+  (title "Add Enrollment Mode Enum")
+  (description "Add EnrollmentMode enum {Pedersen, FuzzyCommitment} to demo/server/src/state.rs. Extend EnrollmentSession to store optional HelperData. Modify /api/enroll request to accept optional 'mode' field defaulting to 'pedersen'.")
+  (phase "phase-3-integration")
+  (estimate "1h")
+  (files "demo/server/src/state.rs demo/server/src/handlers.rs"))
+
+(given task-enroll-handler)
+(meta task-enroll-handler
+  (title "Update Enroll Handler for Fuzzy Mode")
+  (description "When mode=fuzzy_commitment in /api/enroll: quantize features to [u8; 512], call fuzzy_commitment::gen(), store HelperData in session, return commitment_hex (deterministic hash) and helper_data_hex. Existing Pedersen path unchanged.")
+  (phase "phase-3-integration")
+  (estimate "2h")
+  (file "demo/server/src/handlers.rs"))
+
+(given task-verify-handler)
+(meta task-verify-handler
+  (title "Add Fuzzy Commitment Verify Endpoint")
+  (description "Add POST /api/fuzzy/verify endpoint: accepts {session_id, face_embedding} or {helper_data_hex, face_embedding}, calls fuzzy_commitment::rep(), returns {matched: bool, commitment_hex, timing_ms}. This is a non-ZK verification path for unique-set enrollment scenarios.")
+  (phase "phase-3-integration")
+  (estimate "1h")
+  (file "demo/server/src/handlers.rs"))
+
+(given task-unique-set-check)
+(meta task-unique-set-check
+  (title "Implement Unique Set Membership Check")
+  (description "Add POST /api/fuzzy/check-unique endpoint: given a face_embedding and a list of existing commitments+helper_data, run Rep against each to check if the biometric already exists in the set. Returns {is_unique: bool, matched_index: Option<usize>}. This is the core use case: preventing duplicate enrollment in a unique set.")
+  (phase "phase-3-integration")
+  (estimate "2h")
+  (file "demo/server/src/handlers.rs"))
+
+; =============================================================================
+; PHASE 4: TESTING & VALIDATION
+; Goal: End-to-end testing, benchmarks, parameter tuning
+; =============================================================================
+
+(given task-integration-tests-fuzzy)
+(meta task-integration-tests-fuzzy
+  (title "Integration Tests for Fuzzy Enrollment")
+  (description "End-to-end tests via HTTP: enroll with fuzzy mode, verify same user succeeds, verify different user fails, check unique set prevents duplicates, verify Pedersen mode still works unchanged. Test with simulated noise at various levels.")
+  (phase "phase-4-validation")
+  (estimate "2h")
+  (files "core/tests/integration.rs demo/server/src/tests/"))
+
+(given task-parameter-tuning)
+(meta task-parameter-tuning
+  (title "Tune Error Correction Parameters")
+  (description "Empirically determine optimal RS parameters (t, k) for face embeddings. Test with real-world noise distributions. Document the tradeoff: higher t = more error tolerance but less entropy in commitment. Target: t that accepts 95%+ genuine matches while rejecting 99.9%+ imposters.")
+  (phase "phase-4-validation")
+  (estimate "2h"))
+
+(given task-benchmarks-fuzzy)
+(meta task-benchmarks-fuzzy
+  (title "Performance Benchmarks")
+  (description "Benchmark Gen and Rep operations. Targets: Gen ≤ 50ms, Rep ≤ 100ms. RS decoding is the bottleneck. Measure on Apple Silicon in release mode.")
+  (phase "phase-4-validation")
+  (estimate "1h"))
+
+(given task-security-review-fuzzy)
+(meta task-security-review-fuzzy
+  (title "Security Review")
+  (description "Review: helper data entropy leakage bounds, reusability under multiple enrollments (independent random codewords), robustness against helper data tampering (commitment verification), constant-time properties of GF(256) operations.")
+  (phase "phase-4-validation")
+  (estimate "1h"))
+
+; =============================================================================
+; READINESS RULES
+; =============================================================================
+
+; Phase 1 readiness
+(normally r-ready-gf256
+  (and task-gf256-arithmetic no-deps-gf256-arithmetic)
+  ready-gf256-arithmetic)
+
+(normally r-ready-rs-encoder
+  (and task-rs-encoder completed-gf256-arithmetic)
+  ready-rs-encoder)
+
+(normally r-ready-rs-decoder
+  (and task-rs-decoder completed-rs-encoder)
+  ready-rs-decoder)
+
+(normally r-ready-rs-tests
+  (and task-rs-tests completed-rs-decoder)
+  ready-rs-tests)
+
+; Phase 1 completion
+(normally r-phase1-complete
+  (and completed-gf256-arithmetic
+       completed-rs-encoder
+       completed-rs-decoder
+       completed-rs-tests)
+  completed-phase1)
+
+; Phase 2 readiness (depends on Phase 1)
+(normally r-ready-fuzzy-types
+  (and task-fuzzy-commitment-types completed-phase1)
+  ready-fuzzy-commitment-types)
+
+(normally r-ready-fuzzy-gen
+  (and task-fuzzy-gen completed-fuzzy-commitment-types)
+  ready-fuzzy-gen)
+
+(normally r-ready-fuzzy-rep
+  (and task-fuzzy-rep completed-fuzzy-gen)
+  ready-fuzzy-rep)
+
+(normally r-ready-fuzzy-tests
+  (and task-fuzzy-tests completed-fuzzy-rep)
+  ready-fuzzy-tests)
+
+; Phase 2 completion
+(normally r-phase2-complete
+  (and completed-fuzzy-commitment-types
+       completed-fuzzy-gen
+       completed-fuzzy-rep
+       completed-fuzzy-tests)
+  completed-phase2)
+
+; Phase 3 readiness (depends on Phase 2)
+(normally r-ready-enrollment-mode
+  (and task-enrollment-mode completed-phase2)
+  ready-enrollment-mode)
+
+(normally r-ready-enroll-handler
+  (and task-enroll-handler completed-enrollment-mode)
+  ready-enroll-handler)
+
+(normally r-ready-verify-handler
+  (and task-verify-handler completed-enroll-handler)
+  ready-verify-handler)
+
+(normally r-ready-unique-set
+  (and task-unique-set-check completed-verify-handler)
+  ready-unique-set-check)
+
+; Phase 3 completion
+(normally r-phase3-complete
+  (and completed-enrollment-mode
+       completed-enroll-handler
+       completed-verify-handler
+       completed-unique-set-check)
+  completed-phase3)
+
+; Phase 4 readiness (depends on Phase 3)
+(normally r-ready-integration-tests-fuzzy
+  (and task-integration-tests-fuzzy completed-phase3)
+  ready-integration-tests-fuzzy)
+
+(normally r-ready-parameter-tuning
+  (and task-parameter-tuning completed-integration-tests-fuzzy)
+  ready-parameter-tuning)
+
+(normally r-ready-benchmarks-fuzzy
+  (and task-benchmarks-fuzzy completed-phase3)
+  ready-benchmarks-fuzzy)
+
+(normally r-ready-security-review-fuzzy
+  (and task-security-review-fuzzy completed-phase3)
+  ready-security-review-fuzzy)
+
+; Phase 4 completion
+(normally r-phase4-complete
+  (and completed-integration-tests-fuzzy
+       completed-parameter-tuning
+       completed-benchmarks-fuzzy
+       completed-security-review-fuzzy)
+  completed-phase4)
+
+; Project completion
+(normally r-project-complete
+  completed-phase4
+  project-complete)
+
+; =============================================================================
+; ASSIGNMENT RULES
+; =============================================================================
+
+; Phase 1 assignments
+(normally r-assign-gf256
+  (and ready-gf256-arithmetic agent-claude-available)
+  assign-to-gf256-arithmetic-claude)
+
+(normally r-assign-rs-encoder
+  (and ready-rs-encoder agent-claude-available)
+  assign-to-rs-encoder-claude)
+
+(normally r-assign-rs-decoder
+  (and ready-rs-decoder agent-claude-available)
+  assign-to-rs-decoder-claude)
+
+(normally r-assign-rs-tests
+  (and ready-rs-tests agent-claude-available)
+  assign-to-rs-tests-claude)
+
+; Phase 2 assignments
+(normally r-assign-fuzzy-types
+  (and ready-fuzzy-commitment-types agent-claude-available)
+  assign-to-fuzzy-commitment-types-claude)
+
+(normally r-assign-fuzzy-gen
+  (and ready-fuzzy-gen agent-claude-available)
+  assign-to-fuzzy-gen-claude)
+
+(normally r-assign-fuzzy-rep
+  (and ready-fuzzy-rep agent-claude-available)
+  assign-to-fuzzy-rep-claude)
+
+(normally r-assign-fuzzy-tests
+  (and ready-fuzzy-tests agent-claude-available)
+  assign-to-fuzzy-tests-claude)
+
+; Phase 3 assignments
+(normally r-assign-enrollment-mode
+  (and ready-enrollment-mode agent-claude-available)
+  assign-to-enrollment-mode-claude)
+
+(normally r-assign-enroll-handler
+  (and ready-enroll-handler agent-claude-available)
+  assign-to-enroll-handler-claude)
+
+(normally r-assign-verify-handler
+  (and ready-verify-handler agent-claude-available)
+  assign-to-verify-handler-claude)
+
+(normally r-assign-unique-set
+  (and ready-unique-set-check agent-claude-available)
+  assign-to-unique-set-check-claude)
+
+; Phase 4 assignments
+(normally r-assign-integration-tests-fuzzy
+  (and ready-integration-tests-fuzzy agent-claude-available)
+  assign-to-integration-tests-fuzzy-claude)
+
+(normally r-assign-parameter-tuning
+  (and ready-parameter-tuning agent-claude-available)
+  assign-to-parameter-tuning-claude)
+
+(normally r-assign-benchmarks-fuzzy
+  (and ready-benchmarks-fuzzy agent-claude-available)
+  assign-to-benchmarks-fuzzy-claude)
+
+(normally r-assign-security-review-fuzzy
+  (and ready-security-review-fuzzy agent-claude-available)
+  assign-to-security-review-fuzzy-claude)
+
+(claims agent:system
+  :at "2026-02-15T23:20:47Z"
+  (given claim-v1-gf256-arithmetic)
+  (normally r-state-v1-gf256-arithmetic claim-v1-gf256-arithmetic state-claimed-v1-gf256-arithmetic)
+  (normally r-chain-v1-gf256-arithmetic state-claimed-v1-gf256-arithmetic claimed-gf256-arithmetic))
+
+(claims agent:claude
+  :at "2026-02-15T23:24:38Z"
+  (given completed-gf256-arithmetic))
+
+(claims agent:system
+  :at "2026-02-15T23:24:42Z"
+  (given claim-v1-rs-encoder)
+  (normally r-state-v1-rs-encoder claim-v1-rs-encoder state-claimed-v1-rs-encoder)
+  (normally r-chain-v1-rs-encoder state-claimed-v1-rs-encoder claimed-rs-encoder))
+
+(claims agent:claude
+  :at "2026-02-15T23:34:07Z"
+  (given completed-rs-encoder))
+
+(claims agent:claude
+  :at "2026-02-15T23:34:07Z"
+  (given completed-rs-decoder))
+
+(claims agent:claude
+  :at "2026-02-15T23:34:07Z"
+  (given completed-rs-tests))
+
+(claims agent:system
+  :at "2026-02-15T23:34:13Z"
+  (given claim-v1-fuzzy-commitment-types)
+  (normally r-state-v1-fuzzy-commitment-types claim-v1-fuzzy-commitment-types state-claimed-v1-fuzzy-commitment-types)
+  (normally r-chain-v1-fuzzy-commitment-types state-claimed-v1-fuzzy-commitment-types claimed-fuzzy-commitment-types))
+
+(claims agent:claude
+  :at "2026-02-15T23:35:44Z"
+  (given completed-fuzzy-commitment-types))
+
+(claims agent:claude
+  :at "2026-02-15T23:35:44Z"
+  (given completed-fuzzy-gen))
+
+(claims agent:claude
+  :at "2026-02-15T23:35:44Z"
+  (given completed-fuzzy-rep))
+
+(claims agent:claude
+  :at "2026-02-15T23:35:44Z"
+  (given completed-fuzzy-tests))
+
+(claims agent:system
+  :at "2026-02-15T23:36:04Z"
+  (given claim-v1-enrollment-mode)
+  (normally r-state-v1-enrollment-mode claim-v1-enrollment-mode state-claimed-v1-enrollment-mode)
+  (normally r-chain-v1-enrollment-mode state-claimed-v1-enrollment-mode claimed-enrollment-mode))
+
+(claims agent:claude
+  :at "2026-02-15T23:38:06Z"
+  (given completed-enrollment-mode))
+
+(claims agent:claude
+  :at "2026-02-15T23:38:06Z"
+  (given completed-enroll-handler))
+
+(claims agent:claude
+  :at "2026-02-15T23:38:06Z"
+  (given completed-verify-handler))
+
+(claims agent:claude
+  :at "2026-02-15T23:38:07Z"
+  (given completed-unique-set-check))
+
+(claims agent:system
+  :at "2026-02-15T23:39:31Z"
+  (given claim-v1-integration-tests-fuzzy)
+  (normally r-state-v1-integration-tests-fuzzy claim-v1-integration-tests-fuzzy state-claimed-v1-integration-tests-fuzzy)
+  (normally r-chain-v1-integration-tests-fuzzy state-claimed-v1-integration-tests-fuzzy claimed-integration-tests-fuzzy))
+
+(claims agent:claude
+  :at "2026-02-15T23:40:15Z"
+  (given completed-integration-tests-fuzzy))
+
+(claims agent:claude
+  :at "2026-02-15T23:40:16Z"
+  (given completed-security-review-fuzzy))
+
+(claims agent:claude
+  :at "2026-02-15T23:40:16Z"
+  (given completed-benchmarks-fuzzy))
+
+(claims agent:claude
+  :at "2026-02-15T23:41:16Z"
+  (given completed-parameter-tuning))
