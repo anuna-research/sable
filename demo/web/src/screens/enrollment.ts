@@ -1,4 +1,4 @@
-import { EnrollResponse } from '../api';
+import { EnrollResponse, FuzzyEnrollResponse } from '../api';
 import {
   CapturedFace,
   renderWebcamPreview,
@@ -10,15 +10,20 @@ import {
 
 // Enrollment phase tracking
 export type EnrollmentPhase = 'capture' | 'preview' | 'success';
+export type EnrollmentMode = 'pedersen' | 'fuzzy';
 
 export function renderEnrollmentScreen(
   phase: EnrollmentPhase,
   isLoading: boolean,
   capturedFace: CapturedFace | null,
   result: EnrollResponse | null,
+  fuzzyResult: FuzzyEnrollResponse | null,
   error: string | null,
-  webcamError: string | null
+  webcamError: string | null,
+  enrollmentMode: EnrollmentMode
 ): string {
+  const hasResult = result || fuzzyResult;
+
   return `
     <div class="card">
       <h2>Step 1: Enrollment</h2>
@@ -28,7 +33,11 @@ export function renderEnrollmentScreen(
         while allowing future verification.
       </p>
 
-      ${result ? renderEnrollmentSuccess(result) : renderEnrollmentCapture(phase, isLoading, capturedFace, webcamError)}
+      ${!hasResult && phase === 'capture' ? renderModeToggle(enrollmentMode) : ''}
+
+      ${hasResult
+        ? (fuzzyResult ? renderFuzzyEnrollmentSuccess(fuzzyResult) : renderEnrollmentSuccess(result!))
+        : renderEnrollmentCapture(phase, isLoading, capturedFace, webcamError)}
 
       ${error ? `
         <div class="badge badge-error" style="margin-top: 1rem; display: block; padding: 0.75rem;">
@@ -39,24 +48,67 @@ export function renderEnrollmentScreen(
 
     <div class="card">
       <h3>What Happens During Enrollment?</h3>
-      <ol style="padding-left: 1.5rem; color: var(--text-secondary);">
-        <li style="margin-bottom: 0.75rem;">
-          <strong>Face Capture:</strong> Your face is detected and a 1024-dimensional embedding is extracted
-        </li>
-        <li style="margin-bottom: 0.75rem;">
-          <strong>Feature Conversion:</strong> The embedding is converted to 512 ZK-compatible features
-        </li>
-        <li style="margin-bottom: 0.75rem;">
-          <strong>Poseidon Hash:</strong> Features are hashed using a ZK-friendly hash function
-        </li>
-        <li style="margin-bottom: 0.75rem;">
-          <strong>Pedersen Commitment:</strong> The hash is committed using <code class="code-inline">C = g^hash × h^salt</code>
-        </li>
-        <li style="margin-bottom: 0.75rem;">
-          <strong>Storage:</strong> Only the commitment is stored - your face embedding remains private
-        </li>
-      </ol>
+      ${enrollmentMode === 'fuzzy' ? renderFuzzyExplainer() : renderPedersenExplainer()}
     </div>
+  `;
+}
+
+function renderModeToggle(activeMode: EnrollmentMode): string {
+  return `
+    <div class="mode-toggle">
+      <div class="mode-option ${activeMode === 'pedersen' ? 'active' : ''}" data-mode="pedersen">
+        <div class="mode-option-title">Pedersen Commitment</div>
+        <div class="mode-option-desc">Standard privacy-preserving commitment. Different each enrollment.</div>
+      </div>
+      <div class="mode-option ${activeMode === 'fuzzy' ? 'active' : ''}" data-mode="fuzzy">
+        <div class="mode-option-title">Fuzzy Commitment</div>
+        <div class="mode-option-desc">Deterministic commitment from biometrics. Same person always produces the same commitment.</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderPedersenExplainer(): string {
+  return `
+    <ol style="padding-left: 1.5rem; color: var(--text-secondary);">
+      <li style="margin-bottom: 0.75rem;">
+        <strong>Face Capture:</strong> Your face is detected and a 1024-dimensional embedding is extracted
+      </li>
+      <li style="margin-bottom: 0.75rem;">
+        <strong>Feature Conversion:</strong> The embedding is converted to 512 ZK-compatible features
+      </li>
+      <li style="margin-bottom: 0.75rem;">
+        <strong>Poseidon Hash:</strong> Features are hashed using a ZK-friendly hash function
+      </li>
+      <li style="margin-bottom: 0.75rem;">
+        <strong>Pedersen Commitment:</strong> The hash is committed using <code class="code-inline">C = g^hash &times; h^salt</code>
+      </li>
+      <li style="margin-bottom: 0.75rem;">
+        <strong>Storage:</strong> Only the commitment is stored - your face embedding remains private
+      </li>
+    </ol>
+  `;
+}
+
+function renderFuzzyExplainer(): string {
+  return `
+    <ol style="padding-left: 1.5rem; color: var(--text-secondary);">
+      <li style="margin-bottom: 0.75rem;">
+        <strong>Face Capture:</strong> Your face is detected and a 1024-dimensional embedding is extracted
+      </li>
+      <li style="margin-bottom: 0.75rem;">
+        <strong>Feature Conversion:</strong> The embedding is converted to 512 byte-level features
+      </li>
+      <li style="margin-bottom: 0.75rem;">
+        <strong>Reed-Solomon Encoding:</strong> A random codeword is generated and XORed with the features (code-offset sketch)
+      </li>
+      <li style="margin-bottom: 0.75rem;">
+        <strong>SHA-256 Commitment:</strong> The codeword is hashed to produce a deterministic commitment: <code class="code-inline">C = SHA-256(codeword)</code>
+      </li>
+      <li style="margin-bottom: 0.75rem;">
+        <strong>Storage:</strong> The commitment + public helper data are stored. A future scan within the error tolerance reproduces the same commitment.
+      </li>
+    </ol>
   `;
 }
 
@@ -161,6 +213,68 @@ function renderEnrollmentSuccess(result: EnrollResponse): string {
   `;
 }
 
+function renderFuzzyEnrollmentSuccess(result: FuzzyEnrollResponse): string {
+  const truncatedHelper = result.helper_data_hex.length > 120
+    ? result.helper_data_hex.substring(0, 120) + '...'
+    : result.helper_data_hex;
+
+  return `
+    <div class="fade-in">
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
+        <span class="badge badge-success">Enrolled Successfully (Fuzzy Commitment)</span>
+      </div>
+
+      <h3>Deterministic Commitment</h3>
+      <div class="code" style="word-break: break-all; font-size: 0.75rem;">
+        ${result.commitment_hex}
+      </div>
+      <p style="font-size: 0.875rem; margin-top: 0.5rem;">
+        This SHA-256 hash is derived deterministically from your biometrics.
+        The same person will always produce the same commitment.
+      </p>
+
+      <h3>Helper Data</h3>
+      <div class="helper-data-container">
+        <div class="code" style="word-break: break-all; font-size: 0.75rem;">
+          ${truncatedHelper}
+        </div>
+        <button class="copy-btn" id="copy-helper-data" data-full="${result.helper_data_hex}">Copy</button>
+      </div>
+      <p style="font-size: 0.875rem; margin-top: 0.5rem;">
+        Public helper data needed for future verification. Store this alongside the commitment.
+      </p>
+
+      <h3>Quality Score</h3>
+      <div class="progress-container">
+        <div class="progress-bar" style="width: ${result.quality_score * 100}%;"></div>
+      </div>
+      <p style="font-size: 0.875rem;">${(result.quality_score * 100).toFixed(1)}% - ${getQualityLabel(result.quality_score)}</p>
+
+      <h3>Performance Timings</h3>
+      <div class="timing-grid">
+        <div class="timing-item">
+          <div class="timing-value">${result.timings.feature_generation_ms.toFixed(2)}ms</div>
+          <div class="timing-label">Feature Processing</div>
+        </div>
+        <div class="timing-item">
+          <div class="timing-value">${result.timings.fuzzy_commitment_ms.toFixed(3)}ms</div>
+          <div class="timing-label">Fuzzy Commitment</div>
+        </div>
+        <div class="timing-item">
+          <div class="timing-value">${result.timings.total_ms.toFixed(2)}ms</div>
+          <div class="timing-label">Total</div>
+        </div>
+      </div>
+
+      <div style="margin-top: 1.5rem; display: flex; gap: 0.75rem; flex-wrap: wrap;">
+        <button class="btn btn-primary" id="continue-to-auth">
+          Continue to Verification
+        </button>
+      </div>
+    </div>
+  `;
+}
+
 function getQualityLabel(score: number): string {
   if (score >= 0.9) return 'Excellent quality';
   if (score >= 0.8) return 'Good quality';
@@ -174,7 +288,8 @@ export function attachEnrollmentHandlers(
   onEnroll: (face: CapturedFace) => void,
   onContinue: () => void,
   onRetryCamera: () => void,
-  capturedFace: CapturedFace | null
+  capturedFace: CapturedFace | null,
+  onModeChange?: (mode: EnrollmentMode) => void
 ): void {
   // Capture button
   document.getElementById('capture-btn')?.addEventListener('click', onCapture);
@@ -194,6 +309,28 @@ export function attachEnrollmentHandlers(
 
   // Retry camera button
   document.getElementById('retry-camera-btn')?.addEventListener('click', onRetryCamera);
+
+  // Mode toggle
+  if (onModeChange) {
+    document.querySelectorAll('.mode-option').forEach(el => {
+      el.addEventListener('click', () => {
+        const mode = (el as HTMLElement).dataset.mode as EnrollmentMode;
+        if (mode) onModeChange(mode);
+      });
+    });
+  }
+
+  // Copy helper data button
+  const copyBtn = document.getElementById('copy-helper-data');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', () => {
+      const fullData = copyBtn.dataset.full || '';
+      navigator.clipboard.writeText(fullData).then(() => {
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
+      });
+    });
+  }
 }
 
 /**

@@ -1,6 +1,8 @@
 import {
   api,
   EnrollResponse,
+  FuzzyEnrollResponse,
+  FuzzyVerifyResponse,
   ChallengeResponse,
   ProveResponse,
   VerifyResponse,
@@ -10,10 +12,11 @@ import {
   renderNavigation,
   attachNavigationHandlers,
 } from './components/navigation';
-import { CapturedFace } from './components/webcam';
+import { CapturedFace, renderWebcamPreview, renderWebcamControls } from './components/webcam';
 import { renderHomeScreen, attachHomeHandlers } from './screens/home';
 import {
   EnrollmentPhase,
+  EnrollmentMode,
   renderEnrollmentScreen,
   attachEnrollmentHandlers,
   initEnrollmentWebcam,
@@ -54,11 +57,16 @@ interface AppState {
   error: string | null;
 
   // Enrollment
+  enrollmentMode: EnrollmentMode;
   enrollmentPhase: EnrollmentPhase;
   enrollCapturedFace: CapturedFace | null;
   enrollWebcamError: string | null;
   sessionId: string | null;
   enrollResult: EnrollResponse | null;
+  fuzzyEnrollResult: FuzzyEnrollResponse | null;
+
+  // Fuzzy verify
+  fuzzyVerifyResult: FuzzyVerifyResponse | null;
 
   // Authentication
   authPhase: AuthPhase;
@@ -81,11 +89,14 @@ const state: AppState = {
   completedSteps: new Set(),
   isLoading: false,
   error: null,
+  enrollmentMode: 'pedersen',
   enrollmentPhase: 'capture',
   enrollCapturedFace: null,
   enrollWebcamError: null,
   sessionId: null,
   enrollResult: null,
+  fuzzyEnrollResult: null,
+  fuzzyVerifyResult: null,
   authPhase: 'ready',
   authCapturedFace: null,
   authWebcamError: null,
@@ -123,20 +134,33 @@ function render(): void {
         state.isLoading,
         state.enrollCapturedFace,
         state.enrollResult,
+        state.fuzzyEnrollResult,
         state.error,
-        state.enrollWebcamError
+        state.enrollWebcamError,
+        state.enrollmentMode
       );
       break;
     case 'authentication':
-      content += renderAuthenticationScreen(
-        state.authPhase,
-        state.isLoading,
-        state.challenge,
-        state.authCapturedFace,
-        state.proof,
-        state.error,
-        state.authWebcamError
-      );
+      if (state.enrollmentMode === 'fuzzy') {
+        content += renderFuzzyVerifyScreen(
+          state.authPhase,
+          state.isLoading,
+          state.authCapturedFace,
+          state.fuzzyVerifyResult,
+          state.error,
+          state.authWebcamError
+        );
+      } else {
+        content += renderAuthenticationScreen(
+          state.authPhase,
+          state.isLoading,
+          state.challenge,
+          state.authCapturedFace,
+          state.proof,
+          state.error,
+          state.authWebcamError
+        );
+      }
       break;
     case 'verification':
       content += renderVerificationScreen(
@@ -166,30 +190,39 @@ function render(): void {
       attachEnrollmentHandlers(
         handleEnrollCapture,
         handleEnrollRetake,
-        handleEnroll,
+        state.enrollmentMode === 'fuzzy' ? handleFuzzyEnroll : handleEnroll,
         () => navigateTo('authentication'),
         handleEnrollRetryCamera,
-        state.enrollCapturedFace
+        state.enrollCapturedFace,
+        handleModeChange
       );
       // Initialize webcam after render if in capture phase
-      if (state.enrollmentPhase === 'capture' && !state.enrollResult && !state.enrollWebcamError) {
+      if (state.enrollmentPhase === 'capture' && !state.enrollResult && !state.fuzzyEnrollResult && !state.enrollWebcamError) {
         initEnrollmentWebcamAsync();
       }
       break;
     case 'authentication':
-      attachAuthenticationHandlers(
-        handleStartAuth,
-        handleAuthCapture,
-        handleAuthRetake,
-        handleProve,
-        () => navigateTo('verification'),
-        handleAuthRetryCamera,
-        state.authCapturedFace,
-        handleLivenessConsent
-      );
-      // Initialize webcam after render if in capturing phase
-      if (state.authPhase === 'capturing' && !state.authCapturedFace && !state.authWebcamError) {
-        initAuthWebcamAsync();
+      if (state.enrollmentMode === 'fuzzy') {
+        attachFuzzyVerifyHandlers();
+        // Initialize webcam for fuzzy verify capture phase
+        if (state.authPhase === 'capturing' && !state.authCapturedFace && !state.authWebcamError) {
+          initAuthWebcamAsync();
+        }
+      } else {
+        attachAuthenticationHandlers(
+          handleStartAuth,
+          handleAuthCapture,
+          handleAuthRetake,
+          handleProve,
+          () => navigateTo('verification'),
+          handleAuthRetryCamera,
+          state.authCapturedFace,
+          handleLivenessConsent
+        );
+        // Initialize webcam after render if in capturing phase
+        if (state.authPhase === 'capturing' && !state.authCapturedFace && !state.authWebcamError) {
+          initAuthWebcamAsync();
+        }
       }
       break;
     case 'verification':
@@ -210,13 +243,14 @@ function navigateTo(step: Step): void {
   state.error = null;
 
   // Reset phase states when navigating to screens
-  if (step === 'enrollment' && !state.enrollResult) {
+  if (step === 'enrollment' && !state.enrollResult && !state.fuzzyEnrollResult) {
     state.enrollmentPhase = 'capture';
     state.enrollCapturedFace = null;
     state.enrollWebcamError = null;
   }
-  if (step === 'authentication' && !state.proof) {
-    state.authPhase = 'ready';
+  if (step === 'authentication' && !state.proof && !state.fuzzyVerifyResult) {
+    // In fuzzy mode, skip challenge phase and go straight to capture
+    state.authPhase = state.enrollmentMode === 'fuzzy' ? 'capturing' : 'ready';
     state.authCapturedFace = null;
     state.authWebcamError = null;
   }
@@ -258,6 +292,33 @@ function handleEnrollRetryCamera(): void {
   state.enrollWebcamError = null;
   state.enrollmentPhase = 'capture';
   render();
+}
+
+function handleModeChange(mode: EnrollmentMode): void {
+  state.enrollmentMode = mode;
+  render();
+}
+
+async function handleFuzzyEnroll(face: CapturedFace): Promise<void> {
+  state.isLoading = true;
+  state.error = null;
+  render();
+
+  try {
+    const result = await api.fuzzyEnroll({
+      user_id: 'webcam-user',
+      face_embedding: face.embedding,
+    });
+    state.fuzzyEnrollResult = result;
+    state.sessionId = result.session_id;
+    state.enrollmentPhase = 'success';
+    state.completedSteps.add('enrollment');
+  } catch (err) {
+    state.error = err instanceof Error ? err.message : 'Fuzzy enrollment failed';
+  } finally {
+    state.isLoading = false;
+    render();
+  }
 }
 
 async function handleEnroll(face: CapturedFace): Promise<void> {
@@ -597,11 +658,14 @@ function handleRestart(): void {
   state.completedSteps.clear();
   state.isLoading = false;
   state.error = null;
+  state.enrollmentMode = 'pedersen';
   state.enrollmentPhase = 'capture';
   state.enrollCapturedFace = null;
   state.enrollWebcamError = null;
   state.sessionId = null;
   state.enrollResult = null;
+  state.fuzzyEnrollResult = null;
+  state.fuzzyVerifyResult = null;
   state.authPhase = 'ready';
   state.authCapturedFace = null;
   state.authWebcamError = null;
@@ -612,6 +676,195 @@ function handleRestart(): void {
   state.spatialCapture = null;
   state.verifyResult = null;
   render();
+}
+
+// ============================================================================
+// Fuzzy Verify Screen (simplified auth for fuzzy mode)
+// ============================================================================
+
+function renderFuzzyVerifyScreen(
+  phase: AuthPhase,
+  isLoading: boolean,
+  capturedFace: CapturedFace | null,
+  fuzzyResult: FuzzyVerifyResponse | null,
+  error: string | null,
+  webcamError: string | null
+): string {
+  return `
+    <div class="card">
+      <h2>Step 2: Fuzzy Verification</h2>
+      <p>
+        Capture a new face scan to verify against the fuzzy commitment.
+        The system reproduces the commitment from the new scan using the stored helper data.
+        No ZK proof or liveness check is needed for this mode.
+      </p>
+
+      ${renderFuzzyVerifyPhase(phase, isLoading, capturedFace, fuzzyResult, webcamError)}
+
+      ${error ? `
+        <div class="badge badge-error" style="margin-top: 1rem; display: block; padding: 0.75rem;">
+          Error: ${error}
+        </div>
+      ` : ''}
+    </div>
+
+    <div class="card">
+      <h3>How Fuzzy Verification Works</h3>
+      <ol style="padding-left: 1.5rem; color: var(--text-secondary);">
+        <li style="margin-bottom: 0.75rem;">
+          <strong>Face Capture:</strong> A new 1024-dimensional embedding is extracted
+        </li>
+        <li style="margin-bottom: 0.75rem;">
+          <strong>Error Correction:</strong> Reed-Solomon decoding recovers the original codeword from the noisy scan + helper data
+        </li>
+        <li style="margin-bottom: 0.75rem;">
+          <strong>Commitment Comparison:</strong> SHA-256(recovered codeword) is compared to the stored commitment
+        </li>
+      </ol>
+    </div>
+  `;
+}
+
+function renderFuzzyVerifyPhase(
+  _phase: AuthPhase,
+  isLoading: boolean,
+  capturedFace: CapturedFace | null,
+  fuzzyResult: FuzzyVerifyResponse | null,
+  webcamError: string | null
+): string {
+  // Show result if we have one
+  if (fuzzyResult) {
+    return `
+      <div class="fade-in">
+        <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
+          <span class="badge ${fuzzyResult.matched ? 'badge-success' : 'badge-error'}">
+            ${fuzzyResult.matched ? 'Match Confirmed' : 'No Match'}
+          </span>
+        </div>
+
+        ${fuzzyResult.matched && fuzzyResult.commitment_hex ? `
+          <h3>Reproduced Commitment</h3>
+          <div class="code" style="word-break: break-all; font-size: 0.75rem;">
+            ${fuzzyResult.commitment_hex}
+          </div>
+          <p style="font-size: 0.875rem; margin-top: 0.5rem;">
+            The same deterministic commitment was reproduced from the new scan,
+            confirming this is the same person.
+          </p>
+        ` : `
+          <p style="font-size: 0.875rem;">
+            The scan could not reproduce the original commitment.
+            The biometric distance was too large for error correction.
+          </p>
+        `}
+
+        <div class="timing-grid" style="margin-top: 1rem;">
+          <div class="timing-item">
+            <div class="timing-value">${fuzzyResult.timing_ms.toFixed(2)}ms</div>
+            <div class="timing-label">Verification Time</div>
+          </div>
+        </div>
+
+        <div style="margin-top: 1.5rem;">
+          <button class="btn btn-primary" id="fuzzy-restart">
+            Start Over
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  if (webcamError) {
+    return `
+      <div class="webcam-error">
+        <p><strong>Camera Error:</strong> ${webcamError}</p>
+        <button class="btn btn-primary" id="retry-auth-camera-btn" style="margin-top: 1rem;">
+          Retry Camera Access
+        </button>
+      </div>
+    `;
+  }
+
+  // Show captured face with verify button
+  if (capturedFace) {
+    return `
+      <div class="fade-in">
+        ${renderWebcamPreview(capturedFace)}
+        <div class="webcam-controls">
+          <button class="btn btn-secondary" id="retake-auth-btn" ${isLoading ? 'disabled' : ''}>
+            Retake
+          </button>
+          <button class="btn btn-primary" id="fuzzy-verify-btn" ${isLoading ? 'disabled' : ''}>
+            ${isLoading ? '<span class="spinner"></span> Verifying...' : 'Verify Match'}
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  // Webcam capture phase
+  return `
+    <div class="fade-in">
+      <div class="webcam-loading" id="auth-webcam-loading">
+        <span class="spinner"></span>
+        <span class="webcam-loading-text">Initializing camera...</span>
+      </div>
+      <div id="auth-webcam-container" style="display: none;">
+        ${renderWebcamPreview(null)}
+        ${renderWebcamControls(null, isLoading)}
+      </div>
+    </div>
+  `;
+}
+
+function attachFuzzyVerifyHandlers(): void {
+  // Capture button
+  document.getElementById('capture-btn')?.addEventListener('click', handleAuthCapture);
+
+  // Retake
+  document.getElementById('retake-auth-btn')?.addEventListener('click', handleAuthRetake);
+
+  // Retry camera
+  document.getElementById('retry-auth-camera-btn')?.addEventListener('click', handleAuthRetryCamera);
+
+  // Verify button
+  document.getElementById('fuzzy-verify-btn')?.addEventListener('click', () => {
+    if (state.authCapturedFace) {
+      handleFuzzyVerify(state.authCapturedFace);
+    }
+  });
+
+  // Restart button
+  document.getElementById('fuzzy-restart')?.addEventListener('click', handleRestart);
+}
+
+async function handleFuzzyVerify(face: CapturedFace): Promise<void> {
+  if (!state.sessionId) {
+    state.error = 'No active session. Please enroll first.';
+    render();
+    return;
+  }
+
+  state.isLoading = true;
+  state.error = null;
+  render();
+
+  try {
+    const result = await api.fuzzyVerify({
+      session_id: state.sessionId,
+      face_embedding: face.embedding,
+    });
+    state.fuzzyVerifyResult = result;
+    state.completedSteps.add('authentication');
+    if (result.matched) {
+      state.completedSteps.add('verification');
+    }
+  } catch (err) {
+    state.error = err instanceof Error ? err.message : 'Fuzzy verification failed';
+  } finally {
+    state.isLoading = false;
+    render();
+  }
 }
 
 function sleep(ms: number): Promise<void> {
