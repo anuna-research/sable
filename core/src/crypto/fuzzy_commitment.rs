@@ -292,6 +292,88 @@ fn derive_tail_mask(hasher: &Sha256) -> [u8; TAIL_LEN] {
     mask
 }
 
+/// Generate a fuzzy commitment deterministically from a biometric vector.
+///
+/// Like [`gen`], but derives the RS codewords from `SHA-256(biometric)` instead
+/// of random bytes. This means the **same quantized biometric always produces
+/// the same commitment**, enabling deduplication without storing raw biometrics.
+///
+/// Security note: the helper data reveals the code-offset, which, combined with
+/// the deterministic codeword, leaks more information than the randomized
+/// variant. Use this only when deduplication / determinism is required.
+pub fn gen_deterministic(biometric: &[u8], params: &FuzzyParams) -> Enrollment {
+    assert_eq!(
+        biometric.len(),
+        BIOMETRIC_DIM,
+        "biometric must be {BIOMETRIC_DIM} bytes"
+    );
+
+    let rs = ReedSolomon::new(RS_BLOCK_LEN, params.k);
+
+    let mut hasher = Sha256::new();
+    let mut delta = Vec::with_capacity(BIOMETRIC_DIM);
+
+    // Derive a seed from the biometric
+    let seed: [u8; 32] = Sha256::digest(biometric).into();
+
+    for block_idx in 0..NUM_BLOCKS {
+        let bio_start = block_idx * RS_BLOCK_LEN;
+        let bio_block = &biometric[bio_start..bio_start + RS_BLOCK_LEN];
+
+        // Derive RS message deterministically from seed + block index
+        let message = deterministic_message(&seed, block_idx, params.k);
+
+        let codeword = rs.encode(&message);
+
+        for (w_byte, c_byte) in bio_block.iter().zip(codeword.iter()) {
+            delta.push(gf256::add(*w_byte, *c_byte));
+        }
+
+        hasher.update(&message);
+    }
+
+    // Handle tail bytes (same as gen)
+    let tail_start = NUM_BLOCKS * RS_BLOCK_LEN;
+    let tail_bytes = &biometric[tail_start..];
+    let tail_mask = derive_tail_mask(&hasher);
+    for (i, &w_byte) in tail_bytes.iter().enumerate() {
+        delta.push(gf256::add(w_byte, tail_mask[i]));
+    }
+
+    hasher.update(tail_bytes);
+
+    let commitment: [u8; 32] = hasher.finalize().into();
+
+    let helper_data = HelperData {
+        delta,
+        commitment,
+        params: params.clone(),
+    };
+
+    Enrollment {
+        commitment,
+        helper_data,
+    }
+}
+
+/// Derive a deterministic RS message from a seed and block index.
+fn deterministic_message(seed: &[u8; 32], block_idx: usize, len: usize) -> Vec<u8> {
+    let mut message = Vec::with_capacity(len);
+    let mut counter = 0u32;
+    while message.len() < len {
+        let mut h = Sha256::new();
+        h.update(seed);
+        h.update(&[block_idx as u8]);
+        h.update(&counter.to_le_bytes());
+        h.update(b"sable-fuzzy-det");
+        let hash = h.finalize();
+        let remaining = len - message.len();
+        message.extend_from_slice(&hash[..remaining.min(32)]);
+        counter += 1;
+    }
+    message
+}
+
 /// Generate a random message of given length using OS randomness.
 fn random_message(len: usize) -> Vec<u8> {
     let mut buf = vec![0u8; len];
@@ -486,6 +568,50 @@ mod tests {
                 params.k * 8 * 2 // two blocks
             );
         }
+    }
+
+    #[test]
+    fn test_deterministic_same_biometric_same_commitment() {
+        let params = FuzzyParams::new(30);
+        let bio = make_biometric(42);
+
+        let e1 = gen_deterministic(&bio, &params);
+        let e2 = gen_deterministic(&bio, &params);
+
+        assert_eq!(
+            e1.commitment, e2.commitment,
+            "deterministic gen with same biometric must produce same commitment"
+        );
+        assert_eq!(e1.helper_data.delta, e2.helper_data.delta);
+    }
+
+    #[test]
+    fn test_deterministic_noisy_reproduces() {
+        let params = FuzzyParams::new(30);
+        let bio = make_biometric(42);
+
+        let enrollment = gen_deterministic(&bio, &params);
+
+        let noisy = add_noise(&bio, 20, 0x42);
+        let reproduced = rep(&noisy, &enrollment.helper_data);
+
+        assert_eq!(
+            reproduced,
+            Some(enrollment.commitment),
+            "noisy input within threshold should reproduce deterministic commitment"
+        );
+    }
+
+    #[test]
+    fn test_deterministic_different_biometrics_different_commitments() {
+        let params = FuzzyParams::new(30);
+        let bio1 = make_biometric(42);
+        let bio2 = make_biometric(99);
+
+        let e1 = gen_deterministic(&bio1, &params);
+        let e2 = gen_deterministic(&bio2, &params);
+
+        assert_ne!(e1.commitment, e2.commitment);
     }
 
     #[test]

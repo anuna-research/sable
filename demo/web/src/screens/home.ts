@@ -261,6 +261,126 @@ export function renderHomeScreen(_onStart: () => void): string {
     </div>
 
     <div class="card">
+      <h3>Anonymous Biometric Set Membership</h3>
+      <p>
+        Fuzzy commitments enable a powerful extension: prove you are <em>one of</em> N enrolled
+        people without revealing <em>which one</em>. A Merkle tree of commitments lets a ZK
+        proof demonstrate set membership anonymously.
+      </p>
+
+      <div class="arch-diagram">
+        <!-- Top: Issuer maintains the tree -->
+        <div class="arch-gov-row">
+          <div class="arch-node gov">
+            <div class="arch-node-icon">&#x1F3DB;&#xFE0F;</div>
+            <div class="arch-node-title">Issuer</div>
+            <div class="arch-node-items">
+              <span>Enroll citizens</span>
+              <span>Maintain Poseidon Merkle tree</span>
+              <span>Publish root (32 bytes)</span>
+              <span>Deduplicate via check-unique</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="arch-vert-arrow">
+          <div class="arch-vert-line"></div>
+          <div class="arch-vert-label">Merkle root + helper data</div>
+          <div class="arch-vert-tip"></div>
+        </div>
+
+        <!-- Bottom: Citizen proves, Verifier checks -->
+        <div class="arch-flow">
+          <div class="arch-node user">
+            <div class="arch-node-icon">&#x1F464;</div>
+            <div class="arch-node-title">Citizen</div>
+            <div class="arch-node-items">
+              <span>Capture face + liveness</span>
+              <span>FuzzyRep(w&prime;, h) &rarr; C</span>
+              <span>Stores helper data locally</span>
+            </div>
+          </div>
+
+          <div class="arch-arrow">
+            <div class="arch-arrow-line"></div>
+          </div>
+
+          <div class="arch-node engine">
+            <div class="arch-node-icon">&#x1F510;</div>
+            <div class="arch-node-title">ZK Circuit</div>
+            <div class="arch-node-items">
+              <span>Fuzzy commitment in ZK</span>
+              <span>Merkle path (27 hashes)</span>
+              <span>Liveness in ZK</span>
+              <span>Nullifier derivation</span>
+            </div>
+          </div>
+
+          <div class="arch-arrow">
+            <div class="arch-arrow-line"></div>
+          </div>
+
+          <div class="arch-node verifier">
+            <div class="arch-node-icon">&#x2705;</div>
+            <div class="arch-node-title">Verifier</div>
+            <div class="arch-node-items">
+              <span>Checks ~2KB proof in ~2ms</span>
+              <span>Sees only: root, nullifier</span>
+              <span>Cannot link sessions</span>
+              <span>Cannot identify citizen</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Proof contents breakdown -->
+      <h3 style="margin-top: 1.5rem;">Single ZK Proof Covers</h3>
+      <div class="timing-grid">
+        <div class="timing-item">
+          <div class="timing-value" style="font-size: 0.9rem;">Fuzzy Rep</div>
+          <div class="timing-label">Face matches an enrollment</div>
+        </div>
+        <div class="timing-item">
+          <div class="timing-value" style="font-size: 0.9rem;">Merkle</div>
+          <div class="timing-label">Enrollment is in the set</div>
+        </div>
+        <div class="timing-item">
+          <div class="timing-value" style="font-size: 0.9rem;">Liveness</div>
+          <div class="timing-label">Real face, not a photo</div>
+        </div>
+        <div class="timing-item">
+          <div class="timing-value" style="font-size: 0.9rem;">Nullifier</div>
+          <div class="timing-label">No double-use, unlinkable</div>
+        </div>
+      </div>
+
+      <!-- Scale numbers -->
+      <h3 style="margin-top: 1.5rem;">Scales to 100M+ Users</h3>
+      <div class="timing-grid">
+        <div class="timing-item">
+          <div class="timing-value">27</div>
+          <div class="timing-label">Merkle tree depth</div>
+        </div>
+        <div class="timing-item">
+          <div class="timing-value">~2 KB</div>
+          <div class="timing-label">Proof size (constant)</div>
+        </div>
+        <div class="timing-item">
+          <div class="timing-value">~500ms</div>
+          <div class="timing-label">Proof generation</div>
+        </div>
+        <div class="timing-item">
+          <div class="timing-value">~2ms</div>
+          <div class="timing-label">Verification (constant)</div>
+        </div>
+      </div>
+
+      <div class="privacy-note">
+        &#x1F6E1;&#xFE0F; The verifier learns only that the prover is <em>some</em> enrolled member &mdash; not which one. Biometrics, helper data, commitment, and tree position all stay private.
+      </div>
+    </div>
+
+    <div class="card">
       <h3>Cryptographic Building Blocks</h3>
       <div class="timing-grid">
         <div class="timing-item">

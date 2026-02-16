@@ -748,8 +748,8 @@ function renderFuzzyVerifyPhase(
             ${fuzzyResult.commitment_hex}
           </div>
           <p style="font-size: 0.875rem; margin-top: 0.5rem;">
-            The same deterministic commitment was reproduced from the new scan,
-            confirming this is the same person.
+            The same deterministic commitment was reproduced from a different scan
+            using Reed-Solomon error correction, confirming biometric match.
           </p>
         ` : `
           <p style="font-size: 0.875rem;">

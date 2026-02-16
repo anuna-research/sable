@@ -62,7 +62,7 @@ function renderModeToggle(activeMode: EnrollmentMode): string {
       </div>
       <div class="mode-option ${activeMode === 'fuzzy' ? 'active' : ''}" data-mode="fuzzy">
         <div class="mode-option-title">Fuzzy Commitment</div>
-        <div class="mode-option-desc">Deterministic commitment from biometrics. Same person always produces the same commitment.</div>
+        <div class="mode-option-desc">Deterministic commitment from biometrics. Same person always produces the same commitment, enabling deduplication.</div>
       </div>
     </div>
   `;
@@ -97,16 +97,16 @@ function renderFuzzyExplainer(): string {
         <strong>Face Capture:</strong> Your face is detected and a 1024-dimensional embedding is extracted
       </li>
       <li style="margin-bottom: 0.75rem;">
-        <strong>Feature Conversion:</strong> The embedding is converted to 512 byte-level features
+        <strong>Binary Quantization:</strong> Adjacent pairs are averaged to 512 features, then each is mapped to 0 or 1 by sign
       </li>
       <li style="margin-bottom: 0.75rem;">
-        <strong>Reed-Solomon Encoding:</strong> A random codeword is generated and XORed with the features (code-offset sketch)
+        <strong>Deterministic Encoding:</strong> An RS codeword is derived from <code class="code-inline">SHA-256(binary features)</code> and XORed with the quantized vector (code-offset sketch)
       </li>
       <li style="margin-bottom: 0.75rem;">
-        <strong>SHA-256 Commitment:</strong> The codeword is hashed to produce a deterministic commitment: <code class="code-inline">C = SHA-256(codeword)</code>
+        <strong>SHA-256 Commitment:</strong> The RS messages are hashed: <code class="code-inline">C = SHA-256(msg<sub>0</sub> || msg<sub>1</sub> || tail)</code>
       </li>
       <li style="margin-bottom: 0.75rem;">
-        <strong>Storage:</strong> The commitment + public helper data are stored. A future scan within the error tolerance reproduces the same commitment.
+        <strong>Storage:</strong> The commitment + public helper data (XOR delta) are stored. The same person always produces the same commitment; a future scan reproduces it via error correction.
       </li>
     </ol>
   `;
@@ -230,7 +230,8 @@ function renderFuzzyEnrollmentSuccess(result: FuzzyEnrollResponse): string {
       </div>
       <p style="font-size: 0.875rem; margin-top: 0.5rem;">
         This SHA-256 hash is derived deterministically from your biometrics.
-        The same person will always produce the same commitment.
+        Enrolling again will produce the same commitment. A future scan within the
+        error tolerance will also reproduce it via the helper data below.
       </p>
 
       <h3>Helper Data</h3>

@@ -1376,15 +1376,20 @@ pub async fn fuzzy_enroll(
     };
     let feature_time = feature_start.elapsed();
 
-    // Quantize features to u8 for fuzzy commitment
-    let features_f64: Vec<f64> = features.iter().map(|&f| f as f64 / 2.0).collect();
-    let quantized = FeatureQuantizer::quantize(&features_f64);
+    // Binary quantize: sign bit per feature → 0x00 / 0xFF
+    // Fine u8 quantization produces Hamming distances of ~85% between webcam
+    // captures (values cluster in a narrow band).  Binary quantization reduces
+    // this to ~14% (only positions that cross the sign boundary differ).
+    let quantized: Vec<u8> = features
+        .iter()
+        .map(|&f| if f >= 0.0 { 0xFF } else { 0x00 })
+        .collect();
 
-    // Generate fuzzy commitment
+    // Generate deterministic fuzzy commitment (same biometric → same commitment)
     let fuzzy_start = Instant::now();
-    let t = req.error_threshold.unwrap_or(40);
+    let t = req.error_threshold.unwrap_or(100);
     let params = FuzzyParams::new(t);
-    let enrollment = fuzzy_commitment::gen(&quantized, &params);
+    let enrollment = fuzzy_commitment::gen_deterministic(&quantized, &params);
     let fuzzy_time = fuzzy_start.elapsed();
 
     let total_time = total_start.elapsed();
@@ -1531,9 +1536,30 @@ pub async fn fuzzy_verify(
         ));
     };
 
-    // Quantize
-    let features_f64: Vec<f64> = features.iter().map(|&f| f as f64 / 2.0).collect();
-    let quantized = FeatureQuantizer::quantize(&features_f64);
+    // Binary quantize (must match enrollment quantization)
+    let quantized: Vec<u8> = features
+        .iter()
+        .map(|&f| if f >= 0.0 { 0xFF } else { 0x00 })
+        .collect();
+
+    // Log Hamming distance for diagnostics
+    if let Some(session_id) = &req.session_id {
+        if let Some(session) = state.get_session(session_id) {
+            let hamming: usize = session
+                .quantized_embedding
+                .iter()
+                .zip(quantized.iter())
+                .filter(|(a, b)| a != b)
+                .count();
+            tracing::info!(
+                "Fuzzy verify: binary Hamming distance = {}/512 ({:.1}%), t={} (corrects ~{})",
+                hamming,
+                hamming as f64 / 512.0 * 100.0,
+                helper_data.params.t,
+                helper_data.params.t * 2
+            );
+        }
+    }
 
     // Attempt to reproduce commitment
     let result = fuzzy_commitment::rep(&quantized, &helper_data);
@@ -1580,10 +1606,12 @@ pub async fn fuzzy_check_unique(
 
     let start = Instant::now();
 
-    // Convert face embedding to quantized features
+    // Convert face embedding to binary-quantized features
     let (features, _quality) = convert_face_embedding_to_features(&req.face_embedding)?;
-    let features_f64: Vec<f64> = features.iter().map(|&f| f as f64 / 2.0).collect();
-    let quantized = FeatureQuantizer::quantize(&features_f64);
+    let quantized: Vec<u8> = features
+        .iter()
+        .map(|&f| if f >= 0.0 { 0xFF } else { 0x00 })
+        .collect();
 
     // Check against each existing enrollment
     let checked_count = req.existing_enrollments.len();
