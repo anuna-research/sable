@@ -158,7 +158,8 @@ function render(): void {
           state.authCapturedFace,
           state.proof,
           state.error,
-          state.authWebcamError
+          state.authWebcamError,
+          state.flashRounds
         );
       }
       break;
