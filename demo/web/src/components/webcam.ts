@@ -124,6 +124,9 @@ function startFaceDetection(): void {
       try {
         const detection = await detectFace(webcamState.video);
 
+        // Re-check state after async gap (webcam may have been stopped)
+        if (!webcamState.overlay || !webcamState.isActive) return;
+
         if (detection) {
           webcamState.faceDetected = true;
           webcamState.lastDetection = detection;
@@ -142,7 +145,9 @@ function startFaceDetection(): void {
           updateFaceIndicator(false, 0);
         }
       } catch (error) {
-        console.error('Face detection error:', error);
+        if (webcamState.isActive) {
+          console.error('Face detection error:', error);
+        }
       }
     }
 

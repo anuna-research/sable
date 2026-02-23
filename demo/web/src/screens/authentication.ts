@@ -7,6 +7,7 @@ import {
   captureFrame,
   stopWebcam,
 } from '../components/webcam';
+import { FlashRound } from '../crypto/flashChallenge';
 
 export type AuthPhase = 'ready' | 'challenge' | 'capturing' | 'liveness' | 'proving' | 'complete';
 
@@ -17,7 +18,8 @@ export function renderAuthenticationScreen(
   capturedFace: CapturedFace | null,
   proof: ProveResponse | null,
   error: string | null,
-  webcamError: string | null
+  webcamError: string | null,
+  flashRounds: FlashRound[] | null = null
 ): string {
   const phaseLabels: Record<AuthPhase, string> = {
     ready: 'Ready to Authenticate',
@@ -43,7 +45,7 @@ export function renderAuthenticationScreen(
         </span>
       </div>
 
-      ${renderAuthPhase(phase, isLoading, challenge, capturedFace, proof, webcamError)}
+      ${renderAuthPhase(phase, isLoading, challenge, capturedFace, proof, webcamError, flashRounds)}
 
       ${error ? `
         <div class="badge badge-error" style="margin-top: 1rem; display: block; padding: 0.75rem;">
@@ -82,13 +84,53 @@ export function renderAuthenticationScreen(
   `;
 }
 
+/**
+ * Convert an RGB tuple to a CSS color string.
+ */
+function rgbCss(color: [number, number, number]): string {
+  return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+}
+
+/**
+ * Render the flash pattern as a row of 3 quadrant cards.
+ */
+function renderFlashPatternCards(rounds: FlashRound[]): string {
+  const cards = rounds.map((round, i) => {
+    const splitX = 50 + (round.offsetX * 30 - 15);
+    const splitY = 50 + (round.offsetY * 30 - 15);
+    return `
+      <div class="flash-card" style="display:grid; grid-template-columns:${splitX}% ${100 - splitX}%; grid-template-rows:${splitY}% ${100 - splitY}%; overflow:hidden;">
+        <div style="background:${rgbCss(round.tlColor)};"></div>
+        <div style="background:${rgbCss(round.trColor)};"></div>
+        <div style="background:${rgbCss(round.blColor)};"></div>
+        <div style="background:${rgbCss(round.brColor)};"></div>
+        <div class="flash-card-label" style="grid-column:1/-1; grid-row:1/-1; place-self:center;">Round ${i + 1}</div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <h3>Flash Pattern Used</h3>
+    <div class="flash-rounds">
+      <div class="flash-cards-row">
+        ${cards}
+      </div>
+    </div>
+    <p style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.5rem;">
+      Each round flashed a different 4-quadrant color pattern. A real 3D face reflects
+      each quadrant differently; a flat photo or screen reflects them uniformly.
+    </p>
+  `;
+}
+
 function renderAuthPhase(
   phase: AuthPhase,
   isLoading: boolean,
   challenge: ChallengeResponse | null,
   capturedFace: CapturedFace | null,
   proof: ProveResponse | null,
-  webcamError: string | null
+  webcamError: string | null,
+  flashRounds: FlashRound[] | null
 ): string {
   switch (phase) {
     case 'ready':
@@ -319,6 +361,8 @@ function renderAuthPhase(
               </p>
             ` : ''}
           ` : ''}
+
+          ${flashRounds && flashRounds.length === 3 ? renderFlashPatternCards(flashRounds) : ''}
 
           <h3>ZK Proof (truncated)</h3>
           <div class="code" style="font-size: 0.75rem; word-break: break-all;">

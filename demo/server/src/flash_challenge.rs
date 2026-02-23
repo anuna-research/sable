@@ -515,16 +515,21 @@ const REGION_COLOR_MATCH_THRESHOLD: f64 = 0.2;
 /// only modest spatial differentiation (~5-15° delta angle, cosine ~0.97-0.996).
 /// A perfectly flat surface produces nearly identical deltas (cosine ~0.999+).
 ///
-/// Threshold of 0.998 (~3.6° minimum angular difference) is calibrated for:
-/// - Real faces at desk distance: ~0.97-0.99 → PASS
+/// Threshold of 0.9995 (~1.8° minimum angular difference) is calibrated for:
+/// - Real faces at desk distance: ~0.97-0.995 → PASS
 /// - Flat photos/screens: ~0.999-1.0 → FAIL
-const SPATIAL_DIFF_MAX_SIMILARITY: f64 = 0.998;
+///
+/// Relaxed from 0.998 for 4-quadrant mode: adjacent quadrants are physically
+/// closer together on the face than top/bottom halves, so spatial differentiation
+/// is inherently smaller.
+const SPATIAL_DIFF_MAX_SIMILARITY: f64 = 0.9995;
 
 /// Minimum number of rounds that must pass each spatial/color check.
 ///
-/// Requiring all 3 rounds significantly reduces accidental replay acceptance
-/// when independently derived patterns happen to overlap on 1-2 rounds.
-const SPATIAL_DIFF_MIN_PASSING_ROUNDS: usize = 3;
+/// Requiring 2 of 3 rounds balances false-rejection rate against replay
+/// resistance. A single lucky round is insufficient, but one noisy round
+/// (e.g. user moved slightly) does not cause a false reject.
+const SPATIAL_DIFF_MIN_PASSING_ROUNDS: usize = 2;
 
 /// Face region margin: 20% on each side, leaving center 60%.
 const FACE_MARGIN_FRACTION: f64 = 0.20;

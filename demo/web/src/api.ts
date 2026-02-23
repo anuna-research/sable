@@ -122,6 +122,53 @@ export interface HealthResponse {
   version: string;
 }
 
+// Fuzzy commitment types
+export interface FuzzyEnrollRequest {
+  user_id: string;
+  face_embedding?: number[];
+  error_threshold?: number;
+}
+
+export interface FuzzyEnrollTimings {
+  feature_generation_ms: number;
+  fuzzy_commitment_ms: number;
+  total_ms: number;
+}
+
+export interface FuzzyEnrollResponse {
+  session_id: string;
+  commitment_hex: string;
+  helper_data_hex: string;
+  quality_score: number;
+  timings: FuzzyEnrollTimings;
+}
+
+export interface FuzzyVerifyRequest {
+  session_id?: string;
+  helper_data_hex?: string;
+  face_embedding?: number[];
+}
+
+export interface FuzzyVerifyResponse {
+  matched: boolean;
+  commitment_hex?: string;
+  timing_ms: number;
+}
+
+export interface FuzzyCheckUniqueRequest {
+  face_embedding: number[];
+  existing_enrollments: string[];
+  error_threshold?: number;
+}
+
+export interface FuzzyCheckUniqueResponse {
+  is_unique: boolean;
+  matched_index?: number;
+  matched_commitment_hex?: string;
+  timing_ms: number;
+  checked_count: number;
+}
+
 class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -184,6 +231,27 @@ export const api = {
 
   verify(data: VerifyRequest): Promise<VerifyResponse> {
     return request('/verify', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  fuzzyEnroll(data: FuzzyEnrollRequest): Promise<FuzzyEnrollResponse> {
+    return request('/fuzzy/enroll', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  fuzzyVerify(data: FuzzyVerifyRequest): Promise<FuzzyVerifyResponse> {
+    return request('/fuzzy/verify', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  fuzzyCheckUnique(data: FuzzyCheckUniqueRequest): Promise<FuzzyCheckUniqueResponse> {
+    return request('/fuzzy/check-unique', {
       method: 'POST',
       body: JSON.stringify(data),
     });

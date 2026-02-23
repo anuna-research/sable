@@ -1,0 +1,37 @@
+app = "sable-demo"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "demo/Dockerfile"
+  dockerignore_from_gitignore = true
+
+[build.args]
+
+[env]
+  RUST_LOG = "demo_server=info,tower_http=info"
+  PORT = "8080"
+  BIND_ADDRESS = "0.0.0.0"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+[[http_service.checks]]
+  grace_period = "30s"
+  interval = "15s"
+  method = "GET"
+  path = "/api/health"
+  timeout = "5s"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

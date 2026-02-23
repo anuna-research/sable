@@ -1210,6 +1210,79 @@ p {
   color: var(--accent-secondary);
 }
 
+/* Enrollment mode toggle */
+.mode-toggle {
+  display: flex;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.mode-option {
+  flex: 1;
+  padding: 1rem;
+  background: var(--bg-primary);
+  border: 2px solid var(--border-color);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.mode-option:hover {
+  border-color: var(--accent-primary);
+}
+
+.mode-option.active {
+  border-color: var(--accent-primary);
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.mode-option-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.25rem;
+}
+
+.mode-option.active .mode-option-title {
+  color: var(--accent-primary);
+}
+
+.mode-option-desc {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+@media (max-width: 640px) {
+  .mode-toggle {
+    flex-direction: column;
+  }
+}
+
+/* Fuzzy commitment helper data */
+.helper-data-container {
+  position: relative;
+}
+
+.helper-data-container .copy-btn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.7rem;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.helper-data-container .copy-btn:hover {
+  background: var(--accent-primary);
+  color: white;
+}
+
 /* Footer */
 .site-footer {
   text-align: center;
