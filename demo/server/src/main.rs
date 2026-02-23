@@ -3,7 +3,7 @@ use axum::{
     Router,
 };
 use std::net::SocketAddr;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -24,11 +24,23 @@ async fn main() {
     // Create application state
     let state = AppState::new();
 
-    // Configure CORS for development
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    // Configure CORS from ALLOWED_ORIGINS env (comma-separated) or allow any
+    let cors = match std::env::var("ALLOWED_ORIGINS") {
+        Ok(origins) if !origins.is_empty() => {
+            let origins: Vec<_> = origins
+                .split(',')
+                .filter_map(|o| o.trim().parse().ok())
+                .collect();
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list(origins))
+                .allow_methods(Any)
+                .allow_headers(Any)
+        }
+        _ => CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any),
+    };
 
     // Build API routes
     let api_routes = Router::new()
@@ -50,9 +62,18 @@ async fn main() {
         .layer(cors)
         .with_state(state);
 
-    // Start server (use 3001 to avoid conflicts)
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3001));
-    tracing::info!("🚀 SABLE Demo Server starting on http://{}", addr);
+    // Read bind config from environment (PORT for PaaS, BIND_ADDRESS for flexibility)
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3001);
+    let bind_addr: std::net::IpAddr = std::env::var("BIND_ADDRESS")
+        .ok()
+        .and_then(|a| a.parse().ok())
+        .unwrap_or_else(|| [127, 0, 0, 1].into());
+    let addr = SocketAddr::from((bind_addr, port));
+
+    tracing::info!("SABLE Demo Server starting on http://{}", addr);
     tracing::info!("   API endpoints:");
     tracing::info!("   - POST /api/enroll                  Create biometric enrollment");
     tracing::info!("   - POST /api/auth/challenge          Get authentication challenge");

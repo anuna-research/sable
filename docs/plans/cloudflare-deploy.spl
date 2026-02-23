@@ -1,0 +1,330 @@
+;; ============================================================
+;; SABLE Web Demo — Cloudflare Deployment Plan
+;; ============================================================
+;;
+;; Strategy: Deploy the Vite/TS frontend to Cloudflare Pages
+;; and the Rust/Axum backend to a container host (Render/Railway/Fly.io).
+;; Cloudflare Pages Functions proxy /api/* to the backend.
+;;
+;; The Halo2 ZK proof engine requires native Rust (~250ms, 128MB);
+;; it cannot run in Workers/WASM. The frontend is a static SPA
+;; that only needs a CDN.
+;; ============================================================
+
+(meta plan
+  (id "DEPLOY-001")
+  (title "Deploy SABLE Web Demo to Cloudflare")
+  (version "1.0.0")
+  (status "draft")
+  (created "2026-02-23")
+  (updated "2026-02-23")
+  (author "agent:claude")
+  (description "Deploy static frontend to Cloudflare Pages, Rust backend to container PaaS, with Pages Functions as API proxy"))
+
+;; ── Agents ──────────────────────────────────────────────────
+
+(given agent-claude-available)
+
+;; ============================================================
+;; Phase 1: Backend Deployment Preparation
+;; ============================================================
+
+(given task-backend-dockerfile)
+(given task-backend-env-config)
+(given task-backend-health-check)
+(given task-backend-deploy)
+
+(given no-deps-backend-dockerfile)
+(given no-deps-backend-env-config)
+
+;; T1.1 — Harden backend Dockerfile for production
+(meta task-backend-dockerfile
+  (title "Harden backend Dockerfile for production deployment")
+  (description "Update demo/Dockerfile for production: pin Rust nightly version, add health check endpoint, set RUST_LOG, expose PORT env var, ensure non-root user, minimize image size. Current Dockerfile works but uses rust:1.75-slim which may not match nightly requirement.")
+  (phase "1"))
+
+(normally r-ready-backend-dockerfile
+  (and task-backend-dockerfile no-deps-backend-dockerfile)
+  ready-backend-dockerfile)
+
+(normally r-assign-backend-dockerfile
+  (and ready-backend-dockerfile agent-claude-available)
+  assign-to-backend-dockerfile-claude)
+
+;; T1.2 — Add environment-based configuration to backend
+(meta task-backend-env-config
+  (title "Add environment-based config (PORT, CORS origins, bind address)")
+  (description "The Axum server currently hardcodes port 3000/3001 and CORS origins. Add env var support: PORT (default 3000), ALLOWED_ORIGINS (comma-separated, default *), BIND_ADDRESS (default 0.0.0.0). This enables deployment to any PaaS that injects PORT.")
+  (phase "1"))
+
+(normally r-ready-backend-env-config
+  (and task-backend-env-config no-deps-backend-env-config)
+  ready-backend-env-config)
+
+(normally r-assign-backend-env-config
+  (and ready-backend-env-config agent-claude-available)
+  assign-to-backend-env-config-claude)
+
+;; T1.3 — Verify health check endpoint works
+(meta task-backend-health-check
+  (title "Verify /api/health returns 200 for container health probes")
+  (description "Ensure the existing /api/health endpoint returns JSON {\"status\":\"ok\"} with 200. PaaS platforms (Render, Railway, Fly.io) use this for readiness/liveness probes. Test locally before deploying.")
+  (phase "1"))
+
+(normally r-ready-backend-health-check
+  (and task-backend-health-check completed-backend-env-config)
+  ready-backend-health-check)
+
+(normally r-assign-backend-health-check
+  (and ready-backend-health-check agent-claude-available)
+  assign-to-backend-health-check-claude)
+
+;; T1.4 — Deploy backend to container PaaS
+(meta task-backend-deploy
+  (title "Deploy Rust backend to Render/Railway/Fly.io")
+  (description "Deploy the Rust Axum backend to a container PaaS. Recommended: Fly.io (free tier, Docker deploy, health checks). Create fly.toml or render.yaml. Verify /api/health responds. Record the deployed backend URL (e.g., https://sable-api.fly.dev).")
+  (phase "1"))
+
+(normally r-ready-backend-deploy
+  (and task-backend-deploy completed-backend-dockerfile completed-backend-health-check)
+  ready-backend-deploy)
+
+(normally r-assign-backend-deploy
+  (and ready-backend-deploy agent-claude-available)
+  assign-to-backend-deploy-claude)
+
+;; ============================================================
+;; Phase 2: Frontend Cloudflare Pages Setup
+;; ============================================================
+
+(given task-frontend-env-api-url)
+(given task-frontend-wrangler-config)
+(given task-frontend-pages-function)
+(given task-frontend-build-verify)
+
+(given no-deps-frontend-env-api-url)
+
+;; T2.1 — Make API base URL configurable via VITE env var
+(meta task-frontend-env-api-url
+  (title "Configure API base URL via VITE_API_URL environment variable")
+  (description "Update demo/web/src/api.ts to use import.meta.env.VITE_API_URL as the base URL for all fetch() calls instead of relative /api paths. Default to '' (empty string, relative) for local dev. In production, Cloudflare Pages Functions will proxy, so relative paths still work — but the env var provides flexibility. Also update vite.config.ts proxy to respect this.")
+  (phase "2"))
+
+(normally r-ready-frontend-env-api-url
+  (and task-frontend-env-api-url no-deps-frontend-env-api-url)
+  ready-frontend-env-api-url)
+
+(normally r-assign-frontend-env-api-url
+  (and ready-frontend-env-api-url agent-claude-available)
+  assign-to-frontend-env-api-url-claude)
+
+;; T2.2 — Add wrangler.toml for Cloudflare Pages
+(meta task-frontend-wrangler-config
+  (title "Create wrangler.toml for Cloudflare Pages deployment")
+  (description "Create demo/web/wrangler.toml with: name='sable-demo', pages_build_output_dir='dist', compatibility_date, [vars] for BACKEND_URL. This configures Cloudflare Pages direct upload or git-connected deployment. Also add a .dev.vars file (gitignored) for local wrangler dev.")
+  (phase "2"))
+
+(normally r-ready-frontend-wrangler-config
+  (and task-frontend-wrangler-config completed-frontend-env-api-url)
+  ready-frontend-wrangler-config)
+
+(normally r-assign-frontend-wrangler-config
+  (and ready-frontend-wrangler-config agent-claude-available)
+  assign-to-frontend-wrangler-config-claude)
+
+;; T2.3 — Create Pages Function to proxy /api/* to backend
+(meta task-frontend-pages-function
+  (title "Create Cloudflare Pages Function to proxy API requests to backend")
+  (description "Create demo/web/functions/api/[[path]].ts — a catch-all Pages Function that proxies all /api/* requests to the deployed backend URL (from env.BACKEND_URL). Use standard fetch() rewriting: strip /api prefix or forward as-is depending on backend routing. Handle CORS headers. This replaces the nginx reverse proxy in production.")
+  (phase "2"))
+
+(normally r-ready-frontend-pages-function
+  (and task-frontend-pages-function completed-frontend-wrangler-config)
+  ready-frontend-pages-function)
+
+(normally r-assign-frontend-pages-function
+  (and ready-frontend-pages-function agent-claude-available)
+  assign-to-frontend-pages-function-claude)
+
+;; T2.4 — Verify frontend builds cleanly for Pages
+(meta task-frontend-build-verify
+  (title "Verify npm run build produces deployable dist/ for Cloudflare Pages")
+  (description "Run npm ci && npm run build in demo/web/. Verify dist/ contains index.html, JS bundles, and assets. Check that no hardcoded localhost URLs leak into the bundle. Test with wrangler pages dev dist/ locally to simulate Pages environment.")
+  (phase "2"))
+
+(normally r-ready-frontend-build-verify
+  (and task-frontend-build-verify completed-frontend-pages-function)
+  ready-frontend-build-verify)
+
+(normally r-assign-frontend-build-verify
+  (and ready-frontend-build-verify agent-claude-available)
+  assign-to-frontend-build-verify-claude)
+
+;; ============================================================
+;; Phase 3: Deploy & Connect
+;; ============================================================
+
+(given task-pages-deploy)
+(given task-connect-test)
+(given task-custom-domain)
+
+;; T3.1 — Deploy frontend to Cloudflare Pages
+(meta task-pages-deploy
+  (title "Deploy frontend to Cloudflare Pages via wrangler")
+  (description "Run wrangler pages deploy dist/ --project-name=sable-demo from demo/web/. Set BACKEND_URL environment variable in Cloudflare dashboard or via wrangler. Verify the deployment URL serves the SPA. Confirm Pages Function /api proxy works.")
+  (phase "3"))
+
+(normally r-ready-pages-deploy
+  (and task-pages-deploy completed-frontend-build-verify completed-backend-deploy)
+  ready-pages-deploy)
+
+(normally r-assign-pages-deploy
+  (and ready-pages-deploy agent-claude-available)
+  assign-to-pages-deploy-claude)
+
+;; T3.2 — End-to-end integration test
+(meta task-connect-test
+  (title "Verify end-to-end enrollment → auth → verification flow on Cloudflare")
+  (description "Test the full biometric demo flow on the deployed Cloudflare Pages URL: 1) Health check via /api/health, 2) Enrollment with face capture, 3) Authentication with liveness challenge, 4) Proof verification. Check browser console for CORS or mixed-content errors. Verify WebRTC camera access works over HTTPS.")
+  (phase "3"))
+
+(normally r-ready-connect-test
+  (and task-connect-test completed-pages-deploy)
+  ready-connect-test)
+
+(normally r-assign-connect-test
+  (and ready-connect-test agent-claude-available)
+  assign-to-connect-test-claude)
+
+;; T3.3 — Configure custom domain (optional)
+(meta task-custom-domain
+  (title "Configure custom domain on Cloudflare Pages (optional)")
+  (description "If a custom domain is desired (e.g., demo.sable.dev), add it via Cloudflare Pages → Custom domains. Requires DNS to be on Cloudflare. Add CNAME record pointing to <project>.pages.dev. Verify HTTPS works automatically via Cloudflare's edge certificates.")
+  (phase "3"))
+
+(normally r-ready-custom-domain
+  (and task-custom-domain completed-connect-test)
+  ready-custom-domain)
+
+(normally r-assign-custom-domain
+  (and ready-custom-domain agent-claude-available)
+  assign-to-custom-domain-claude)
+
+;; ============================================================
+;; Phase 4: CI/CD Pipeline
+;; ============================================================
+
+(given task-github-actions)
+(given task-preview-deploys)
+
+;; T4.1 — Create GitHub Actions workflow for automated deployment
+(meta task-github-actions
+  (title "Add GitHub Actions CI/CD for Cloudflare Pages + backend deploy")
+  (description "Create .github/workflows/deploy.yml with: 1) On push to main, build frontend (npm ci && npm run build in demo/web), 2) Deploy to Cloudflare Pages via wrangler-action, 3) Optionally trigger backend redeploy. Store CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID as GitHub secrets.")
+  (phase "4"))
+
+(normally r-ready-github-actions
+  (and task-github-actions completed-connect-test)
+  ready-github-actions)
+
+(normally r-assign-github-actions
+  (and ready-github-actions agent-claude-available)
+  assign-to-github-actions-claude)
+
+;; T4.2 — Enable preview deployments for PRs
+(meta task-preview-deploys
+  (title "Enable Cloudflare Pages preview deployments for pull requests")
+  (description "Cloudflare Pages automatically creates preview URLs for non-production branches. Verify this works by pushing a test branch. Add a GitHub Actions step to comment the preview URL on PRs. Configure preview BACKEND_URL to point to a staging backend if available.")
+  (phase "4"))
+
+(normally r-ready-preview-deploys
+  (and task-preview-deploys completed-github-actions)
+  ready-preview-deploys)
+
+(normally r-assign-preview-deploys
+  (and ready-preview-deploys agent-claude-available)
+  assign-to-preview-deploys-claude)
+
+(claims agent:claude
+  :at "2026-02-23T01:22:54Z"
+  (given claim-v1-backend-dockerfile)
+  (normally r-cl-state-v1-backend-dockerfile claim-v1-backend-dockerfile state-claimed-v1-backend-dockerfile)
+  (normally r-cl-chain-v1-backend-dockerfile state-claimed-v1-backend-dockerfile claimed-backend-dockerfile)
+)
+
+(claims agent:claude
+  :at "2026-02-23T01:22:57Z"
+  (given claim-v1-backend-env-config)
+  (normally r-cl-state-v1-backend-env-config claim-v1-backend-env-config state-claimed-v1-backend-env-config)
+  (normally r-cl-chain-v1-backend-env-config state-claimed-v1-backend-env-config claimed-backend-env-config)
+)
+
+(claims agent:claude
+  :at "2026-02-23T01:22:57Z"
+  (given claim-v1-frontend-env-api-url)
+  (normally r-cl-state-v1-frontend-env-api-url claim-v1-frontend-env-api-url state-claimed-v1-frontend-env-api-url)
+  (normally r-cl-chain-v1-frontend-env-api-url state-claimed-v1-frontend-env-api-url claimed-frontend-env-api-url)
+)
+
+(claims agent:claude
+  :at "2026-02-23T01:24:38Z"
+  (given completed-backend-env-config))
+
+(claims agent:claude
+  :at "2026-02-23T01:24:38Z"
+  (given completed-backend-dockerfile))
+
+(claims agent:claude
+  :at "2026-02-23T01:24:40Z"
+  (given completed-frontend-env-api-url))
+
+(claims agent:claude
+  :at "2026-02-23T01:24:44Z"
+  (given claim-v1-backend-health-check)
+  (normally r-cl-state-v1-backend-health-check claim-v1-backend-health-check state-claimed-v1-backend-health-check)
+  (normally r-cl-chain-v1-backend-health-check state-claimed-v1-backend-health-check claimed-backend-health-check)
+)
+
+(claims agent:claude
+  :at "2026-02-23T01:24:44Z"
+  (given claim-v1-frontend-wrangler-config)
+  (normally r-cl-state-v1-frontend-wrangler-config claim-v1-frontend-wrangler-config state-claimed-v1-frontend-wrangler-config)
+  (normally r-cl-chain-v1-frontend-wrangler-config state-claimed-v1-frontend-wrangler-config claimed-frontend-wrangler-config)
+)
+
+(claims agent:claude
+  :at "2026-02-23T01:25:10Z"
+  (given completed-backend-health-check))
+
+(claims agent:claude
+  :at "2026-02-23T01:25:10Z"
+  (given completed-frontend-wrangler-config))
+
+(claims agent:claude
+  :at "2026-02-23T01:25:13Z"
+  (given claim-v1-frontend-pages-function)
+  (normally r-cl-state-v1-frontend-pages-function claim-v1-frontend-pages-function state-claimed-v1-frontend-pages-function)
+  (normally r-cl-chain-v1-frontend-pages-function state-claimed-v1-frontend-pages-function claimed-frontend-pages-function)
+)
+
+(claims agent:claude
+  :at "2026-02-23T01:25:13Z"
+  (given claim-v1-backend-deploy)
+  (normally r-cl-state-v1-backend-deploy claim-v1-backend-deploy state-claimed-v1-backend-deploy)
+  (normally r-cl-chain-v1-backend-deploy state-claimed-v1-backend-deploy claimed-backend-deploy)
+)
+
+(claims agent:claude
+  :at "2026-02-23T01:25:28Z"
+  (given completed-frontend-pages-function))
+
+(claims agent:claude
+  :at "2026-02-23T01:25:31Z"
+  (given claim-v1-frontend-build-verify)
+  (normally r-cl-state-v1-frontend-build-verify claim-v1-frontend-build-verify state-claimed-v1-frontend-build-verify)
+  (normally r-cl-chain-v1-frontend-build-verify state-claimed-v1-frontend-build-verify claimed-frontend-build-verify)
+)
+
+(claims agent:claude
+  :at "2026-02-23T01:25:52Z"
+  (given completed-frontend-build-verify))
