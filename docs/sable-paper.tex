@@ -20,7 +20,7 @@
 \maketitle
 
 \begin{abstract}
-Biometric authentication systems face a fundamental tension between usability and privacy: conventional approaches require centralized storage or cloud processing of irrevocable biometric data, creating high-value targets for breaches and surveillance. We present SABLE (Secure Attested Biometric Library for Edge), a system that performs biometric identity verification entirely through zero-knowledge proofs, ensuring that biometric data never leaves the user's device. SABLE combines Halo2-based ZK circuits over quantized face embeddings with a novel spatial flash liveness protocol that detects presentation attacks by exploiting differential light reflectance on 3D facial geometry. The system operates fully offline via peer-to-peer communication and supports selective credential disclosure through BBS+ signatures. On commodity hardware (Apple Silicon), SABLE generates combined face-match and liveness proofs in approximately 250\,ms with 2.08\,KB proof size, and verifies them in approximately 1.8\,ms --- well within typical interactive latency budgets. To our knowledge, SABLE is the first open-source system to combine true zero-knowledge biometric proofs, transparent setup, offline peer-to-peer verification, and screen-based liveness detection without specialized hardware.
+Biometric authentication systems face a fundamental tension between usability and privacy: conventional approaches require centralized storage or cloud processing of irrevocable biometric data, creating high-value targets for breaches and surveillance. We present SABLE (Secure Attested Biometric Library for Edge), a system that performs biometric identity verification entirely through zero-knowledge proofs, ensuring that biometric data never leaves the user's device. SABLE combines Halo2-based ZK circuits over quantized face embeddings with a novel spatial flash liveness protocol that detects presentation attacks by exploiting differential light reflectance on 3D facial geometry. The system operates fully offline via peer-to-peer communication and supports selective credential disclosure through BBS+ signatures. On commodity hardware (Apple Silicon), SABLE generates combined face-match and liveness proofs --- with the entire match, template-commitment binding, and liveness check performed in-circuit --- in approximately 1 second with 2.08\,KB proof size, and verifies them in approximately 1.8\,ms --- well within typical interactive latency budgets. To our knowledge, SABLE is the first open-source system to combine true zero-knowledge biometric proofs, transparent setup, offline peer-to-peer verification, and screen-based liveness detection without specialized hardware.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -38,7 +38,7 @@ Multi-party computation (MPC) offers one approach, splitting biometric templates
 \textbf{Contributions.} We present SABLE, a system that resolves these trade-offs by combining several techniques into a coherent architecture:
 
 \begin{enumerate}
-\item \textbf{ZK biometric matching.} We construct Halo2 arithmetic circuits that prove a quantized face embedding matches an enrolled template within a Hamming distance threshold, without revealing the embedding. The circuit operates over 1024-byte quantized feature vectors using Poseidon hashing and Pedersen commitments.
+\item \textbf{ZK biometric matching.} We construct Halo2 arithmetic circuits that prove a quantized face embedding matches an enrolled template within a Hamming distance threshold, without revealing the embedding. The circuit operates over 512-byte quantized feature vectors using Poseidon hashing and Pedersen commitments.
 
 \item \textbf{Spatial flash liveness.} We integrate a screen-based liveness detection protocol inspired by Tang et al.~\cite{tang2018} into the ZK proof. A commit-reveal nonce scheme generates unpredictable split-screen color flashes; differential reflectance analysis distinguishes 3D faces from flat presentation attacks. The liveness evidence is quantized into 16-bit delta fingerprints and verified within the same Halo2 circuit.
 
@@ -55,7 +55,7 @@ SABLE comprises three principal roles: the \emph{user} (prover), the \emph{ZK en
 
 \subsection{Enrollment}
 
-During enrollment, the user captures a face image via a standard smartphone camera. A feature extraction model produces a 1024-dimensional floating-point embedding $\mathbf{e} \in \mathbb{R}^{1024}$, which is then quantized to an integer vector $\mathbf{q} \in \{0,\ldots,255\}^{1024}$ (Section~\ref{sec:quantization}). The quantized embedding is hashed via Poseidon into a field element $h = \text{Poseidon}(\mathbf{q})$ and then committed using a Pedersen commitment $C = g^h \cdot h_r^s$ over BLS12-381, where $s$ is a 256-bit random salt. The commitment $C$ serves as the user's ``biometric public key'' --- stored by the verifier but cryptographically hiding the underlying biometric data.
+During enrollment, the user captures a face image via a standard smartphone camera. A feature extraction model produces a 1024-dimensional floating-point embedding $\mathbf{e} \in \mathbb{R}^{1024}$, which is reduced and thermometer-encoded into a 512-byte vector $\mathbf{q} \in \{0,\ldots,255\}^{512}$ (Section~\ref{sec:quantization}). The quantized embedding is hashed via Poseidon into a field element $h = \text{Poseidon}(\mathbf{q})$ and then committed using a Pedersen commitment $C = g^h \cdot h_r^s$ over BLS12-381, where $s$ is a 256-bit random salt. The commitment $C$ serves as the user's ``biometric public key'' --- stored by the verifier but cryptographically hiding the underlying biometric data.
 
 \subsection{Authentication}
 
@@ -78,32 +78,33 @@ The core ZK circuit proves that a fresh biometric capture matches an enrolled te
 \subsection{Embedding Quantization}
 \label{sec:quantization}
 
-Face embeddings from neural feature extractors are 1024-dimensional vectors of 64-bit floats, normalized to $[-1, 1]$. We quantize each component to an unsigned 8-bit integer:
+Face embeddings from neural feature extractors are 1024-dimensional vectors of 64-bit floats, reduced to a 512-component representation and normalized to $[-1, 1]$ for the matcher. We quantize each component to an unsigned 8-bit integer:
 \begin{equation}
 q_i = \text{clamp}\!\left(\left\lfloor (e_i + 1.0) \times 127.5 \right\rfloor, 0, 255\right)
 \label{eq:quantize}
 \end{equation}
-This maps $-1.0 \mapsto 0$, $0.0 \mapsto 127$, $1.0 \mapsto 255$, with a maximum per-dimension quantization error of $1/256 \approx 0.004$. The resulting 1024-byte vector is suitable for efficient circuit operations while preserving sufficient discriminative power for biometric matching.
+This linear map to 256 levels is the \emph{binary} baseline encoding. The deployed matcher instead uses an ordinal \emph{thermometer} encoding of the same 8-bit-per-component budget (Section~\ref{sec:accuracy}): after a per-dimension prescale into $[-1,1]$, each component is quantized to one of nine levels and written as $k$ contiguous low bits, so that the Hamming distance between two codes equals the $L1$ distance between their quantization levels. Section~\ref{sec:accuracy} shows this ordinal encoding recovers accuracy the binary map discards, at no additional in-circuit cost. Either way the result is a 512-byte vector, which is bound by the Poseidon commitment (below) and matched by the Hamming-distance circuit.
 
 \subsection{Poseidon Commitment}
 
-The quantized embedding $\mathbf{q}$ is hashed using the Poseidon hash function~\cite{grassi2021}, which is designed for efficient evaluation inside arithmetic circuits. We use Poseidon with width $t = 9$, rate $r = 8$, $R_F = 8$ full rounds, and $R_P = 56$ partial rounds over the BN254 scalar field. The output field element $h = \text{Poseidon}(\mathbf{q})$ is then used in a Pedersen commitment $C = g^h \cdot h_r^s$ over BLS12-381.
+The quantized embedding $\mathbf{q}$ is hashed using the Poseidon hash function~\cite{grassi2021}, which is designed for efficient evaluation inside arithmetic circuits. We use Poseidon with width $t = 9$, rate $r = 8$, $R_F = 8$ full rounds, and $R_P = 56$ partial rounds over the BN254 scalar field. The output field element $h = \text{Poseidon}(\mathbf{q})$ is then used in a Pedersen commitment $C = g^h \cdot h_r^s$ over BLS12-381. The verification circuit additionally recomputes the commitment to the enrolled template in-circuit and exposes it as a public input, which the verifier checks against the value registered at enrollment. This binds the proof to the correct template: a prover cannot match against an embedding other than the one on file, even with an otherwise valid proof.
 
 \subsection{Hamming Distance Circuit}
 
-Rather than computing Euclidean distance (which requires expensive field multiplications), we measure similarity via Hamming distance over bit representations. Given the 1024-byte quantized embeddings $\mathbf{p}$ and $\mathbf{r}$, the circuit expands them to 8192 bits and computes:
+Rather than computing Euclidean distance (which requires expensive field multiplications), we measure similarity via Hamming distance over bit representations. Given the 512-byte encoded embeddings $\mathbf{p}$ and $\mathbf{r}$, the circuit expands them to 4096 bits and computes:
 \begin{equation}
-d_H(\mathbf{p}, \mathbf{r}) = \sum_{i=1}^{8192} (p_i \oplus r_i)
+d_H(\mathbf{p}, \mathbf{r}) = \sum_{i=1}^{4096} (p_i \oplus r_i)
 \end{equation}
-The XOR and bit-count operations are implemented using lookup tables (with $2^{13}$ entries and $k=14$ lookup columns), making this far more efficient than field arithmetic over floating-point representations.
+Under the deployed thermometer encoding this Hamming distance equals the $L1$ distance between the two templates' per-component quantization levels (Section~\ref{sec:accuracy}); the circuit also constrains each byte to be a valid thermometer code, so this equivalence cannot be subverted.
+The XOR and bit-count operations are implemented over a lookup-table-backed bit decomposition ($2^{13}$-entry tables in a $k=16$ circuit), making this far more efficient than field arithmetic over floating-point representations. The distance is computed entirely in-circuit from the two embeddings rather than supplied as a trusted input, so the matched distance is bound to the committed template.
 
 \subsection{Threshold Check}
 
 The circuit enforces $d_H(\mathbf{p}, \mathbf{r}) \leq \tau$ where $\tau$ is a configurable threshold. The default configuration targets 50\% similarity, corresponding to a maximum Hamming distance of:
 \[
-\tau_{\text{default}} = 8192 \times (1 - 0.5) = 4096 \text{ bits}
+\tau_{\text{default}} = 4096 \times (1 - 0.5) = 2048 \text{ bits}
 \]
-The circuit performs the threshold comparison via 254-bit decomposition and range checks. Stricter (60\% similarity, $\tau = 3{,}276$) and relaxed (40\% similarity, $\tau = 4{,}915$) configurations are also supported.
+The circuit performs the threshold comparison via bit decomposition and range checks. Stricter (60\% similarity, $\tau = 1{,}638$) and relaxed (40\% similarity, $\tau = 2{,}458$) configurations are also supported; in practice $\tau$ should be calibrated from data at the desired operating point (Section~\ref{sec:accuracy}) rather than fixed a priori.
 
 \subsection{Circuit Parameters}
 
@@ -117,12 +118,12 @@ The complete face verification circuit uses Halo2 with the SHPLONK (SHared PLONK
 \toprule
 Parameter & Value \\
 \midrule
-Circuit rows ($2^k$) & $2^{14} = 16{,}384$ \\
+Circuit rows ($2^k$) & $2^{16} = 65{,}536$ \\
 Advice columns & 4 \\
 Lookup advice columns & 1 \\
 Fixed columns & 1 \\
 Lookup bits & 13 \\
-Public inputs & 4 (face, threshold, liveness, digest) \\
+Public inputs & 5 (face, threshold, liveness, digest, commitment) \\
 Polynomial commitment & KZG (SHPLONK) \\
 Transcript hash & Blake2b-256 \\
 Scalar field & BN254 ($\sim$254 bits) \\
@@ -218,8 +219,8 @@ We evaluate SABLE on an Apple M-series processor (ARM64) in release mode. Table~
 \toprule
 Operation & Target & Achieved \\
 \midrule
-Key generation + first proof & -- & ${\sim}900$\,ms \\
-Proof generation (face + liveness) & $\leq 1000$\,ms & ${\sim}250$\,ms \\
+Key generation + first proof (once) & -- & ${\sim}1.5$\,s \\
+Proof generation (face + liveness) & $\leq 1000$\,ms & ${\sim}1.0$\,s \\
 Verification & $\leq 50$\,ms & ${\sim}1.8$\,ms \\
 Proof size & $\leq 10$\,KB & 2.08\,KB \\
 Spatial flash challenge & -- & 3 rounds, ${\sim}1$\,s \\
@@ -227,11 +228,116 @@ Spatial flash challenge & -- & 3 rounds, ${\sim}1$\,s \\
 \end{tabular}
 \end{table}
 
-Key generation and proving-key setup (approximately 900\,ms) occur once and cache results, so subsequent proofs generate in approximately 250\,ms --- well within the 1-second target for interactive authentication. Verification completes in approximately 1.8\,ms, which is effectively instantaneous from a user perspective. The 2.08\,KB proof size is well-suited for transmission over constrained channels such as NFC or BLE.
+Proving and verifying keys are generated once from a precomputed structured reference string and cached; including the first proof this one-time step takes approximately 1.5\,s. Subsequent proofs generate in approximately 1 second, at the boundary of the interactive-authentication budget. This is larger than a threshold-only circuit because the matcher performs \emph{all} of the matching in-circuit: it computes the Hamming distance over the two 512-byte embeddings, binds the enrolled template to its Poseidon commitment, and constrains every byte to be a valid thermometer code (Section~\ref{sec:accuracy}), rather than accepting a precomputed distance as a trusted input. These additions raise the circuit from $2^{14}$ to $2^{16}$ rows but make the proof self-contained: a prover cannot assert an unverified distance or match against an unregistered template. Verification --- succinct and independent of circuit size --- completes in approximately 1.8\,ms, effectively instantaneous, and the 2.08\,KB proof size --- constant in the embedding dimension --- is well-suited for constrained channels such as NFC or BLE.
 
-The complete end-to-end authentication flow, including three rounds of spatial flash (approximately 1\,s), face capture, and proof generation, totals approximately 1.5--2 seconds, which is comparable to conventional smartphone biometric unlock systems.
+The complete end-to-end authentication flow, including three rounds of spatial flash (approximately 1\,s), face capture, and proof generation, totals approximately 2--3 seconds, comparable to conventional smartphone biometric unlock. All figures are measured on a desktop-class Apple M4 (release mode, multi-threaded); on-device mobile performance has not yet been characterized (Section~\ref{sec:conclusion}).
 
-The circuit uses $2^{14} = 16{,}384$ rows with 4 advice columns and KZG polynomial commitments. This represents a moderate circuit size by Halo2 standards, and performance benefits significantly from the lookup-table-based Hamming distance computation versus traditional field-arithmetic distance calculations.
+The circuit uses $2^{16} = 65{,}536$ rows with 4 advice columns and KZG polynomial commitments. Performance benefits significantly from the lookup-table-based bit decomposition and XOR/popcount computation versus traditional field-arithmetic distance calculations.
+
+%======================================================================
+\section{Recognition Accuracy and Matcher Encoding}
+\label{sec:accuracy}
+
+The bit-level Hamming matcher of Section~\ref{sec:face-verification} is efficient
+in-circuit, but under a \emph{binary} 8-bit quantization it discards ordinal
+structure: adjacent quantization levels $127$ ($\texttt{0111\,1111}$) and $128$
+($\texttt{1000\,0000}$) differ in all eight bits. We quantify this accuracy cost
+and evaluate the drop-in thermometer encoding that SABLE deploys to remove it.
+
+\subsection{Protocol}
+
+We extract embeddings with two backbones: the lightweight on-device model SABLE
+deploys ($1024$-d) and a strong reference model (ArcFace, $512$-d), and evaluate
+verification on LFW and on its harder cross-age (CALFW) and cross-pose (CPLFW)
+variants. Each embedding is mapped into $[-1,1]$ by a per-dimension prescale
+(each encoding is reported under its best prescale), then scored three ways:
+float cosine (the backbone ceiling), binary Hamming (Section~\ref{sec:face-verification}),
+and a \emph{thermometer} encoding at nine levels. A thermometer code at $L$
+levels represents level $k$ as $k$ ones followed by zeros, so the Hamming
+distance between two codes equals the $L1$ distance between their levels --- it
+restores ordinal structure. Crucially, $L=9$ uses $L-1=8$ bits per dimension,
+\emph{the same width as binary}, so it reuses the Hamming circuit of
+Section~\ref{sec:face-verification} unchanged: the XOR and popcount work is
+identical, and the only added constraint is a per-byte check that the code is a
+legal thermometer pattern, realizable as a nine-entry lookup at negligible cost.
+
+\subsection{Results}
+
+\input{papers/encoding_results.tex}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{papers/figs/encoding_eer.pdf}
+\caption{Verification EER by backbone and matcher encoding. Binary Hamming
+inflates EER for the lightweight backbone across all three datasets; thermometer
+L9 (same circuit cost) recovers most of the gap. A strong backbone is barely
+affected.}
+\label{fig:encoding-eer}
+\end{figure}
+
+Table~\ref{tab:encoding-ablation} and Figure~\ref{fig:encoding-eer} show a
+consistent, backbone-dependent effect. For the lightweight deployed model, whose
+embedding components cluster near the $127/128$ boundary, binary Hamming inflates
+EER by $3.3$--$4.3$ points on every dataset, and degrades the low-false-accept
+operating region most. The thermometer encoding recovers the large majority of
+this gap (e.g.\ $7.97\% \to 5.17\%$ on LFW, $23.24\% \to 19.07\%$ on CALFW) at no
+additional matching cost. For the strong backbone, whose embeddings are well
+spread, binary Hamming is nearly lossless ($+0.1$--$1.7$ points) and the encoding
+choice is immaterial. The practical implication is two independent levers: an
+ordinal in-circuit encoding, or a better-distributed embedding, each yields
+competitive accuracy under the ZK-friendly Hamming matcher.
+
+\textbf{Why tolerate a lossy matcher at all.} The bit-level Hamming matcher is
+not chosen for accuracy but for in-circuit cost: the distance reduces to a
+per-bit XOR and a population count (Section~\ref{sec:face-verification}), both
+lookup-friendly and reusing the same bit-decomposition machinery as the liveness
+sub-circuit, which keeps the entire statement a small, uniform, transparent-setup
+circuit. A Euclidean or cosine matcher proved in-circuit would instead demand
+per-dimension squaring or normalized dot products in fixed-point arithmetic,
+enlarging the circuit and complicating the liveness integration. The results
+above show that the usual price of this efficiency---the ordinal information that
+binary encoding discards---is \emph{not} intrinsic to the bit-level matcher: the
+thermometer encoding retains the identical XOR/popcount circuit (and the same
+$8$\,bits/dimension) yet recovers the large majority of the binary penalty. The
+bit-level matcher therefore need not be read as an accuracy-for-efficiency trade;
+with an ordinal code it is competitive with float cosine on the deployed backbone
+at no added in-circuit cost. SABLE adopts this thermometer encoding as its
+production matcher, with a stats-free $\tanh$ prescale as the zero-configuration
+default; the in-circuit matcher additionally constrains every byte to be a valid
+thermometer code, so the ordinal distance cannot be forged with a non-unary byte.
+
+This evaluation also motivates calibrating the decision threshold from data
+rather than the fixed $50\%$-similarity default of
+Section~\ref{sec:face-verification}; the equal-error operating points we measure
+sit between $56\%$ and $59\%$ similarity for the binary matcher. The prescale
+statistics and decision threshold are deployment-time calibration parameters
+(like the threshold $\tau$): a deployer fits them once on a representative set,
+analogous to a normalization layer's running statistics.
+
+\subsection{Caveats}
+
+These experiments use a sampled-pair protocol over publicly mirrored images
+rather than the official fold definitions, so absolute EERs are not directly
+comparable to the literature (and the lightweight backbone is far from
+state-of-the-art); the \emph{relative} gaps between encodings are the robust
+signal. The lightweight backbone additionally fails to detect many extreme-pose
+CPLFW faces, so its CPLFW figure is computed over a reduced, easier subset
+(reflected in the $N$ column of Table~\ref{tab:encoding-ablation}). A
+camera-ready evaluation should adopt the official verification protocols and add
+a dedicated presentation-attack study (Section~\ref{sec:liveness}) reporting
+APCER/BPCER.
+
+A further caveat concerns the prescale. The thermometer (and binary) results are
+reported under each encoding's best per-dimension prescale, and the $z$-score
+variant fits its mean/std on the evaluation set itself --- an unsupervised but
+\emph{transductive} normalization. A deployment cannot use evaluation-set
+statistics; it must freeze calibration constants ahead of time, so the reported
+$z$-score recovery is a mild upper bound on what a deployment with frozen
+constants would achieve. The production default avoids this dependency entirely
+by using the stats-free $\tanh$ prescale, whose recovery should be re-measured
+under the official protocol; the ordinal structure that drives the improvement is
+prescale-independent, so thermometer is expected to retain its advantage over
+binary regardless.
 
 %======================================================================
 \section{Security Analysis}
@@ -325,7 +431,7 @@ SABLE & 0.25\,s & 2.08\,KB & Halo2 \\
 \end{tabular}
 \end{table}
 
-Recent surveys identify computational complexity as a primary HE challenge: ``the computing time of some HE-based biometric systems could take more than 10\,s,'' and note that ``ciphertext size typically exceeds plaintext size, so encrypted biometric data impose substantial computational and storage overhead''~\cite{yang2023}. SABLE's 2.08\,KB proof is 8--250 times smaller than HE ciphertext templates, while 250\,ms proof generation is competitive with the fastest HE systems and additionally includes cryptographic proof of liveness.
+Recent surveys identify computational complexity as a primary HE challenge: ``the computing time of some HE-based biometric systems could take more than 10\,s,'' and note that ``ciphertext size typically exceeds plaintext size, so encrypted biometric data impose substantial computational and storage overhead''~\cite{yang2023}. SABLE's 2.08\,KB proof is 8--250 times smaller than HE ciphertext templates, while ${\sim}1$\,s proof generation is in the range of HE matching times and additionally performs the match in-circuit and includes a cryptographic proof of liveness.
 
 \subsection{Privacy Strength}
 
@@ -362,7 +468,7 @@ HE-based approaches retain advantages in specific scenarios that SABLE's archite
 \begin{itemize}
 \item \textbf{1:$N$ identification}: HE supports server-side search across encrypted templates to find matching identities. SABLE's ZK proofs are inherently 1:1; the prover must know which enrolled commitment to verify against. Supporting server-side 1:$N$ search over ZK commitments would require additional techniques such as private information retrieval.
 
-\item \textbf{Numerical precision}: The CKKS scheme natively supports approximate real arithmetic, preserving full embedding precision. SABLE's 8-bit quantization introduces maximum per-dimension error of approximately 0.004, which may affect decision boundaries at extreme similarity thresholds in specialized applications.
+\item \textbf{Numerical precision}: The CKKS scheme natively supports approximate real arithmetic, preserving full embedding precision. SABLE's ordinal quantization (nine thermometer levels per component) is coarser, which may affect decision boundaries at extreme similarity thresholds in specialized applications.
 
 \item \textbf{Server-side inference}: HE integrates naturally with neural network inference on encrypted data~\cite{wingarz2022,sun2022}, enabling privacy-preserving feature extraction server-side. SABLE requires feature extraction to occur on the user's device before quantization.
 \end{itemize}
@@ -409,13 +515,26 @@ Post-quantum & No\textsuperscript{$\|$} & No & No \\
 
 Neither BioZero nor ZABA integrates liveness detection. Adding liveness to BioZero requires modifying the circuit and rerunning the trusted setup; extending ZABA to liveness would require supporting non-algebraic operations (bit decomposition, channel ordering, conditionals) that Sigma protocols do not naturally express. SABLE's Halo2 circuits accommodate liveness for approximately 3,200 additional constraints within the same transparent-setup framework.
 
+\textbf{Recognition accuracy.} The privacy layer in HE, BioZero, and ZABA is
+\emph{accuracy-transparent}: encrypted (CKKS) or commitment-based matching
+evaluates the same real-valued or Euclidean distance as the plaintext backbone,
+so recognition accuracy is inherited unchanged. SABLE's bit-level matcher is the
+exception---its quantized Hamming distance is lossy---which is the cost of
+keeping matching inside a single transparent-setup circuit that also proves
+liveness. Section~\ref{sec:accuracy} shows this cost is largely recoverable in
+place: the thermometer encoding restores ordinal structure within the unchanged
+Hamming circuit, narrowing the gap to float cosine to within roughly one EER
+point on the deployed backbone at no added matching cost. SABLE thus approaches
+the accuracy-transparency of the algebraic-distance systems without adopting
+their per-circuit ceremony (BioZero) or online server (ZABA).
+
 In summary, HE and ZK proofs represent complementary privacy approaches. HE suits scenarios requiring server-side encrypted computation, while ZK suits client-side verification where biometric data must never leave the user's device. Among ZK systems, SABLE's distinguishing features are transparent setup, succinct proofs, integrated liveness, and offline operation. The primary limitation is the lack of 1:$N$ identification, where HE and BioZero have structural advantages for database search scenarios.
 
 %======================================================================
 \section{Conclusion}
 \label{sec:conclusion}
 
-We have presented SABLE, a privacy-preserving biometric authentication system combining Halo2 zero-knowledge proofs, Pedersen commitments, Poseidon hashing, and spatial flash liveness detection into a cohesive, offline-capable architecture. SABLE generates combined face-match and liveness proofs in approximately 250\,ms with 2.08\,KB proof size, operates fully peer-to-peer without internet or specialized hardware, and supports selective attribute disclosure via BBS+ signatures. The spatial flash protocol resists photo and video replay attacks through 3D geometry differentiation, while the commit-reveal nonce scheme cryptographically prevents pattern prediction and manipulation.
+We have presented SABLE, a privacy-preserving biometric authentication system combining Halo2 zero-knowledge proofs, Pedersen commitments, Poseidon hashing, and spatial flash liveness detection into a cohesive, offline-capable architecture. SABLE generates combined face-match and liveness proofs --- computing the match, template-commitment binding, and liveness check entirely in-circuit --- in approximately 1 second with 2.08\,KB proof size, operates fully peer-to-peer without internet or specialized hardware, and supports selective attribute disclosure via BBS+ signatures. The spatial flash protocol resists photo and video replay attacks through 3D geometry differentiation, while the commit-reveal nonce scheme cryptographically prevents pattern prediction and manipulation.
 
 SABLE is released as open-source under the Apache 2.0 license. Future directions include post-quantum cryptographic migration, formal circuit constraint verification, multi-spectral liveness detection, and comprehensive real-device validation across diverse hardware and lighting environments.
 
