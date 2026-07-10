@@ -76,6 +76,7 @@ pub mod liveness;
 pub mod poseidon;
 pub mod proof;
 pub mod quantizer;
+pub mod thermometer;
 pub mod threshold;
 pub mod threshold_check;
 
@@ -84,9 +85,10 @@ mod tests;
 
 pub use hamming::{HammingDistanceCircuit, hamming_distance, hamming_similarity, MAX_EMBEDDING_DIM};
 pub use hello::HelloCircuit;
-pub use poseidon::{PoseidonCircuit, poseidon_hash_pair};
+pub use poseidon::{PoseidonCircuit, poseidon_hash_pair, poseidon_commit_bytes_value};
 pub use proof::{FaceVerificationProver, FaceVerificationVerifier, Proof, ProofSetup, VerificationDetails};
 pub use quantizer::{FeatureQuantizer, QuantizedEmbedding, FACE_EMBEDDING_DIM};
+pub use thermometer::{ThermometerHammingCircuit, encode as thermometer_encode, prescale_tanh as thermometer_prescale_tanh, level_to_byte, byte_to_level, is_valid_thermometer_byte, LEVELS as THERMOMETER_LEVELS};
 pub use threshold::{ThresholdConfig, VerificationResult, precomputed};
 pub use threshold_check::{ThresholdCheckCircuit, FaceVerificationCircuit};
 pub use liveness::{LivenessCheckCircuit, LivenessWitness, LivenessResult, challenge_digest};

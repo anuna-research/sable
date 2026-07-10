@@ -22,13 +22,20 @@
 use halo2_base::gates::circuit::builder::BaseCircuitBuilder;
 use halo2_base::gates::circuit::BaseCircuitParams;
 use halo2_base::gates::GateChip;
+use halo2_base::gates::GateInstructions;
 use halo2_base::halo2_proofs::dev::MockProver;
 use halo2_base::halo2_proofs::halo2curves::bn256::Fr;
 use halo2_base::poseidon::hasher::PoseidonHasher;
 use halo2_base::poseidon::hasher::spec::OptimizedPoseidonSpec;
 use halo2_base::AssignedValue;
+use halo2_base::Context;
+use halo2_base::QuantumCell;
 
 use crate::error::{Result, SableError};
+
+/// Bytes packed per field element when hashing a byte vector. 31 bytes = 248
+/// bits stays safely below the ~254-bit BN256 scalar field modulus.
+pub const BYTES_PER_FE: usize = 31;
 
 /// Poseidon parameters: width = 3, rate = 2
 const T: usize = 3;
@@ -151,6 +158,67 @@ pub fn poseidon_hash_pair(
     hasher.initialize_consts(ctx, &gate);
 
     hasher.hash_fix_len_array(ctx, &gate, &[a, b])
+}
+
+/// Pack a slice of byte-valued cells into field elements (`BYTES_PER_FE` bytes
+/// each, little-endian) and Poseidon-hash the packed array into a single
+/// commitment cell.
+///
+/// Used to bind the in-circuit enrolled embedding to a registered commitment:
+/// the prover proves `Poseidon(pack(embedding)) == registered_hash` without
+/// revealing the embedding. Must mirror [`poseidon_commit_bytes_native`] exactly.
+pub(crate) fn poseidon_commit_bytes(
+    ctx: &mut Context<Fr>,
+    gate: &GateChip<Fr>,
+    byte_cells: &[AssignedValue<Fr>],
+) -> AssignedValue<Fr> {
+    let mut packed: Vec<AssignedValue<Fr>> = Vec::with_capacity(byte_cells.len().div_ceil(BYTES_PER_FE));
+    for chunk in byte_cells.chunks(BYTES_PER_FE) {
+        // fe = sum_i chunk[i] * 256^i
+        let mut pow = Fr::from(1u64);
+        let coeffs: Vec<QuantumCell<Fr>> = chunk
+            .iter()
+            .map(|_| {
+                let c = QuantumCell::Constant(pow);
+                pow *= Fr::from(256u64);
+                c
+            })
+            .collect();
+        let fe = gate.inner_product(ctx, chunk.iter().copied(), coeffs);
+        packed.push(fe);
+    }
+
+    let spec = OptimizedPoseidonSpec::<Fr, T, RATE>::new::<R_F, R_P, 0>();
+    let mut hasher = PoseidonHasher::<Fr, T, RATE>::new(spec);
+    hasher.initialize_consts(ctx, gate);
+    hasher.hash_fix_len_array(ctx, gate, &packed)
+}
+
+/// Native counterpart of [`poseidon_commit_bytes`]: returns the same commitment
+/// value, computed by evaluating the identical circuit code in witness-generation
+/// mode (no proving). Because it runs the very same gates, the value is
+/// guaranteed to equal what the in-circuit binding recomputes -- no risk of a
+/// hand-rolled native Poseidon diverging from halo2-base's sponge.
+///
+/// Used at enrollment to register the commitment the ZK proof will later bind to.
+pub fn poseidon_commit_bytes_value(bytes: &[u8]) -> Fr {
+    let params = BaseCircuitParams {
+        k: K as usize,
+        num_advice_per_phase: vec![NUM_ADVICE],
+        num_lookup_advice_per_phase: vec![NUM_LOOKUP_ADVICE],
+        num_fixed: NUM_FIXED,
+        lookup_bits: Some(LOOKUP_BITS),
+        num_instance_columns: 1,
+    };
+    let mut builder = BaseCircuitBuilder::<Fr>::new(false).use_params(params);
+    let ctx = builder.main(0);
+    let gate = GateChip::<Fr>::default();
+    let cells: Vec<AssignedValue<Fr>> = bytes
+        .iter()
+        .map(|&b| ctx.load_witness(Fr::from(b as u64)))
+        .collect();
+    let hash = poseidon_commit_bytes(ctx, &gate, &cells);
+    *hash.value()
 }
 
 #[cfg(test)]
