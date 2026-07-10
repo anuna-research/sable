@@ -1,0 +1,13 @@
+# Core harness (benchmark.py, metrics.py, datasets.py, sable_quant.py)
+numpy>=1.24
+
+# Optional: only needed for extract_embeddings.py (fast first-look backbones).
+# Export embeddings from the deployed Human library for the real number.
+#
+# facenet backend:
+#   pip install facenet-pytorch torch pillow
+# insightface backend:
+#   pip install insightface onnxruntime opencv-python
+#
+# Optional: test runner
+#   pip install pytest

@@ -24,6 +24,13 @@ Thumbs.db
 # Benchmark outputs
 criterion/
 
+# Accuracy bench: raw dataset/embedding exports (hundreds of MB, regenerable)
+bench/accuracy/human_export/
+__pycache__/
+
+# Claude Code local settings
+.claude/settings.local.json
+
 # Node.js
 node_modules/
 
