@@ -1,0 +1,209 @@
+; SABLE Codebase Audit — Improvement Execution Plan
+; Implements findings from SPEC-004-sable-audit.md
+;
+; Priority order:
+;   P0 (Critical): Error sanitization, FFI safety
+;   P1 (High):     CI/CD, deprecate Groth16, fuzz targets
+;   P2 (Medium):   Doc fixes, session TTL, no_std, GF256 doc
+;
+; Reference: specs/SPEC-004-sable-audit.md
+
+; =============================================================================
+; AGENTS
+; =============================================================================
+
+(given agent-claude-available)
+
+; =============================================================================
+; PHASE 1: P0 CRITICAL FIXES
+; Goal: Eliminate security-impacting issues in demo server and FFI layer
+; =============================================================================
+
+(given task-sanitize-errors)
+(meta task-sanitize-errors
+  (title "REQ-102: Sanitize Demo Server Error Responses")
+  (description "Replace all format!('...failed: {}', e) patterns in demo/server/src/handlers.rs with SableError::to_public_error() calls. Log internal errors via tracing::error! for debugging. HTTP responses must contain only generic error codes (1001/1002/1003). See OBS-001 in SPEC-004.")
+  (phase "phase-1-critical")
+  (priority "P0")
+  (estimate "2h")
+  (file "demo/server/src/handlers.rs"))
+
+(given task-ffi-null-safety)
+(meta task-ffi-null-safety
+  (title "REQ-103: Add FFI Null-Safety Guards")
+  (description "Add null checks to all public C-ABI functions in core/src/mobile/ffi.rs before raw pointer dereference. Return error codes immediately on null input. Current unsafe dereference at line 163: 'let sable = unsafe { &*handle };' must be guarded. See OBS-004 in SPEC-004.")
+  (phase "phase-1-critical")
+  (priority "P0")
+  (estimate "1h")
+  (file "core/src/mobile/ffi.rs"))
+
+; Phase 1 has no cross-dependencies
+(given no-deps-sanitize-errors)
+(given no-deps-ffi-null-safety)
+
+; =============================================================================
+; PHASE 2: P1 HIGH-PRIORITY IMPROVEMENTS
+; Goal: CI/CD, clean up proof system, add fuzz coverage
+; =============================================================================
+
+(given task-ci-pipeline)
+(meta task-ci-pipeline
+  (title "REQ-101: Implement CI/CD Pipeline")
+  (description "Create Forgejo CI / GitHub Actions workflow with three jobs: (1) lint: cargo fmt --check + cargo clippy --all-features -- -D warnings, (2) test: cargo test --features halo2 -p sable-core --lib --test integration, (3) build-demo: cargo build -p demo-server --release. Use cargo cache for halo2 build speedup. Target ≤15min total. See OBS-005 and NFR-101 in SPEC-004.")
+  (phase "phase-2-high")
+  (priority "P1")
+  (estimate "4h")
+  (file ".forgejo/workflows/ci.yml"))
+
+(given task-deprecate-groth16)
+(meta task-deprecate-groth16
+  (title "REQ-104: Deprecate Groth16 Behind Feature Flag")
+  (description "Gate the Groth16 implementation (core/src/crypto/groth16.rs) and all 6 ark-* dependencies behind a new 'legacy-groth16' feature flag, OFF by default. The 'zk' feature should no longer imply Groth16. Update 'mobile' feature to not depend on 'zk'. Ensure 'cargo build' and 'cargo build --features halo2' work without ark-groth16. See OBS-006 and ADR-004 in SPEC-004.")
+  (phase "phase-2-high")
+  (priority "P1")
+  (estimate "3h")
+  (files "core/Cargo.toml core/src/crypto/groth16.rs core/src/crypto/mod.rs"))
+
+(given task-fuzz-halo2)
+(meta task-fuzz-halo2
+  (title "REQ-105: Add Halo2 and Fuzzy Commitment Fuzz Targets")
+  (description "Create fuzz/fuzz_targets/fuzz_halo2_proof.rs targeting FaceVerificationProver::prove() with random hamming distances and thresholds. Create fuzz/fuzz_targets/fuzz_fuzzy_commitment.rs targeting gen() and rep() with random biometric vectors. Both must run for 60s without crashes. See OBS-011 and NFR-103 in SPEC-004.")
+  (phase "phase-2-high")
+  (priority "P1")
+  (estimate "3h")
+  (files "fuzz/fuzz_targets/fuzz_halo2_proof.rs fuzz/fuzz_targets/fuzz_fuzzy_commitment.rs fuzz/Cargo.toml"))
+
+; Phase 2 depends on Phase 1 being complete
+(given deps-ci-on-phase1)
+(given no-deps-deprecate-groth16)
+(given no-deps-fuzz-halo2)
+
+; =============================================================================
+; PHASE 3: P2 MEDIUM-PRIORITY IMPROVEMENTS
+; Goal: Documentation accuracy, operational hygiene, correctness fixes
+; =============================================================================
+
+(given task-fix-docs)
+(meta task-fix-docs
+  (title "REQ-106: Fix Documentation Inconsistencies")
+  (description "Update README.md badge counts and body text to match actual test output. Update IMPLEMENTATION_STATUS.md test counts. Update sable-presentation.md to reference Halo2 instead of Groth16 with current performance numbers. See OBS-007 and OBS-013 in SPEC-004.")
+  (phase "phase-3-medium")
+  (priority "P2")
+  (estimate "1h")
+  (files "README.md IMPLEMENTATION_STATUS.md sable-presentation.md"))
+
+(given task-session-ttl)
+(meta task-session-ttl
+  (title "REQ-107: Session TTL and Garbage Collection")
+  (description "Add configurable TTL to EnrollmentSession and AuthChallenge in demo/server/src/state.rs. Spawn a background tokio task that runs every 60s to evict expired sessions (default TTL: 1 hour for sessions, 30s for challenges — challenges already check but aren't cleaned up). See OBS-018 and NFR-102 in SPEC-004.")
+  (phase "phase-3-medium")
+  (priority "P2")
+  (estimate "2h")
+  (files "demo/server/src/state.rs demo/server/src/main.rs"))
+
+(given task-fix-gf256-doc)
+(meta task-fix-gf256-doc
+  (title "REQ-108: Fix GF(256) Documentation Inconsistency")
+  (description "Update the module-level doc comment in core/src/crypto/gf256.rs from 'AES irreducible polynomial: x^8 + x^4 + x^3 + x + 1 (0x11B)' to the correct 'irreducible polynomial: x^8 + x^4 + x^3 + x^2 + 1 (0x11D) with primitive element α = 0x02'. See OBS-019 in SPEC-004.")
+  (phase "phase-3-medium")
+  (priority "P2")
+  (estimate "15m")
+  (file "core/src/crypto/gf256.rs"))
+
+(given task-nostd-check)
+(meta task-nostd-check
+  (title "REQ-109: Add no_std Compilation Check")
+  (description "Add a CI step or build script that verifies sable-core compiles with --no-default-features. If Halo2 deps require std, gate them properly. Document which features are no_std compatible. See OBS-015 in SPEC-004.")
+  (phase "phase-3-medium")
+  (priority "P2")
+  (estimate "2h")
+  (file "core/Cargo.toml"))
+
+; Phase 3 dependencies
+(given no-deps-fix-gf256-doc)
+(given deps-fix-docs-on-deprecate-groth16)
+(given no-deps-session-ttl)
+(given no-deps-nostd-check)
+
+; =============================================================================
+; READINESS RULES
+; =============================================================================
+
+; Phase 1 tasks are immediately ready (no dependencies)
+(normally r-ready-sanitize-errors
+  (and task-sanitize-errors no-deps-sanitize-errors)
+  ready-sanitize-errors)
+
+(normally r-ready-ffi-null-safety
+  (and task-ffi-null-safety no-deps-ffi-null-safety)
+  ready-ffi-null-safety)
+
+; Phase 2 tasks
+(normally r-ready-ci-pipeline
+  (and task-ci-pipeline completed-sanitize-errors completed-ffi-null-safety)
+  ready-ci-pipeline)
+
+(normally r-ready-deprecate-groth16
+  (and task-deprecate-groth16 no-deps-deprecate-groth16)
+  ready-deprecate-groth16)
+
+(normally r-ready-fuzz-halo2
+  (and task-fuzz-halo2 no-deps-fuzz-halo2)
+  ready-fuzz-halo2)
+
+; Phase 3 tasks
+(normally r-ready-fix-docs
+  (and task-fix-docs completed-deprecate-groth16)
+  ready-fix-docs)
+
+(normally r-ready-session-ttl
+  (and task-session-ttl no-deps-session-ttl)
+  ready-session-ttl)
+
+(normally r-ready-fix-gf256-doc
+  (and task-fix-gf256-doc no-deps-fix-gf256-doc)
+  ready-fix-gf256-doc)
+
+(normally r-ready-nostd-check
+  (and task-nostd-check no-deps-nostd-check)
+  ready-nostd-check)
+
+; =============================================================================
+; ASSIGNMENT RULES
+; =============================================================================
+
+(normally r-assign-sanitize-errors
+  (and ready-sanitize-errors agent-claude-available)
+  assign-to-sanitize-errors-claude)
+
+(normally r-assign-ffi-null-safety
+  (and ready-ffi-null-safety agent-claude-available)
+  assign-to-ffi-null-safety-claude)
+
+(normally r-assign-ci-pipeline
+  (and ready-ci-pipeline agent-claude-available)
+  assign-to-ci-pipeline-claude)
+
+(normally r-assign-deprecate-groth16
+  (and ready-deprecate-groth16 agent-claude-available)
+  assign-to-deprecate-groth16-claude)
+
+(normally r-assign-fuzz-halo2
+  (and ready-fuzz-halo2 agent-claude-available)
+  assign-to-fuzz-halo2-claude)
+
+(normally r-assign-fix-docs
+  (and ready-fix-docs agent-claude-available)
+  assign-to-fix-docs-claude)
+
+(normally r-assign-session-ttl
+  (and ready-session-ttl agent-claude-available)
+  assign-to-session-ttl-claude)
+
+(normally r-assign-fix-gf256-doc
+  (and ready-fix-gf256-doc agent-claude-available)
+  assign-to-fix-gf256-doc-claude)
+
+(normally r-assign-nostd-check
+  (and ready-nostd-check agent-claude-available)
+  assign-to-nostd-check-claude)

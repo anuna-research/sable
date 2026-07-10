@@ -1,0 +1,121 @@
+; SABLE In-Circuit Matcher + Thermometer Production Swap
+; Move biometric matching INTO the proven circuit, and ship the thermometer
+; (ordinal) encoding so the accuracy tax of binary Hamming is actually dropped.
+;
+; Motivation (see docs/sable-paper.tex Section "Recognition Accuracy and
+; Matcher Encoding", and core/src/zk/halo2/thermometer.rs):
+;
+;   1. SOUNDNESS GAP. The production prover proves only `distance <= threshold`.
+;      `build_combined_circuit` (core/src/zk/halo2/proof.rs:392) loads `distance`
+;      as a *trusted witness*; the Hamming distance is computed in the clear in
+;      demo/server/src/handlers.rs and is never bound to the committed template.
+;      A malicious prover can simply supply a small `distance`. The designed
+;      HammingDistanceCircuit / FaceVerificationCircuit exist but are NOT on the
+;      proving path.
+;
+;   2. UNCOLLECTED BENEFIT. Because matching is out-of-circuit, SABLE currently
+;      pays the binary-Hamming accuracy penalty WITHOUT collecting the cheap
+;      in-circuit-matcher benefit that justifies choosing Hamming at all.
+;
+;   3. PENALTY IS AVOIDABLE. Thermometer L9 keeps the identical XOR/popcount
+;      circuit (same 8 bits/dim, + a 9-entry validity lookup) yet recovers
+;      ~56-97% of the binary penalty. It is a prototype only
+;      (core/src/zk/halo2/thermometer.rs) and is not wired into production.
+;
+; Goal: distance is computed in-circuit from the committed bytes (closing the
+; soundness gap) AND the bytes are thermometer codes (collecting the accuracy
+; win), within the existing transparent-setup Halo2 circuit.
+
+; =============================================================================
+; PHASE 1: CLOSE THE SOUNDNESS GAP (matching in-circuit)
+; Goal: the proof binds the matched distance to the committed template.
+; =============================================================================
+
+(given task-distance-in-circuit)
+(meta task-distance-in-circuit
+  (title "Compute distance in-circuit")
+  (description "Replace the trusted `distance` witness in build_combined_circuit (proof.rs) by computing Hamming distance in-circuit from the two byte vectors via HammingDistanceCircuit/compute_xor_bits, feeding the result into the threshold comparison.")
+  (phase "phase-1-soundness")
+  (estimate "3h"))
+
+(given task-bind-commitment)
+(meta task-bind-commitment
+  (title "Bind matched bytes to the commitment")
+  (description "Constrain that the enrolled byte vector hashed/committed in-circuit (Poseidon/Pedersen) equals the registered commitment, so a prover cannot substitute a different template. Bind the live capture as a public/derived input as appropriate.")
+  (phase "phase-1-soundness")
+  (estimate "4h"))
+
+(given task-keygen-circuit-update)
+(meta task-keygen-circuit-update
+  (title "Update keygen dummy circuit")
+  (description "ensure_proving_key's dummy circuit (proof.rs) must match the new in-circuit-matcher structure exactly, or VK/PK will not match the real circuit.")
+  (phase "phase-1-soundness")
+  (estimate "1h"))
+
+; Phase 1 deps
+(given no-deps-distance-in-circuit)
+(if task-distance-in-circuit (then task-bind-commitment))
+(if task-distance-in-circuit (then task-keygen-circuit-update))
+
+; =============================================================================
+; PHASE 2: THERMOMETER PRODUCTION SWAP
+; Goal: production encodes with thermometer and the circuit enforces validity.
+; =============================================================================
+
+(given task-thermo-encode-handlers)
+(meta task-thermo-encode-handlers
+  (title "Swap quantizer -> thermometer in handlers")
+  (description "Replace FeatureQuantizer::quantize with thermometer::encode in demo/server/src/handlers.rs (enroll + verify paths). Apply the z-score prescale; store per-dimension mean/std calibration stats at enrollment so verify uses identical stats.")
+  (phase "phase-2-thermo")
+  (estimate "3h"))
+
+(given task-thermo-validity-circuit)
+(meta task-thermo-validity-circuit
+  (title "Enforce thermometer validity in-circuit")
+  (description "Wire ThermometerHammingCircuit::enforce_thermometer (contiguous-from-LSB check) into the in-circuit matcher so a prover cannot fake an ordinal distance with a non-unary byte. Realizable as a 9-entry lookup.")
+  (phase "phase-2-thermo")
+  (estimate "2h"))
+
+(given task-recalibrate-threshold)
+(meta task-recalibrate-threshold
+  (title "Recalibrate decision threshold from data")
+  (description "The binary EER operating points sit at ~56-59% similarity (paper Section accuracy). Recompute the threshold for the thermometer/L1 distance scale from bench/accuracy data and update ThresholdConfig defaults.")
+  (phase "phase-2-thermo")
+  (estimate "2h"))
+
+; Phase 2 deps (matching must be in-circuit before validity enforcement matters)
+(if task-distance-in-circuit (then task-thermo-validity-circuit))
+(if task-thermo-encode-handlers (then task-thermo-validity-circuit))
+
+; =============================================================================
+; PHASE 3: VALIDATION + DOC SYNC
+; Goal: confirm cost/accuracy and keep the paper numbers honest.
+; =============================================================================
+
+(given task-rebench-circuit)
+(meta task-rebench-circuit
+  (title "Re-benchmark circuit size + prove/verify")
+  (description "Measure k, advice cells, prove time, verify time, and proof size after matching moved in-circuit (it will grow vs the threshold-only circuit). Compare against the paper's current 250ms/1.8ms/2.08KB profile.")
+  (phase "phase-3-validate")
+  (estimate "2h"))
+
+(given task-update-paper-perf)
+(meta task-update-paper-perf
+  (title "Update paper performance + claims")
+  (description "If the in-circuit matcher changes the performance profile, update Table tab:performance and the comparison sections. Update the matcher description so it reflects that distance is proved in-circuit (not a trusted input).")
+  (phase "phase-3-validate")
+  (estimate "1h"))
+
+(given task-regression-tests)
+(meta task-regression-tests
+  (title "Soundness + accuracy regression tests")
+  (description "Add tests: (a) a forged small `distance` no longer verifies; (b) a substituted template fails the commitment binding; (c) a non-unary thermometer byte fails validity; (d) end-to-end thermometer enroll/verify matches expected EER on a fixture set.")
+  (phase "phase-3-validate")
+  (estimate "3h"))
+
+; Phase 3 deps
+(if task-distance-in-circuit (then task-rebench-circuit))
+(if task-thermo-validity-circuit (then task-rebench-circuit))
+(if task-rebench-circuit (then task-update-paper-perf))
+(if task-bind-commitment (then task-regression-tests))
+(if task-thermo-validity-circuit (then task-regression-tests))

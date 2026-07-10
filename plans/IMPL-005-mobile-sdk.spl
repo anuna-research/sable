@@ -1,0 +1,691 @@
+;; Plan metadata
+(meta plan
+  (id "SPEC-005")
+  (title "SABLE Expo Mobile SDK")
+  (version "1.0.0")
+  (status "active")
+  (created "2026-03-13")
+  (author "agent:architect")
+  (spec "SPEC-005")
+  (description "Implement expo-sable: an Expo Module exposing SABLE ZK proof primitives (commitment, proof gen/verify, fuzzy commitment) to React Native apps via native FFI"))
+
+;; Agents
+(given agent-rust-engineer-available)
+(given agent-ios-engineer-available)
+(given agent-android-engineer-available)
+(given agent-ts-engineer-available)
+(given agent-qa-engineer-available)
+
+;; ─── Tasks ───────────────────────────────────────────────────────────────────
+
+;; Phase 1: Rust FFI layer
+
+(given task-rust-ffi-exports)
+(given no-deps-rust-ffi-exports)
+
+(given task-rust-cross-compile)
+(given no-deps-rust-cross-compile)
+
+;; Phase 2: iOS native module
+
+(given task-ios-module)
+
+;; Phase 3: Android native module
+
+(given task-android-module)
+
+;; Phase 4: TypeScript API layer
+
+(given task-ts-api)
+
+;; Phase 5: Integration & Build
+
+(given task-build-script)
+(given task-expo-module-config)
+
+;; Phase 6: Correctness Tests
+
+(given task-test-init)
+(given task-test-salt)
+(given task-test-commitment)
+(given task-test-proof-gen)
+(given task-test-proof-verify)
+(given task-test-fuzzy-enroll)
+(given task-test-fuzzy-verify)
+(given task-test-error-sanitization)
+(given task-test-memory-safety)
+(given task-test-zeroization)
+
+;; Phase 7: Performance & Platform Tests
+
+(given task-test-perf-proof-gen)
+(given task-test-perf-verify)
+(given task-test-proof-size)
+(given task-test-binary-size)
+(given task-test-memory-consumption)
+(given task-test-platform-compat)
+(given task-test-thread-safety)
+(given task-test-offline)
+
+;; Phase 8: Demo app
+
+(given task-demo-mobile-app)
+
+;; ─── Task Metadata ────────────────────────────────────────────────────────────
+
+(meta task-rust-ffi-exports
+  (description "Add or verify C-ABI FFI exports in sable-core for all module functions: generateSalt, generateCommitment, generateProof, verifyProof, fuzzyEnroll, fuzzyVerify, and error-code mapping. Ensure zeroization on sensitive types.")
+  (acceptance "All seven FFI functions exported with correct signatures; SableErrorCode enum exposed; ZeroizeOnDrop confirmed on Salt and feature vector types; compiles for iOS (aarch64-apple-ios) and Android (aarch64-linux-android) targets")
+  (context-files "core/src/ffi.rs" "core/src/zk/halo2/proof.rs" "core/src/crypto/fuzzy_commitment.rs")
+  (evaluate-checks "test:rustup run nightly cargo test --features halo2,mobile -p sable-core"))
+
+(meta task-rust-cross-compile
+  (description "Configure cross-compilation of sable-core to all required targets: aarch64-apple-ios, x86_64-apple-ios, aarch64-apple-ios-sim, aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android. Produce staticlib (iOS) and cdylib (Android). Apply LTO and symbol stripping.")
+  (acceptance "cargo build --release succeeds for all six targets; stripped .a ≤ 15MB per iOS arch; stripped .so ≤ 15MB per Android arch")
+  (context-files "Cargo.toml" "rust-toolchain.toml" "platform/expo/scripts/build-rust.sh"))
+
+(meta task-ios-module
+  (description "Implement SableModule.swift using Expo Modules API. Expose initialize, isReady, generateSalt, generateCommitment, generateProof, verifyProof, fuzzyEnroll, fuzzyVerify as AsyncFunction methods. Dispatch proof generation and verification to background DispatchQueue. Map Rust FFI error codes to SableError. Validate all inputs before FFI calls. Zeroize sensitive data after use.")
+  (acceptance "All seven functions callable from JS on iOS simulator and device; background thread dispatch confirmed; null/invalid inputs return InvalidInput SableError; no raw pointers exposed to JS; Memory Instruments shows no leaks over 100 proof cycles")
+  (context-files "platform/expo/ios/SableModule.swift" "platform/expo/ios/SableModule.podspec"))
+
+(meta task-android-module
+  (description "Implement SableModule.kt using Expo Modules API. Expose the same seven functions via AsyncFunction. Dispatch proof generation and verification to Kotlin coroutine on Dispatchers.Default. Load libsable_core.so via JNI. Map Rust error codes to SableError. Validate inputs before JNI calls. Zeroize sensitive data after use.")
+  (acceptance "All seven functions callable from JS on Android emulator (API 24+) and device (API 34, arm64); JNI linkage confirmed; background dispatch confirmed; null/invalid inputs return InvalidInput SableError")
+  (context-files "platform/expo/android/src/main/java/expo/modules/sable/SableModule.kt" "platform/expo/android/build.gradle"))
+
+(meta task-ts-api
+  (description "Implement the public TypeScript API for expo-sable: Sable.types.ts (ProofOptions, ProofResult, VerifyResult, FuzzyEnrollOptions, FuzzyEnrollResult, SableErrorCode, SableError), SableModule.ts (NativeModule binding), and index.ts (public exports). All functions return Promise. Type all inputs and outputs as specified in CON-001 through CON-008.")
+  (acceptance "TypeScript compiles with strict mode; all exported types match contract specifications; SableError extends Error with code property; index.ts re-exports everything; tsd or similar type tests pass")
+  (context-files "platform/expo/src/index.ts" "platform/expo/src/Sable.types.ts" "platform/expo/src/SableModule.ts"))
+
+(meta task-build-script
+  (description "Write platform/expo/scripts/build-rust.sh that cross-compiles sable-core for all six targets, produces the XCFramework (iOS) and per-ABI .so files (Android), and copies artifacts to the correct locations for CocoaPods and Gradle pickup.")
+  (acceptance "Script runs end-to-end on CI (macOS host); produces libsable_core.xcframework and libsable_core_{arm64,armv7,x86_64}.so; artifacts are ≤ size budget per NFR-004")
+  (context-files "platform/expo/scripts/build-rust.sh"))
+
+(meta task-expo-module-config
+  (description "Create expo-module.config.json, package.json, podspec, and build.gradle for the expo-sable package. Configure Expo Modules API linking. Set deployment targets: iOS 13.0, Android minSdk 24. Declare the package for npx expo install auto-linking.")
+  (acceptance "expo prebuild succeeds on a fresh Expo app; expo-sable appears in ios/Podfile and android/settings.gradle automatically; package.json has correct peerDependencies on expo-modules-core and react-native")
+  (context-files "platform/expo/expo-module.config.json" "platform/expo/package.json" "platform/expo/ios/SableModule.podspec" "platform/expo/android/build.gradle"))
+
+(meta task-test-init
+  (description "TEST-001: Verify initialize() resolves on first call; verify idempotency (second call resolves immediately); verify isReady() returns false before init and true after.")
+  (acceptance "All three assertions pass on iOS and Android")
+  (evaluate-checks "test:jest --testPathPattern=init"))
+
+(meta task-test-salt
+  (description "TEST-002: Verify generateSalt() returns exactly 32 bytes; two sequential calls produce different salts; bytes are not all zeros.")
+  (acceptance "All three assertions pass")
+  (evaluate-checks "test:jest --testPathPattern=salt"))
+
+(meta task-test-commitment
+  (description "TEST-003: Verify generateCommitment() returns 48 bytes; determinism (same inputs → same output); different features → different commitment; different salt → different commitment; InvalidInput for empty, >512 features, salt.length≠32, NaN/Infinity in features.")
+  (acceptance "All assertions pass")
+  (evaluate-checks "test:jest --testPathPattern=commitment"))
+
+(meta task-test-proof-gen
+  (description "TEST-004: Verify generateProof() returns proofBytes ≤ 10KB; durationMs > 0; does not block JS thread (frame drops < 2 during generation); InvalidInput for mismatched commitment length and invalid threshold.")
+  (acceptance "All assertions pass; JS thread frame time < 16ms during proof generation")
+  (evaluate-checks "test:jest --testPathPattern=proof-gen"))
+
+(meta task-test-proof-verify
+  (description "TEST-005: Verify verifyProof() returns true for matching proof; false for distant features; false (not error) for tampered proofBytes; false or ProcessingFailed for random bytes; false for threshold mismatch.")
+  (acceptance "All five cases pass")
+  (evaluate-checks "test:jest --testPathPattern=proof-verify"))
+
+(meta task-test-fuzzy-enroll
+  (description "TEST-006: Verify fuzzyEnroll() returns 32-byte commitment and non-empty helperData; same features with default tolerance are consistent; InvalidInput for features.length≠512; InvalidInput for errorTolerance=0 or 128.")
+  (acceptance "All assertions pass")
+  (evaluate-checks "test:jest --testPathPattern=fuzzy-enroll"))
+
+(meta task-test-fuzzy-verify
+  (description "TEST-007: Verify fuzzyVerify() returns true for identical features; true for features differing in ≤ 2*t positions; false for > 2*t differences; ProcessingFailed for corrupted helperData.")
+  (acceptance "All four cases pass")
+  (evaluate-checks "test:jest --testPathPattern=fuzzy-verify"))
+
+(meta task-test-error-sanitization
+  (description "TEST-008: Verify no error message contains file paths, function names, or stack traces; all errors are SableError with valid SableErrorCode; messages are human-readable but generic.")
+  (acceptance "Regex scan of all error messages passes; SableError instanceof check passes for all error paths")
+  (evaluate-checks "test:jest --testPathPattern=error-sanitization"))
+
+(meta task-test-memory-safety
+  (description "TEST-009: Verify no memory leaks over 1000 sequential commitment+proof cycles (RSS delta < 5MB); null/undefined inputs produce InvalidInput not crash; oversized arrays do not cause buffer overflow.")
+  (acceptance "All three assertions pass on iOS and Android")
+  (evaluate-checks "test:jest --testPathPattern=memory-safety"))
+
+(meta task-test-zeroization
+  (description "TEST-010: Verify via native instrumentation (Instruments / Android Memory Profiler) that salt memory is zeroed after FFI call completes; feature vector memory is not retained in native heap after call.")
+  (acceptance "Memory inspection confirms zero bytes at salt allocation site post-call; no retained feature vector allocation detected")
+  (evaluate-checks "test:jest --testPathPattern=zeroization"))
+
+(meta task-test-perf-proof-gen
+  (description "TEST-012: Benchmark proof generation p95 ≤ 3000ms over 100 invocations on minimum-floor device (iPhone 8 / Snapdragon 625 or simulator profile); p95 ≤ 1000ms on modern device (iPhone 12+ / Snapdragon 865+).")
+  (acceptance "Both p95 targets met; results logged with device_model and os_version labels")
+  (evaluate-checks "test:jest --testPathPattern=perf-proof-gen"))
+
+(meta task-test-perf-verify
+  (description "TEST-013: Benchmark verification p95 ≤ 100ms on minimum-floor device; p95 ≤ 50ms on modern device.")
+  (acceptance "Both p95 targets met")
+  (evaluate-checks "test:jest --testPathPattern=perf-verify"))
+
+(meta task-test-proof-size
+  (description "TEST-014: Assert proofBytes.length ≤ 10240 for all generated proofs.")
+  (acceptance "Assertion holds across 100 proof generation calls")
+  (evaluate-checks "test:jest --testPathPattern=proof-size"))
+
+(meta task-test-binary-size
+  (description "TEST-015: Measure stripped .a (iOS) and .so (Android) per architecture; assert each ≤ 15MB. Measure npm package tarball; assert ≤ 60MB.")
+  (acceptance "All size assertions pass after build-rust.sh produces release artifacts")
+  (evaluate-checks "test:bash platform/expo/scripts/check-binary-size.sh"))
+
+(meta task-test-memory-consumption
+  (description "TEST-016: Profile peak RSS during proof generation on minimum-floor device; assert peak RSS increase ≤ 128MB.")
+  (acceptance "RSS increase ≤ 128MB confirmed on iPhone 8 equivalent and low-end Android device")
+  (evaluate-checks "test:jest --testPathPattern=memory-consumption"))
+
+(meta task-test-platform-compat
+  (description "TEST-017: Build and run test suite on iOS 13 simulator (arm64), iOS 17 device (arm64), Android API 24 emulator (x86_64), Android API 34 device (arm64-v8a).")
+  (acceptance "All tests pass on all four targets; no platform-specific failures")
+  (evaluate-checks "test:jest --testPathPattern=platform-compat"))
+
+(meta task-test-thread-safety
+  (description "TEST-018: Call generateProof() and verifyProof() concurrently from JS; verify no crashes, deadlocks, or data corruption; verify JS thread remains responsive (< 16ms frame time).")
+  (acceptance "50 concurrent proof+verify pairs complete without error; JS frame time < 16ms throughout")
+  (evaluate-checks "test:jest --testPathPattern=thread-safety"))
+
+(meta task-test-offline
+  (description "TEST-019: Run full enrollment + authentication flow with network disabled (airplane mode / no network permission); verify all operations succeed; verify no DNS lookups or network socket creation.")
+  (acceptance "Full flow completes offline; network monitor shows zero outbound connections")
+  (evaluate-checks "test:jest --testPathPattern=offline"))
+
+(meta task-demo-mobile-app
+  (description "Create the demo/mobile/ Expo app that demonstrates the full enrollment and authentication flow using expo-sable. Provides a reference implementation for third-party developers.")
+  (acceptance "App runs on iOS and Android via expo prebuild; enrollment flow and authentication flow work end-to-end; README documents setup steps"))
+
+;; ─── Readiness Rules ─────────────────────────────────────────────────────────
+
+;; Phase 1: no deps
+(normally r-ready-rust-ffi-exports
+  (and task-rust-ffi-exports no-deps-rust-ffi-exports)
+  ready-rust-ffi-exports)
+
+(normally r-ready-rust-cross-compile
+  (and task-rust-cross-compile no-deps-rust-cross-compile)
+  ready-rust-cross-compile)
+
+;; Phase 2: iOS native module depends on Rust FFI exports and cross-compile
+(normally r-ready-ios-module
+  (and task-ios-module completed-rust-ffi-exports completed-rust-cross-compile)
+  ready-ios-module)
+
+;; Phase 3: Android native module depends on Rust FFI exports and cross-compile
+(normally r-ready-android-module
+  (and task-android-module completed-rust-ffi-exports completed-rust-cross-compile)
+  ready-android-module)
+
+;; Phase 4: TypeScript API depends on Rust FFI exports (for type knowledge)
+(normally r-ready-ts-api
+  (and task-ts-api completed-rust-ffi-exports)
+  ready-ts-api)
+
+;; Phase 5: Build script depends on cross-compile being configured
+(normally r-ready-build-script
+  (and task-build-script completed-rust-cross-compile)
+  ready-build-script)
+
+;; Expo module config depends on iOS module, Android module, and TS API
+(normally r-ready-expo-module-config
+  (and task-expo-module-config completed-ios-module completed-android-module completed-ts-api)
+  ready-expo-module-config)
+
+;; Phase 6: Correctness tests depend on full module integration
+(normally r-ready-test-init
+  (and task-test-init completed-expo-module-config)
+  ready-test-init)
+
+(normally r-ready-test-salt
+  (and task-test-salt completed-expo-module-config)
+  ready-test-salt)
+
+(normally r-ready-test-commitment
+  (and task-test-commitment completed-expo-module-config)
+  ready-test-commitment)
+
+(normally r-ready-test-proof-gen
+  (and task-test-proof-gen completed-expo-module-config)
+  ready-test-proof-gen)
+
+(normally r-ready-test-proof-verify
+  (and task-test-proof-verify completed-expo-module-config)
+  ready-test-proof-verify)
+
+(normally r-ready-test-fuzzy-enroll
+  (and task-test-fuzzy-enroll completed-expo-module-config)
+  ready-test-fuzzy-enroll)
+
+(normally r-ready-test-fuzzy-verify
+  (and task-test-fuzzy-verify completed-expo-module-config)
+  ready-test-fuzzy-verify)
+
+(normally r-ready-test-error-sanitization
+  (and task-test-error-sanitization completed-expo-module-config)
+  ready-test-error-sanitization)
+
+(normally r-ready-test-memory-safety
+  (and task-test-memory-safety completed-expo-module-config)
+  ready-test-memory-safety)
+
+(normally r-ready-test-zeroization
+  (and task-test-zeroization completed-expo-module-config)
+  ready-test-zeroization)
+
+;; Phase 7: Performance and platform tests depend on correctness tests passing
+(normally r-ready-test-perf-proof-gen
+  (and task-test-perf-proof-gen
+       completed-test-proof-gen
+       completed-test-proof-verify)
+  ready-test-perf-proof-gen)
+
+(normally r-ready-test-perf-verify
+  (and task-test-perf-verify
+       completed-test-proof-gen
+       completed-test-proof-verify)
+  ready-test-perf-verify)
+
+(normally r-ready-test-proof-size
+  (and task-test-proof-size completed-test-proof-gen)
+  ready-test-proof-size)
+
+(normally r-ready-test-binary-size
+  (and task-test-binary-size completed-build-script completed-expo-module-config)
+  ready-test-binary-size)
+
+(normally r-ready-test-memory-consumption
+  (and task-test-memory-consumption completed-test-memory-safety)
+  ready-test-memory-consumption)
+
+(normally r-ready-test-platform-compat
+  (and task-test-platform-compat
+       completed-test-init
+       completed-test-commitment
+       completed-test-proof-gen
+       completed-test-proof-verify
+       completed-test-fuzzy-enroll
+       completed-test-fuzzy-verify)
+  ready-test-platform-compat)
+
+(normally r-ready-test-thread-safety
+  (and task-test-thread-safety
+       completed-test-proof-gen
+       completed-test-proof-verify)
+  ready-test-thread-safety)
+
+(normally r-ready-test-offline
+  (and task-test-offline completed-expo-module-config)
+  ready-test-offline)
+
+;; Phase 8: Demo app depends on full module being ready and key correctness tests passing
+(normally r-ready-demo-mobile-app
+  (and task-demo-mobile-app
+       completed-expo-module-config
+       completed-test-init
+       completed-test-commitment
+       completed-test-proof-gen
+       completed-test-proof-verify
+       completed-test-fuzzy-enroll
+       completed-test-fuzzy-verify)
+  ready-demo-mobile-app)
+
+;; ─── Assignment Rules ─────────────────────────────────────────────────────────
+
+(normally r-assign-rust-ffi-exports
+  (and ready-rust-ffi-exports agent-rust-engineer-available)
+  assign-to-rust-ffi-exports-rust-engineer)
+
+(normally r-assign-rust-cross-compile
+  (and ready-rust-cross-compile agent-rust-engineer-available)
+  assign-to-rust-cross-compile-rust-engineer)
+
+(normally r-assign-ios-module
+  (and ready-ios-module agent-ios-engineer-available)
+  assign-to-ios-module-ios-engineer)
+
+(normally r-assign-android-module
+  (and ready-android-module agent-android-engineer-available)
+  assign-to-android-module-android-engineer)
+
+(normally r-assign-ts-api
+  (and ready-ts-api agent-ts-engineer-available)
+  assign-to-ts-api-ts-engineer)
+
+(normally r-assign-build-script
+  (and ready-build-script agent-rust-engineer-available)
+  assign-to-build-script-rust-engineer)
+
+(normally r-assign-expo-module-config
+  (and ready-expo-module-config agent-ts-engineer-available)
+  assign-to-expo-module-config-ts-engineer)
+
+(normally r-assign-test-init
+  (and ready-test-init agent-qa-engineer-available)
+  assign-to-test-init-qa-engineer)
+
+(normally r-assign-test-salt
+  (and ready-test-salt agent-qa-engineer-available)
+  assign-to-test-salt-qa-engineer)
+
+(normally r-assign-test-commitment
+  (and ready-test-commitment agent-qa-engineer-available)
+  assign-to-test-commitment-qa-engineer)
+
+(normally r-assign-test-proof-gen
+  (and ready-test-proof-gen agent-qa-engineer-available)
+  assign-to-test-proof-gen-qa-engineer)
+
+(normally r-assign-test-proof-verify
+  (and ready-test-proof-verify agent-qa-engineer-available)
+  assign-to-test-proof-verify-qa-engineer)
+
+(normally r-assign-test-fuzzy-enroll
+  (and ready-test-fuzzy-enroll agent-qa-engineer-available)
+  assign-to-test-fuzzy-enroll-qa-engineer)
+
+(normally r-assign-test-fuzzy-verify
+  (and ready-test-fuzzy-verify agent-qa-engineer-available)
+  assign-to-test-fuzzy-verify-qa-engineer)
+
+(normally r-assign-test-error-sanitization
+  (and ready-test-error-sanitization agent-qa-engineer-available)
+  assign-to-test-error-sanitization-qa-engineer)
+
+(normally r-assign-test-memory-safety
+  (and ready-test-memory-safety agent-qa-engineer-available)
+  assign-to-test-memory-safety-qa-engineer)
+
+(normally r-assign-test-zeroization
+  (and ready-test-zeroization agent-qa-engineer-available)
+  assign-to-test-zeroization-qa-engineer)
+
+(normally r-assign-test-perf-proof-gen
+  (and ready-test-perf-proof-gen agent-qa-engineer-available)
+  assign-to-test-perf-proof-gen-qa-engineer)
+
+(normally r-assign-test-perf-verify
+  (and ready-test-perf-verify agent-qa-engineer-available)
+  assign-to-test-perf-verify-qa-engineer)
+
+(normally r-assign-test-proof-size
+  (and ready-test-proof-size agent-qa-engineer-available)
+  assign-to-test-proof-size-qa-engineer)
+
+(normally r-assign-test-binary-size
+  (and ready-test-binary-size agent-qa-engineer-available)
+  assign-to-test-binary-size-qa-engineer)
+
+(normally r-assign-test-memory-consumption
+  (and ready-test-memory-consumption agent-qa-engineer-available)
+  assign-to-test-memory-consumption-qa-engineer)
+
+(normally r-assign-test-platform-compat
+  (and ready-test-platform-compat agent-qa-engineer-available)
+  assign-to-test-platform-compat-qa-engineer)
+
+(normally r-assign-test-thread-safety
+  (and ready-test-thread-safety agent-qa-engineer-available)
+  assign-to-test-thread-safety-qa-engineer)
+
+(normally r-assign-test-offline
+  (and ready-test-offline agent-qa-engineer-available)
+  assign-to-test-offline-qa-engineer)
+
+(normally r-assign-demo-mobile-app
+  (and ready-demo-mobile-app agent-ts-engineer-available)
+  assign-to-demo-mobile-app-ts-engineer)
+
+;; ─── Safety Defeaters ─────────────────────────────────────────────────────────
+
+;; Memory safety test failure blocks demo and platform compat
+(except d-block-demo-memory-failure
+  failed-test-memory-safety
+  (not ready-demo-mobile-app))
+
+;; Binary size over budget blocks platform compat and demo
+(except d-block-platform-binary-size
+  binary-size-over-budget
+  (not ready-test-platform-compat))
+
+;; Error sanitization failure blocks platform compat (security requirement)
+(except d-block-platform-error-sanitization
+  failed-test-error-sanitization
+  (not ready-test-platform-compat))
+
+;; Zeroization failure blocks demo (privacy requirement)
+(except d-block-demo-zeroization-failure
+  failed-test-zeroization
+  (not ready-demo-mobile-app))
+
+;; ─── Superiority ─────────────────────────────────────────────────────────────
+
+(prefer d-block-demo-memory-failure r-ready-demo-mobile-app)
+(prefer d-block-platform-binary-size r-ready-test-platform-compat)
+(prefer d-block-platform-error-sanitization r-ready-test-platform-compat)
+(prefer d-block-demo-zeroization-failure r-ready-demo-mobile-app)
+
+;; ─── Rule Metadata ────────────────────────────────────────────────────────────
+
+(meta d-block-demo-memory-failure
+  (description "Memory safety test failure blocks the demo app from being released")
+  (justification "Memory leaks on constrained devices would cause OOM kills and degrade user experience"))
+
+(meta d-block-platform-binary-size
+  (description "Binary size exceeding NFR-004 budget blocks platform compatibility testing")
+  (justification "Oversized binaries cannot be published to npm or distributed via App Store without size relief"))
+
+(meta d-block-platform-error-sanitization
+  (description "Error sanitization failures block platform compat — exposing internals is a security violation")
+  (justification "REQ-008 is a hard security requirement; no build with leaking errors may proceed to platform testing"))
+
+(meta d-block-demo-zeroization-failure
+  (description "Zeroization failure blocks demo app — sensitive data retention is a privacy violation")
+  (justification "SABLE's privacy guarantee depends on zeroization of biometric data; a failing demo would misrepresent the system"))
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-13T08:08:24Z"
+  (given delegated-v1-rust-cross-compile-to-agent:claude)
+  (given (during (leased-v1-rust-cross-compile) (moment "2026-03-13T08:08:24Z") (moment "2026-03-13T08:38:24Z")))
+  (given claim-v1-rust-cross-compile-by-claude)
+  (normally r-cl-state-v1-rust-cross-compile-by-claude claim-v1-rust-cross-compile-by-claude state-claimed-v1-rust-cross-compile-by-claude)
+  (normally r-cl-chain-v1-rust-cross-compile-by-claude state-claimed-v1-rust-cross-compile-by-claude claimed-rust-cross-compile)
+)
+
+;; Propagation rules: failures in 'rust-cross-compile' block downstream tasks
+(normally r-propagate-android-module-from-rust-cross-compile-failed failed-rust-cross-compile upstream-blocked-android-module)
+(normally r-propagate-android-module-from-rust-cross-compile-permanently-failed permanently-failed-rust-cross-compile upstream-blocked-android-module)
+(normally r-propagate-android-module-from-rust-cross-compile-stale-v1 stale-v1-rust-cross-compile upstream-blocked-android-module)
+(normally r-propagate-android-module-from-rust-cross-compile-timeout-v1 timeout-v1-rust-cross-compile upstream-blocked-android-module)
+(normally r-propagate-android-module-from-rust-cross-compile-blocked upstream-blocked-rust-cross-compile upstream-blocked-android-module)
+(normally r-propagate-build-script-from-rust-cross-compile-failed failed-rust-cross-compile upstream-blocked-build-script)
+(normally r-propagate-build-script-from-rust-cross-compile-permanently-failed permanently-failed-rust-cross-compile upstream-blocked-build-script)
+(normally r-propagate-build-script-from-rust-cross-compile-stale-v1 stale-v1-rust-cross-compile upstream-blocked-build-script)
+(normally r-propagate-build-script-from-rust-cross-compile-timeout-v1 timeout-v1-rust-cross-compile upstream-blocked-build-script)
+(normally r-propagate-build-script-from-rust-cross-compile-blocked upstream-blocked-rust-cross-compile upstream-blocked-build-script)
+(normally r-propagate-ios-module-from-rust-cross-compile-failed failed-rust-cross-compile upstream-blocked-ios-module)
+(normally r-propagate-ios-module-from-rust-cross-compile-permanently-failed permanently-failed-rust-cross-compile upstream-blocked-ios-module)
+(normally r-propagate-ios-module-from-rust-cross-compile-stale-v1 stale-v1-rust-cross-compile upstream-blocked-ios-module)
+(normally r-propagate-ios-module-from-rust-cross-compile-timeout-v1 timeout-v1-rust-cross-compile upstream-blocked-ios-module)
+(normally r-propagate-ios-module-from-rust-cross-compile-blocked upstream-blocked-rust-cross-compile upstream-blocked-ios-module)
+
+;; Transitive propagation: upstream-blocked cascades through dependency chain
+(normally r-propagate-expo-module-config-from-android-module-blocked upstream-blocked-android-module upstream-blocked-expo-module-config)
+(normally r-propagate-test-binary-size-from-build-script-blocked upstream-blocked-build-script upstream-blocked-test-binary-size)
+(normally r-propagate-expo-module-config-from-ios-module-blocked upstream-blocked-ios-module upstream-blocked-expo-module-config)
+(normally r-propagate-demo-mobile-app-from-expo-module-config-blocked upstream-blocked-expo-module-config upstream-blocked-demo-mobile-app)
+(normally r-propagate-test-binary-size-from-expo-module-config-blocked upstream-blocked-expo-module-config upstream-blocked-test-binary-size)
+(normally r-propagate-test-commitment-from-expo-module-config-blocked upstream-blocked-expo-module-config upstream-blocked-test-commitment)
+(normally r-propagate-test-error-sanitization-from-expo-module-config-blocked upstream-blocked-expo-module-config upstream-blocked-test-error-sanitization)
+(normally r-propagate-test-fuzzy-enroll-from-expo-module-config-blocked upstream-blocked-expo-module-config upstream-blocked-test-fuzzy-enroll)
+(normally r-propagate-test-fuzzy-verify-from-expo-module-config-blocked upstream-blocked-expo-module-config upstream-blocked-test-fuzzy-verify)
+(normally r-propagate-test-init-from-expo-module-config-blocked upstream-blocked-expo-module-config upstream-blocked-test-init)
+(normally r-propagate-test-memory-safety-from-expo-module-config-blocked upstream-blocked-expo-module-config upstream-blocked-test-memory-safety)
+(normally r-propagate-test-offline-from-expo-module-config-blocked upstream-blocked-expo-module-config upstream-blocked-test-offline)
+(normally r-propagate-test-proof-gen-from-expo-module-config-blocked upstream-blocked-expo-module-config upstream-blocked-test-proof-gen)
+(normally r-propagate-test-proof-verify-from-expo-module-config-blocked upstream-blocked-expo-module-config upstream-blocked-test-proof-verify)
+(normally r-propagate-test-salt-from-expo-module-config-blocked upstream-blocked-expo-module-config upstream-blocked-test-salt)
+(normally r-propagate-test-zeroization-from-expo-module-config-blocked upstream-blocked-expo-module-config upstream-blocked-test-zeroization)
+(normally r-propagate-demo-mobile-app-from-test-commitment-blocked upstream-blocked-test-commitment upstream-blocked-demo-mobile-app)
+(normally r-propagate-test-platform-compat-from-test-commitment-blocked upstream-blocked-test-commitment upstream-blocked-test-platform-compat)
+(normally r-propagate-demo-mobile-app-from-test-fuzzy-enroll-blocked upstream-blocked-test-fuzzy-enroll upstream-blocked-demo-mobile-app)
+(normally r-propagate-test-platform-compat-from-test-fuzzy-enroll-blocked upstream-blocked-test-fuzzy-enroll upstream-blocked-test-platform-compat)
+(normally r-propagate-demo-mobile-app-from-test-fuzzy-verify-blocked upstream-blocked-test-fuzzy-verify upstream-blocked-demo-mobile-app)
+(normally r-propagate-test-platform-compat-from-test-fuzzy-verify-blocked upstream-blocked-test-fuzzy-verify upstream-blocked-test-platform-compat)
+(normally r-propagate-demo-mobile-app-from-test-init-blocked upstream-blocked-test-init upstream-blocked-demo-mobile-app)
+(normally r-propagate-test-platform-compat-from-test-init-blocked upstream-blocked-test-init upstream-blocked-test-platform-compat)
+(normally r-propagate-test-memory-consumption-from-test-memory-safety-blocked upstream-blocked-test-memory-safety upstream-blocked-test-memory-consumption)
+(normally r-propagate-demo-mobile-app-from-test-proof-gen-blocked upstream-blocked-test-proof-gen upstream-blocked-demo-mobile-app)
+(normally r-propagate-test-perf-proof-gen-from-test-proof-gen-blocked upstream-blocked-test-proof-gen upstream-blocked-test-perf-proof-gen)
+(normally r-propagate-test-perf-verify-from-test-proof-gen-blocked upstream-blocked-test-proof-gen upstream-blocked-test-perf-verify)
+(normally r-propagate-test-platform-compat-from-test-proof-gen-blocked upstream-blocked-test-proof-gen upstream-blocked-test-platform-compat)
+(normally r-propagate-test-proof-size-from-test-proof-gen-blocked upstream-blocked-test-proof-gen upstream-blocked-test-proof-size)
+(normally r-propagate-test-thread-safety-from-test-proof-gen-blocked upstream-blocked-test-proof-gen upstream-blocked-test-thread-safety)
+(normally r-propagate-demo-mobile-app-from-test-proof-verify-blocked upstream-blocked-test-proof-verify upstream-blocked-demo-mobile-app)
+(normally r-propagate-test-perf-proof-gen-from-test-proof-verify-blocked upstream-blocked-test-proof-verify upstream-blocked-test-perf-proof-gen)
+(normally r-propagate-test-perf-verify-from-test-proof-verify-blocked upstream-blocked-test-proof-verify upstream-blocked-test-perf-verify)
+(normally r-propagate-test-platform-compat-from-test-proof-verify-blocked upstream-blocked-test-proof-verify upstream-blocked-test-platform-compat)
+(normally r-propagate-test-thread-safety-from-test-proof-verify-blocked upstream-blocked-test-proof-verify upstream-blocked-test-thread-safety)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-13T08:12:26Z"
+  (given completed-rust-cross-compile)
+  (given eval-result-v1-rust-cross-compile-by-claude)
+  (given eval-confidence-v1-rust-cross-compile-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-13T08:12:31Z"
+  (given delegated-v1-build-script-to-agent:claude)
+  (given (during (leased-v1-build-script) (moment "2026-03-13T08:12:31Z") (moment "2026-03-13T08:42:31Z")))
+  (given claim-v1-build-script-by-claude)
+  (normally r-cl-state-v1-build-script-by-claude claim-v1-build-script-by-claude state-claimed-v1-build-script-by-claude)
+  (normally r-cl-chain-v1-build-script-by-claude state-claimed-v1-build-script-by-claude claimed-build-script)
+)
+
+;; Propagation rules: failures in 'build-script' block downstream tasks
+(normally r-propagate-test-binary-size-from-build-script-failed failed-build-script upstream-blocked-test-binary-size)
+(normally r-propagate-test-binary-size-from-build-script-permanently-failed permanently-failed-build-script upstream-blocked-test-binary-size)
+(normally r-propagate-test-binary-size-from-build-script-stale-v1 stale-v1-build-script upstream-blocked-test-binary-size)
+(normally r-propagate-test-binary-size-from-build-script-timeout-v1 timeout-v1-build-script upstream-blocked-test-binary-size)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-13T08:15:08Z"
+  (given completed-build-script)
+  (given eval-result-v1-build-script-by-claude)
+  (given eval-confidence-v1-build-script-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-13T08:15:14Z"
+  (given delegated-v1-rust-ffi-exports-to-agent:claude)
+  (given (during (leased-v1-rust-ffi-exports) (moment "2026-03-13T08:15:14Z") (moment "2026-03-13T08:45:14Z")))
+  (given claim-v1-rust-ffi-exports-by-claude)
+  (normally r-cl-state-v1-rust-ffi-exports-by-claude claim-v1-rust-ffi-exports-by-claude state-claimed-v1-rust-ffi-exports-by-claude)
+  (normally r-cl-chain-v1-rust-ffi-exports-by-claude state-claimed-v1-rust-ffi-exports-by-claude claimed-rust-ffi-exports)
+)
+
+;; Propagation rules: failures in 'rust-ffi-exports' block downstream tasks
+(normally r-propagate-android-module-from-rust-ffi-exports-failed failed-rust-ffi-exports upstream-blocked-android-module)
+(normally r-propagate-android-module-from-rust-ffi-exports-permanently-failed permanently-failed-rust-ffi-exports upstream-blocked-android-module)
+(normally r-propagate-android-module-from-rust-ffi-exports-stale-v1 stale-v1-rust-ffi-exports upstream-blocked-android-module)
+(normally r-propagate-android-module-from-rust-ffi-exports-timeout-v1 timeout-v1-rust-ffi-exports upstream-blocked-android-module)
+(normally r-propagate-android-module-from-rust-ffi-exports-blocked upstream-blocked-rust-ffi-exports upstream-blocked-android-module)
+(normally r-propagate-ios-module-from-rust-ffi-exports-failed failed-rust-ffi-exports upstream-blocked-ios-module)
+(normally r-propagate-ios-module-from-rust-ffi-exports-permanently-failed permanently-failed-rust-ffi-exports upstream-blocked-ios-module)
+(normally r-propagate-ios-module-from-rust-ffi-exports-stale-v1 stale-v1-rust-ffi-exports upstream-blocked-ios-module)
+(normally r-propagate-ios-module-from-rust-ffi-exports-timeout-v1 timeout-v1-rust-ffi-exports upstream-blocked-ios-module)
+(normally r-propagate-ios-module-from-rust-ffi-exports-blocked upstream-blocked-rust-ffi-exports upstream-blocked-ios-module)
+(normally r-propagate-ts-api-from-rust-ffi-exports-failed failed-rust-ffi-exports upstream-blocked-ts-api)
+(normally r-propagate-ts-api-from-rust-ffi-exports-permanently-failed permanently-failed-rust-ffi-exports upstream-blocked-ts-api)
+(normally r-propagate-ts-api-from-rust-ffi-exports-stale-v1 stale-v1-rust-ffi-exports upstream-blocked-ts-api)
+(normally r-propagate-ts-api-from-rust-ffi-exports-timeout-v1 timeout-v1-rust-ffi-exports upstream-blocked-ts-api)
+(normally r-propagate-ts-api-from-rust-ffi-exports-blocked upstream-blocked-rust-ffi-exports upstream-blocked-ts-api)
+
+;; Transitive propagation: upstream-blocked cascades through dependency chain
+(normally r-propagate-expo-module-config-from-ts-api-blocked upstream-blocked-ts-api upstream-blocked-expo-module-config)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-13T08:30:15Z"
+  (given (during (leased-v1-rust-ffi-exports) (moment "2026-03-13T08:30:15Z") (moment "2026-03-13T09:00:15Z")))
+  (given lease-renewal-v1-rust-ffi-exports-by-claude-r1)
+)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-13T08:32:04Z"
+  (given completed-rust-ffi-exports)
+  (given eval-result-v1-rust-ffi-exports-by-claude)
+  (given eval-confidence-v1-rust-ffi-exports-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-13T08:32:10Z"
+  (given delegated-v1-ts-api-to-agent:claude)
+  (given (during (leased-v1-ts-api) (moment "2026-03-13T08:32:10Z") (moment "2026-03-13T09:02:10Z")))
+  (given claim-v1-ts-api-by-claude)
+  (normally r-cl-state-v1-ts-api-by-claude claim-v1-ts-api-by-claude state-claimed-v1-ts-api-by-claude)
+  (normally r-cl-chain-v1-ts-api-by-claude state-claimed-v1-ts-api-by-claude claimed-ts-api)
+)
+
+;; Propagation rules: failures in 'ts-api' block downstream tasks
+(normally r-propagate-expo-module-config-from-ts-api-failed failed-ts-api upstream-blocked-expo-module-config)
+(normally r-propagate-expo-module-config-from-ts-api-permanently-failed permanently-failed-ts-api upstream-blocked-expo-module-config)
+(normally r-propagate-expo-module-config-from-ts-api-stale-v1 stale-v1-ts-api upstream-blocked-expo-module-config)
+(normally r-propagate-expo-module-config-from-ts-api-timeout-v1 timeout-v1-ts-api upstream-blocked-expo-module-config)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-13T08:37:33Z"
+  (given completed-ts-api)
+  (given eval-result-v1-ts-api-by-claude)
+  (given eval-confidence-v1-ts-api-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-13T08:37:39Z"
+  (given delegated-v1-android-module-to-agent:claude)
+  (given (during (leased-v1-android-module) (moment "2026-03-13T08:37:39Z") (moment "2026-03-13T09:07:39Z")))
+  (given claim-v1-android-module-by-claude)
+  (normally r-cl-state-v1-android-module-by-claude claim-v1-android-module-by-claude state-claimed-v1-android-module-by-claude)
+  (normally r-cl-chain-v1-android-module-by-claude state-claimed-v1-android-module-by-claude claimed-android-module)
+)
+
+;; Propagation rules: failures in 'android-module' block downstream tasks
+(normally r-propagate-expo-module-config-from-android-module-failed failed-android-module upstream-blocked-expo-module-config)
+(normally r-propagate-expo-module-config-from-android-module-permanently-failed permanently-failed-android-module upstream-blocked-expo-module-config)
+(normally r-propagate-expo-module-config-from-android-module-stale-v1 stale-v1-android-module upstream-blocked-expo-module-config)
+(normally r-propagate-expo-module-config-from-android-module-timeout-v1 timeout-v1-android-module upstream-blocked-expo-module-config)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-13T08:47:37Z"
+  (given completed-android-module)
+  (given eval-result-v1-android-module-by-claude)
+  (given eval-confidence-v1-android-module-1.00)
+)
+
+(claims supervisor:ed25519:zhT3QZyz
+  :at "2026-03-13T08:47:42Z"
+  (given delegated-v1-ios-module-to-agent:claude)
+  (given (during (leased-v1-ios-module) (moment "2026-03-13T08:47:42Z") (moment "2026-03-13T09:17:42Z")))
+  (given claim-v1-ios-module-by-claude)
+  (normally r-cl-state-v1-ios-module-by-claude claim-v1-ios-module-by-claude state-claimed-v1-ios-module-by-claude)
+  (normally r-cl-chain-v1-ios-module-by-claude state-claimed-v1-ios-module-by-claude claimed-ios-module)
+)
+
+;; Propagation rules: failures in 'ios-module' block downstream tasks
+(normally r-propagate-expo-module-config-from-ios-module-failed failed-ios-module upstream-blocked-expo-module-config)
+(normally r-propagate-expo-module-config-from-ios-module-permanently-failed permanently-failed-ios-module upstream-blocked-expo-module-config)
+(normally r-propagate-expo-module-config-from-ios-module-stale-v1 stale-v1-ios-module upstream-blocked-expo-module-config)
+(normally r-propagate-expo-module-config-from-ios-module-timeout-v1 timeout-v1-ios-module upstream-blocked-expo-module-config)
+
+(claims evaluator:ed25519:iIOEFYgN
+  :at "2026-03-13T08:56:25Z"
+  (given failed-ios-module)
+  (given eval-result-v1-ios-module-by-claude)
+  (given eval-confidence-v1-ios-module-0.00)
+)
