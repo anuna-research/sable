@@ -17,7 +17,9 @@ use std::time::Instant;
 // Halo2 ZK proof system
 use sable_core::zk::halo2::{
     FaceVerificationVerifier, Proof, LivenessWitness,
-    FeatureQuantizer, hamming_distance, ThresholdConfig, Halo2Fr,
+    hamming_distance, ThresholdConfig, Halo2Fr,
+    poseidon_commit_bytes_value,
+    thermometer_encode, thermometer_prescale_tanh,
     challenge_digest as compute_challenge_digest,
 };
 
@@ -125,10 +127,17 @@ pub async fn enroll(
     // Extract salt bytes from opening (for demo purposes - normally kept secret)
     let salt_bytes = scalar_to_bytes(&opening.randomness);
 
-    // Create quantized embedding for Halo2 ZK proofs
-    // Convert f32 features to f64, then quantize to u8
-    let features_f64: Vec<f64> = features.iter().map(|&f| f as f64 / 2.0).collect(); // Normalize to [-1, 1]
-    let quantized_embedding = FeatureQuantizer::quantize(&features_f64);
+    // Create the matcher template for Halo2 ZK proofs using the THERMOMETER
+    // (ordinal) encoding: byte-Hamming distance then equals L1 distance between
+    // quantization levels, recovering the accuracy that binary Hamming discards.
+    // Prescale is stats-free tanh (the zero-config default); enrollment and
+    // verification must use the identical prescale+encoding.
+    let features_f64: Vec<f64> = features.iter().map(|&f| f as f64).collect();
+    let quantized_embedding = thermometer_encode(&thermometer_prescale_tanh(&features_f64));
+
+    // Register the Poseidon commitment the ZK proof will bind to (must match the
+    // in-circuit hash; poseidon_commit_bytes_value computes it via the same gates).
+    let template_commitment = poseidon_commit_bytes_value(&quantized_embedding);
 
     let session = EnrollmentSession {
         session_id: session_id.clone(),
@@ -138,6 +147,7 @@ pub async fn enroll(
         features,
         face_embedding: req.face_embedding.clone(),
         quantized_embedding,
+        template_commitment,
         salt_bytes,
         created_at: Instant::now(),
         fuzzy_helper_data: None,
@@ -394,14 +404,21 @@ pub async fn auth_prove(
         ));
     }
 
-    // Quantize live features for Hamming distance calculation
-    let live_features_f64: Vec<f64> = live_features.iter().map(|&f| f as f64 / 2.0).collect();
-    let live_quantized = FeatureQuantizer::quantize(&live_features_f64);
+    // Encode live features with the SAME thermometer encoding as enrollment, so
+    // byte-Hamming distance equals the L1 distance between quantization levels.
+    let live_features_f64: Vec<f64> = live_features.iter().map(|&f| f as f64).collect();
+    let live_quantized = thermometer_encode(&thermometer_prescale_tanh(&live_features_f64));
 
     // Calculate Hamming distance between enrolled and live embeddings
+    // (== L1 distance between thermometer levels).
     let hamming_dist = hamming_distance(&session.quantized_embedding, &live_quantized);
 
-    // Get threshold configuration (50% similarity for 512 bytes = 2048 bits threshold)
+    // Threshold = 50% of max byte-Hamming (2048 for 512 bytes). NOTE: this is a
+    // placeholder operating point inherited from the binary matcher. The
+    // thermometer L1 distance has a different genuine/impostor distribution, so
+    // this should be recalibrated from data at the desired EER operating point
+    // (a deployer-set parameter, like the prescale constants). Tracked as
+    // task-recalibrate-threshold in docs/plans/in-circuit-matcher.spl.
     let threshold_config = ThresholdConfig::new(session.quantized_embedding.len(), 0.5);
     let threshold = threshold_config.max_hamming_distance();
 
@@ -607,13 +624,29 @@ pub async fn auth_prove(
     // ========================================================================
     let proof_start = Instant::now();
 
-    let (proof_bytes, halo2_result, liveness_proved_in_zk, proof_challenge_digest) = {
+    let (proof_bytes, halo2_result, liveness_proved_in_zk, proof_challenge_digest, proof_commitment) = {
         let mut prover = state.halo2_prover.write();
-        match prover.prove_with_liveness(hamming_dist, threshold, liveness_witness) {
+        // Distance is computed IN-CIRCUIT from the two embeddings (the prover no
+        // longer trusts a precomputed scalar). `hamming_dist` is retained only
+        // for logging and the response; the proof's public result is authoritative.
+        match prover.prove_with_embeddings(
+            &session.quantized_embedding,
+            &live_quantized,
+            threshold,
+            liveness_witness,
+        ) {
             Ok(proof) => {
-                let result = hamming_dist <= threshold;
+                // Binding check: the proof must commit to the template registered
+                // at enrollment. Holds by construction here (we prove over the
+                // enrolled bytes), but enforcing it makes the soundness property
+                // explicit and would catch any template/keys mismatch.
+                let template_bound = proof.commitment == session.template_commitment;
+                if !template_bound {
+                    tracing::warn!("Halo2 proof commitment does not match registered template");
+                }
+                let result = template_bound && hamming_dist <= threshold;
                 let liveness_zk = proof.liveness_passed;
-                (proof.proof_bytes, result, liveness_zk, proof.challenge_digest)
+                (proof.proof_bytes, result, liveness_zk, proof.challenge_digest, proof.commitment)
             }
             Err(e) => {
                 return Err((
@@ -648,9 +681,12 @@ pub async fn auth_prove(
     }
 
     // Public inputs from the proof
-    let digest_hex = {
+    let (digest_hex, template_commitment_hex) = {
         use ff::PrimeField;
-        hex::encode(proof_challenge_digest.to_repr())
+        (
+            hex::encode(proof_challenge_digest.to_repr()),
+            hex::encode(proof_commitment.to_repr()),
+        )
     };
     let public_inputs = vec![
         hex::encode(session.commitment_bytes),
@@ -659,6 +695,7 @@ pub async fn auth_prove(
         format!("{}", if halo2_result { "1" } else { "0" }), // Result: 1=match, 0=no match
         format!("{}", if liveness_proved_in_zk { "1" } else { "0" }), // Liveness result
         digest_hex, // Challenge digest (Fr field element, for verification)
+        template_commitment_hex, // Poseidon commitment to enrolled template (Fr, index 6)
     ];
 
     let total_time = total_start.elapsed();
@@ -806,12 +843,30 @@ pub async fn verify(
         compute_challenge_digest(&LivenessWitness::dummy_pass())
     };
 
+    // Parse enrolled-template commitment (index 6), or default to zero. The
+    // circuit exposes it as the fifth public input; verification requires the
+    // same value the proof was generated with.
+    let commitment_val = if req.public_inputs_hex.len() >= 7 {
+        let bytes = hex::decode(&req.public_inputs_hex[6]).unwrap_or_default();
+        if bytes.len() == 32 {
+            use ff::PrimeField;
+            let mut repr = <Halo2Fr as PrimeField>::Repr::default();
+            repr.as_mut().copy_from_slice(&bytes);
+            Halo2Fr::from_repr(repr).unwrap_or(Halo2Fr::from(0u64))
+        } else {
+            Halo2Fr::from(0u64)
+        }
+    } else {
+        Halo2Fr::from(0u64)
+    };
+
     // Reconstruct public inputs as Fr field elements
     let public_inputs = vec![
         Halo2Fr::from(result_val),
         Halo2Fr::from(threshold),
         Halo2Fr::from(liveness_val),
         digest_val,
+        commitment_val,
     ];
 
     let proof = Proof {
@@ -819,6 +874,7 @@ pub async fn verify(
         public_inputs,
         liveness_passed: liveness_val == 1,
         challenge_digest: digest_val,
+        commitment: commitment_val,
     };
 
     // Verify using Halo2
@@ -1422,6 +1478,8 @@ pub async fn fuzzy_enroll(
 
     let helper_data_bytes = enrollment.helper_data.to_bytes();
 
+    let template_commitment = poseidon_commit_bytes_value(&quantized);
+
     let session = EnrollmentSession {
         session_id: session_id.clone(),
         enrollment_mode: crate::state::EnrollmentMode::FuzzyCommitment,
@@ -1430,6 +1488,7 @@ pub async fn fuzzy_enroll(
         features,
         face_embedding: req.face_embedding.clone(),
         quantized_embedding: quantized,
+        template_commitment,
         salt_bytes,
         created_at: Instant::now(),
         fuzzy_helper_data: Some(enrollment.helper_data),

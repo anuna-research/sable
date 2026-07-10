@@ -1,7 +1,7 @@
 use parking_lot::RwLock;
 use sable_core::crypto::fuzzy_commitment::HelperData;
 use sable_core::crypto::pedersen::Commitment;
-use sable_core::zk::halo2::FaceVerificationProver;
+use sable_core::zk::halo2::{FaceVerificationProver, Halo2Fr};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -27,6 +27,10 @@ pub struct EnrollmentSession {
     pub face_embedding: Option<Vec<f64>>,
     /// Quantized embedding for Halo2 ZK proofs (Hamming distance)
     pub quantized_embedding: Vec<u8>,
+    /// Poseidon commitment to the quantized template, registered at enrollment.
+    /// The ZK proof binds to this so a prover cannot match against a different
+    /// template (see `FaceVerificationVerifier::verify_bound`).
+    pub template_commitment: Halo2Fr,
     #[allow(dead_code)]
     pub salt_bytes: [u8; 32],
     #[allow(dead_code)]
