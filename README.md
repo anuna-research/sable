@@ -9,7 +9,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Rust](https://img.shields.io/badge/rust-nightly-brightgreen.svg)](https://www.rust-lang.org)
 [![Coverage](https://img.shields.io/badge/coverage-89%25-brightgreen.svg)](https://codeberg.org/anuna/sable)
-[![Tests](https://img.shields.io/badge/tests-519%20passing-brightgreen.svg)](https://codeberg.org/anuna/sable)
+[![Tests](https://img.shields.io/badge/tests-557%20passing-brightgreen.svg)](https://codeberg.org/anuna/sable)
 [![Mobile](https://img.shields.io/badge/platform-Android%20%7C%20iOS-lightgrey.svg)](https://codeberg.org/anuna/sable)
 
 </div>
@@ -61,7 +61,7 @@ None of these combine true zero-knowledge proofs over biometric data with offlin
 
 To our knowledge, SABLE is the first open-source system to combine all of these:
 
-- **True zero-knowledge proofs** -- Halo2 proofs over biometric data (~250ms generation, ~2ms verification), not statistical matching on encrypted fragments
+- **True zero-knowledge proofs** -- Halo2 proofs over biometric data (~970ms generation, ~2ms verification), with the biometric distance computed *inside* the circuit, not statistical matching on encrypted fragments
 - **Fully offline** -- peer-to-peer verification via NFC/BLE with no cloud, blockchain, or internet dependency
 - **Selective disclosure** -- optional government-issued Verifiable Credentials with BBS+ signatures let you prove predicates (e.g. "over 18") without revealing underlying data
 - **No special hardware** -- works with any smartphone camera, using screen flash liveness detection to prevent spoofing
@@ -91,8 +91,8 @@ The server serves both the API and frontend. No separate frontend build step nee
 
 ### Demo flow
 
-1. **Enroll** -- capture your face via webcam, creating a Pedersen commitment over your quantized biometric embedding
-2. **Authenticate** -- recapture your face, undergo screen flash liveness detection, then generate a Halo2 ZK proof that your live scan matches the enrolled template
+1. **Enroll** -- capture your face via webcam, thermometer-encode the embedding, and register both a Pedersen commitment and a Poseidon template commitment
+2. **Authenticate** -- recapture your face, undergo screen flash liveness detection, then generate a Halo2 ZK proof that computes the biometric distance in-circuit and proves your live scan matches the enrolled template
 3. **Verify** -- validate the proof, seeing exactly what was proven vs. what stayed private
 
 The liveness check uses controlled-illumination reflectance analysis (based on Tang et al., NDSS 2018) to distinguish real 3D faces from photos displayed on screens.
@@ -116,7 +116,7 @@ cargo build --release
 # Build with Halo2 ZK features
 cargo build --release --features halo2
 
-# Run the test suite (519 tests, 77 halo2-specific)
+# Run the test suite (557 tests, ~95 halo2-specific)
 cargo test --features halo2 -p sable-core --lib --test integration
 ```
 
@@ -158,12 +158,21 @@ Biometric data never leaves the user's device. Only mathematical proofs and sele
 | Phase | You (Prover) | | Verifier |
 |-------|-----------|---|----------|
 | **Issue** *(optional)* | Receive Verifiable Credential from government | ← | -- |
-| **Enroll** | Capture face, extract 1024-dim embedding | → | Hash with Poseidon, create Pedersen commitment |
+| **Enroll** | Capture face, extract embedding, thermometer-encode | → | Register Poseidon template commitment + Pedersen commitment |
 | **Challenge** | Generate c_nonce, send H(c_nonce) | → | Generate s_nonce, send back |
 | **Liveness** | Derive flash pattern from HKDF(c_nonce ‖ s_nonce), display 3 split-screen rounds, capture frames | | |
-| **Prove** | Generate Halo2 ZK proof (~250ms, 2KB) with face match + liveness fingerprints | → | Verify H(c_nonce), re-derive pattern, check spatial flash |
+| **Prove** | Generate Halo2 ZK proof (~970ms, 2KB) computing in-circuit distance + liveness fingerprints, bound to the template commitment | → | Verify H(c_nonce), re-derive pattern, check spatial flash |
 | **Present** *(optional)* | Select attributes to disclose (e.g. "≥ 18") | → | Receive only chosen predicates |
 | **Verify** | Receive pass/fail result | ← | Verify composite proof (~2ms) |
+
+### In-circuit matching and template binding
+
+The biometric match is proven soundly, not asserted. Two properties are enforced by the Halo2 circuit itself:
+
+- **In-circuit distance** -- the Hamming distance between the live scan and the enrolled template is computed *inside* the circuit from the two 512-byte embeddings, rather than supplied as a trusted witness. Each per-byte XOR popcount is computed algebraically (`popcount(a) + popcount(b) − 2·⟨a_bits, b_bits⟩`), so a prover cannot simply assert an arbitrarily small distance to force a match.
+- **Template binding** -- the enrolled template is bound to a Poseidon commitment exposed as a public input. Verification checks this against the commitment registered at enrollment, so a valid proof computed over a *different* template is rejected.
+
+Embeddings are **thermometer-encoded** (L=9 ordinal levels at the same 8 bits/dimension as binary). Ordinal encoding recovers the accuracy that binary Hamming discards, and the circuit constrains every byte to be a valid thermometer code so the L1-distance equivalence cannot be subverted.
 
 ### Selective disclosure
 
@@ -238,9 +247,9 @@ sequenceDiagram
 
     rect rgb(248, 240, 255)
     Note over P,SC: ZK Proof Generation
-    P->>SC: 11. Hash features with Poseidon, create Pedersen commitment
+    P->>SC: 11. Thermometer-encode embedding, bind Poseidon template commitment
     P->>SC: 12. Quantize per-region reflectance deltas → 16-bit fingerprints
-    P->>SC: 13. Generate Halo2 ZK proof (~250ms, 2KB)
+    P->>SC: 13. Generate Halo2 ZK proof (~970ms, 2KB), distance computed in-circuit
     Note over SC: Proves: face match + liveness + quality<br/>without revealing biometric data
     SC->>P: 14. Return proof + commitment
     end
@@ -254,7 +263,7 @@ sequenceDiagram
     V->>V: 18. Verify spatial flash (3D geometry from reflectance deltas)
     V->>SC: 19. Verify Halo2 proof locally (~2ms)
     SC->>SC: 20. Validate proof against commitment
-    SC->>SC: 21. Check challenge digest binding
+    SC->>SC: 21. Check template-commitment binding + challenge digest
     SC->>V: 22. Return verification result
     end
 
@@ -284,7 +293,7 @@ sable/
 │   └── src/
 │       ├── biometric/       # Face/palm feature extraction, liveness, screen flash
 │       ├── crypto/          # Pedersen, Poseidon, RNG
-│       ├── zk/halo2/        # Halo2 circuits (quantizer, poseidon, hamming, threshold, liveness)
+│       ├── zk/halo2/        # Halo2 circuits (quantizer, thermometer, poseidon, hamming, threshold, liveness)
 │       ├── mobile/          # Android/iOS FFI, keystore, sensors
 │       ├── p2p/             # NFC, BLE, WiFi Direct, session management
 │       └── attestation/     # X.509 certificates, chain validation, trust store
@@ -316,7 +325,8 @@ sable/
 | Elliptic curve | BLS12-381 / BN254 | Pedersen commitments, 128-bit security |
 | Hash | Poseidon | ZK-friendly hash for feature vectors (~10x faster than SHA-256 in circuits) |
 | Commitments | Pedersen | Hiding commitment acts as "biometric public key" |
-| ZK proofs | Halo2 | Transparent setup, ~250ms proof gen, ~2ms verification, 2KB proofs |
+| ZK proofs | Halo2 | Transparent setup, in-circuit Hamming distance (k=16), ~970ms proof gen, ~2ms verification, 2KB proofs |
+| Biometric encoding | Thermometer (L=9) | Ordinal encoding at 8 bits/dim; recovers accuracy that binary Hamming discards, constrained valid in-circuit |
 | Liveness | Spatial flash | Split-screen color challenge-response with 3D geometry detection (Tang et al., NDSS 2018) |
 | Biometrics | Face / Palm | 1024-dim embeddings, Gabor filters, multi-modal fusion |
 | P2P | NFC/BLE/WiFi Direct | X25519 ECDH + ChaCha20-Poly1305 AEAD |
@@ -326,7 +336,7 @@ sable/
 
 | Operation | Target | Achieved |
 |-----------|--------|----------|
-| Proof generation (face + liveness) | ≤ 1000ms | ~250ms |
+| Proof generation (in-circuit matcher + binding + liveness, k=16) | ≤ 1000ms | ~970ms |
 | Verification | ≤ 50ms | ~1.8ms |
 | Proof size | ≤ 10KB | 2.08KB |
 | Spatial flash challenge | -- | 3 rounds, ~1s total |
@@ -388,12 +398,14 @@ sable/
 
 **Active development.** The core library is feature-complete across all milestones but has not been audited for production use.
 
-**519 tests passing | 77 Halo2-specific tests | Interactive demo with ZK liveness detection**
+**557 tests passing | ~95 Halo2-specific tests | Interactive demo with ZK liveness detection**
 
 | Milestone | Status |
 |-----------|--------|
 | Core cryptography (BLS12-381, Poseidon, Pedersen, RNG) | Complete |
 | Halo2 ZK face verification (transparent setup, demo server) | Complete |
+| In-circuit Hamming matcher + Poseidon template-commitment binding | Complete |
+| Thermometer (ordinal) biometric encoding | Complete |
 | Spatial flash liveness with ZK proof (challenge-response, 3D geometry) | Complete |
 | Interactive demo (enrollment, auth, liveness, verification) | Complete |
 | Palm biometrics (vein + print extraction, fusion) | Complete |
