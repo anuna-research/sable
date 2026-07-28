@@ -68,6 +68,16 @@ pub mod liveness;
 /// Screen flash reflectance analysis for controlled-illumination liveness (REQ-062).
 pub mod screen_flash;
 
+/// Photometric convexity extraction (SPEC-006)
+pub mod photometric;
+
+/// Delta fingerprint encoding shared by circuit, server, and client (SPEC-006)
+pub mod fingerprint;
+
+/// Corneal glint liveness (SPEC-006)
+pub mod corneal;
+
+
 use crate::types::BiometricFeature;
 use crate::error::{Result, SableError};
 use serde::{Deserialize, Serialize};
