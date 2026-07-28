@@ -30,8 +30,13 @@ use crate::biometric::fingerprint::{matches, quantize_colour, quantize_delta};
 use crate::biometric::PalmImage;
 use crate::error::{Result, SableError};
 
-/// Minimum accepted eye-region dimension (CON-093 P1).
+/// Accepted eye-region dimension bounds (CON-093 P1).
+///
+/// The upper bound is enforced as well as the lower: without it
+/// `width * height * 3` can wrap on a 64-bit target, admitting a tiny buffer
+/// against enormous declared dimensions.
 const MIN_EYE_DIM: u32 = 8;
+const MAX_EYE_DIM: u32 = 4096;
 
 /// Number of screen quadrants contributing to the reflected composite.
 pub const NUM_QUADRANTS: usize = 4;
@@ -102,10 +107,17 @@ fn recognise(baseline_eye: &PalmImage, flash_eye: &PalmImage) -> Result<()> {
     if baseline_eye.channels != 3 || flash_eye.channels != 3 {
         return Err(SableError::InvalidInput("eye region must be RGB8".into()));
     }
-    if baseline_eye.width < MIN_EYE_DIM || baseline_eye.height < MIN_EYE_DIM {
-        return Err(SableError::InvalidInput("eye region smaller than 8x8".into()));
+    if !(MIN_EYE_DIM..=MAX_EYE_DIM).contains(&baseline_eye.width)
+        || !(MIN_EYE_DIM..=MAX_EYE_DIM).contains(&baseline_eye.height)
+    {
+        return Err(SableError::InvalidInput(
+            "eye region dimensions outside [8, 4096]".into(),
+        ));
     }
-    let expected = (baseline_eye.width as usize) * (baseline_eye.height as usize) * 3;
+    let expected = (baseline_eye.width as usize)
+        .checked_mul(baseline_eye.height as usize)
+        .and_then(|px| px.checked_mul(3))
+        .ok_or_else(|| SableError::InvalidInput("eye dimensions overflow".into()))?;
     if baseline_eye.data.len() != expected || flash_eye.data.len() != expected {
         return Err(SableError::InvalidInput(
             "eye pixel buffer length does not match dimensions".into(),
@@ -157,6 +169,32 @@ mod tests {
         let a = eye(16, [0, 0, 0]);
         let b = eye(24, [0, 0, 0]);
         assert!(glint_fingerprint(&a, &b).is_err());
+    }
+
+    #[test]
+    fn rejects_eye_dimensions_above_grammar_bound() {
+        let mut big = eye(16, [0, 0, 0]);
+        big.width = 8192;
+        big.height = 8192;
+        let base = eye(16, [0, 0, 0]);
+        assert!(glint_fingerprint(&base, &big).is_err());
+    }
+
+    #[test]
+    fn rejects_eye_length_computation_overflow() {
+        let base = PalmImage {
+            width: 3_062_868_337,
+            height: 2_007_567_422,
+            channels: 3,
+            data: vec![0u8; 26],
+            preprocessing_steps: vec![],
+        };
+        let mut evil = base.clone();
+        evil.data = vec![1u8; 26];
+        assert!(
+            glint_fingerprint(&base, &evil).is_err(),
+            "overflowing eye dimensions must be rejected, not wrapped"
+        );
     }
 
     #[test]

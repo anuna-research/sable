@@ -50,8 +50,14 @@ const RESPONSE_SCALE: i64 = 1 << 16;
 /// Number of screen quadrants illuminated per round: TL, TR, BL, BR.
 pub const NUM_QUADRANTS: usize = 4;
 
-/// Minimum accepted frame dimension (CON-092 P1).
+/// Accepted frame dimension bounds (CON-092 P1).
+///
+/// Both ends are enforced. The upper bound is part of the declared grammar, so
+/// omitting it would leave the recogniser accepting a wider language than the
+/// contract states — and would let `width * height * 3` wrap on a 64-bit target,
+/// admitting a tiny buffer against enormous declared dimensions.
 const MIN_DIM: u32 = 64;
+const MAX_DIM: u32 = 4096;
 
 /// Grid dimension bounds (CON-092 P2).
 const MIN_GRID_N: usize = 2;
@@ -82,8 +88,14 @@ pub struct PhotometricRound {
     /// Per-patch normalised illumination mix in Q15; all-zero if the patch had
     /// no response (REQ-112).
     pub mixes: Vec<[i64; NUM_QUADRANTS]>,
-    /// Mean L1 deviation of patch mixes from the round mean, Q15 over [0, 2]
-    /// (REQ-113).
+    /// How many patches produced any response at all (REQ-118).
+    ///
+    /// Callers MUST gate on this before trusting `convexity_score`: a score
+    /// derived from two patches is not evidence, and coverage is the only signal
+    /// that distinguishes "the face is flat" from "the face was barely lit".
+    pub responding_patches: usize,
+    /// Mean L1 deviation of *responding* patch mixes from their mean, Q15 over
+    /// [0, 2] (REQ-113). Zero when fewer than two patches responded.
     pub convexity_score: u16,
 }
 
@@ -131,18 +143,36 @@ pub fn extract(
         }
     }
 
-    // REQ-113: mean L1 deviation of each patch mix from the round mean mix.
-    let mean_mix: [i64; NUM_QUADRANTS] =
-        core::array::from_fn(|k| mixes.iter().map(|m| m[k]).sum::<i64>() / patch_count as i64);
-    let deviation_sum: i64 = mixes
-        .iter()
-        .map(|m| (0..NUM_QUADRANTS).map(|k| (m[k] - mean_mix[k]).abs()).sum::<i64>())
-        .sum();
-    let convexity_score = (deviation_sum / patch_count as i64).clamp(0, u16::MAX as i64) as u16;
+    // REQ-113 / REQ-118: score only patches that actually responded.
+    //
+    // Including non-responding patches would let *missing signal* masquerade as
+    // geometric variation: a half-lit grid of otherwise identical patches scores
+    // 16384, an order of magnitude above a real hemisphere at 1243, purely
+    // because the zero mixes drag the mean to the midpoint. Absence of evidence
+    // must not read as evidence.
+    let responding: Vec<&[i64; NUM_QUADRANTS]> =
+        mixes.iter().filter(|m| m.iter().any(|&v| v != 0)).collect();
+    let responding_patches = responding.len();
+
+    let convexity_score = if responding_patches < 2 {
+        // One patch deviates from itself by zero, and none is undefined. Both
+        // degrade to "no evidence" rather than to a high score.
+        0
+    } else {
+        let n = responding_patches as i64;
+        let mean_mix: [i64; NUM_QUADRANTS] =
+            core::array::from_fn(|k| responding.iter().map(|m| m[k]).sum::<i64>() / n);
+        let deviation_sum: i64 = responding
+            .iter()
+            .map(|m| (0..NUM_QUADRANTS).map(|k| (m[k] - mean_mix[k]).abs()).sum::<i64>())
+            .sum();
+        (deviation_sum / n).clamp(0, u16::MAX as i64) as u16
+    };
 
     Ok(PhotometricRound {
         responses,
         mixes,
+        responding_patches,
         convexity_score,
     })
 }
@@ -158,13 +188,23 @@ fn recognise(baseline: &PalmImage, flash: &PalmImage, grid: PatchGrid) -> Result
     if baseline.channels != 3 || flash.channels != 3 {
         return Err(SableError::InvalidInput("frames must be RGB8".into()));
     }
-    if baseline.width < MIN_DIM || baseline.height < MIN_DIM {
-        return Err(SableError::InvalidInput("frame smaller than 64x64".into()));
+    if !(MIN_DIM..=MAX_DIM).contains(&baseline.width)
+        || !(MIN_DIM..=MAX_DIM).contains(&baseline.height)
+    {
+        return Err(SableError::InvalidInput(
+            "frame dimensions outside [64, 4096]".into(),
+        ));
     }
     if !(MIN_GRID_N..=MAX_GRID_N).contains(&grid.n) {
         return Err(SableError::InvalidInput("grid.n outside [2, 8]".into()));
     }
-    let expected = (baseline.width as usize) * (baseline.height as usize) * 3;
+    // Checked, so an overflowing product cannot wrap into a plausible length.
+    // The bounds above already preclude it; this is defence in depth against a
+    // future bound change.
+    let expected = (baseline.width as usize)
+        .checked_mul(baseline.height as usize)
+        .and_then(|px| px.checked_mul(3))
+        .ok_or_else(|| SableError::InvalidInput("frame dimensions overflow".into()))?;
     if baseline.data.len() != expected || flash.data.len() != expected {
         return Err(SableError::InvalidInput(
             "pixel buffer length does not match dimensions".into(),
@@ -423,6 +463,81 @@ mod tests {
         assert!(
             curved_score >= flat_score.saturating_mul(2),
             "separation too weak: hemisphere {curved_score} vs plane {flat_score}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // TEST-145 — partial coverage must not read as convexity (REQ-113, REQ-118)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn partial_coverage_is_not_convexity() {
+        // Top half responds with a single uniform colour; bottom half is dark.
+        // Every responding patch has an identical mix, so there is no geometric
+        // variation whatsoever and the score must be near zero.
+        let base = blank(DIM, 0);
+        let mut flash = blank(DIM, 0);
+        let half = (DIM / 2) as usize * DIM as usize;
+        for i in 0..half {
+            flash.data[i * 3] = 120;
+        }
+
+        let out = extract(&base, &flash, &COLOURS, PatchGrid::default()).unwrap();
+        let hemi = extract(&base, &render(hemisphere, 1.0), &COLOURS, PatchGrid::default())
+            .unwrap()
+            .convexity_score;
+
+        assert_eq!(out.responding_patches, 8, "half the grid should respond");
+        assert!(
+            out.convexity_score < hemi,
+            "uniform partial coverage ({}) must not outscore a hemisphere ({hemi})",
+            out.convexity_score
+        );
+        assert_eq!(
+            out.convexity_score, 0,
+            "responding patches are identical, so variation must be zero"
+        );
+    }
+
+    #[test]
+    fn no_coverage_reports_zero_not_maximum() {
+        let base = blank(DIM, 50);
+        let flash = blank(DIM, 50);
+        let out = extract(&base, &flash, &COLOURS, PatchGrid::default()).unwrap();
+        assert_eq!(out.responding_patches, 0);
+        assert_eq!(out.convexity_score, 0);
+    }
+
+    // ---------------------------------------------------------------------
+    // Grammar bounds (CON-092 P1). The declared grammar is width/height
+    // %d64-4096; the recogniser must accept exactly that language.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn rejects_dimensions_above_grammar_bound() {
+        let mut big = blank(64, 0);
+        big.width = 8192;
+        big.height = 8192;
+        let base = blank(64, 0);
+        assert!(extract(&base, &big, &COLOURS, PatchGrid::default()).is_err());
+    }
+
+    #[test]
+    fn rejects_length_computation_overflow() {
+        // width*height*3 wraps to 26 on a 64-bit target, which would let a
+        // 26-byte buffer pass a naive length check.
+        let mut evil = PalmImage {
+            width: 3_062_868_337,
+            height: 2_007_567_422,
+            channels: 3,
+            data: vec![0u8; 26],
+            preprocessing_steps: vec![],
+        };
+        let base = evil.clone();
+        evil.data = vec![1u8; 26];
+        assert!(
+            extract(&base, &evil, &COLOURS, PatchGrid::default()).is_err(),
+            "overflowing dimensions must be rejected, not wrapped"
         );
     }
 

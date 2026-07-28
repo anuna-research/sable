@@ -108,9 +108,13 @@ Trace: [[#TEST-136]] · [[#CON-092]]
 
 ### REQ-113: Convexity discriminator
 
-The system SHALL compute a scalar convexity score equal to the mean over all
-patches of the L1 distance between that patch's mix vector and the round's mean
-mix vector, expressed as Q15 fixed point over the range [0, 2].
+The system SHALL compute a scalar convexity score equal to the mean over
+**responding** patches of the L1 distance between that patch's mix vector and the
+mean mix vector of responding patches, expressed as Q15 fixed point over [0, 2],
+AND SHALL report zero when fewer than two patches responded.
+
+A patch is *responding* when at least one of its four quadrant responses is
+non-zero.
 
 Rationale: what distinguishes a face from a photograph is not how any single
 patch is lit but how the lighting *varies across* patches. A plane presents
@@ -122,11 +126,29 @@ each patch faces. Simulated: plane 0.0129, hemisphere 0.0375 — a 2.9× separat
 Because each mix is normalised before comparison, the score is invariant to
 exposure and albedo, satisfying [[#NFR-106]].
 
+Restricting to responding patches is load-bearing, not a tidiness measure.
+Averaging over *all* patches lets missing signal masquerade as geometry: on a 4×4
+grid, eight identical responding patches beside eight dark ones score 16,384 —
+thirteen times the hemisphere's 1,243 — purely because the zero mixes drag the
+mean to the midpoint. Absence of evidence MUST NOT read as evidence.
+
 Two formulations were specified, implemented, tested against synthetic geometry,
 and **rejected** before this one. Both are recorded in [[#ADR-007]] because both
 are intuitive and a future reader will otherwise re-propose them.
 
 Trace: [[#TEST-137]] · [[#CON-092]] · [[#NFR-106]]
+
+### REQ-118: Coverage reporting
+
+The system SHALL report the number of responding patches alongside the convexity
+score, FOR each flash round.
+
+Rationale: coverage is the only signal separating "the subject is flat" from "the
+subject was barely lit", and a score derived from two patches is not evidence.
+Consumers gate on coverage before trusting the score; the floor is caller-supplied
+per [[#ADR-010]].
+
+Trace: [[#TEST-145]] · [[#CON-092]]
 
 ### REQ-114: Corneal glint fingerprint extraction
 
@@ -219,12 +241,20 @@ Post-conditions:
   Q1. responses has exactly grid.n² × 4 entries          (REQ-111)
   Q2. each patch mix sums to Q15 unity, or is all-zero    (REQ-112)
   Q3. convexity_score ∈ [0, 65535] as Q15 over [0,2]      (REQ-113)
+  Q4. convexity_score = 0 when responding_patches < 2     (REQ-113)
+  Q5. responding_patches ∈ [0, grid.n²]                   (REQ-118)
 Error model: SableError::InvalidInput on any precondition violation; no partial output.
 ```
 
 **Input grammar** (LangSec, Constitutional Principle 14). The extractor sits at a
 trust boundary — frames originate outside the enclave. The accepted language is
 regular and fully recognised before any arithmetic:
+
+Both dimension bounds are enforced. The upper bound is not decorative: without
+it `width × height × 3` wraps on a 64-bit target, so declared dimensions of
+3_062_868_337 × 2_007_567_422 reduce to an expected length of 26 bytes and a
+26-byte buffer passes the length check. The product is additionally computed with
+checked arithmetic as defence in depth.
 
 ```abnf
 frame        = width height pixel-array
@@ -398,6 +428,15 @@ Validates: [[#REQ-115]]
   rejected under maximally generous ordinal tolerances, so the rejection is
   carried by the categorical field. This assertion discovered
   [[BUG-001-hamming-over-categorical-order-field]].
+
+### TEST-145: Coverage handling
+Validates: [[#REQ-113]], [[#REQ-118]]
+- *Positive*: a half-lit grid of otherwise identical patches reports coverage 8
+  and scores 0, not a high score.
+- *Negative-output*: a partially-covered frame outscoring a hemisphere fails.
+- *Boundary*: zero coverage reports score 0, never a maximum.
+- *Grammar*: dimensions above 4096, and dimension pairs whose length product
+  overflows, are rejected by the recogniser.
 
 ### TEST-140: Witness binding
 Validates: [[#REQ-116]]
