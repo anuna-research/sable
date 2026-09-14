@@ -87,9 +87,11 @@ redeploy is needed to change a threshold; the verifier issues it per challenge.
 - Eye localisation is out of scope; [[#CON-093]] takes a pre-cropped region.
   Selecting a [[Face Landmark Model]] is deferred (owner: HOC). Until it exists
   the server runs with `corneal_enabled = 0`.
-- The demo server does not yet call the photometric extractor; it runs the
-  circuit with geometry thresholds at zero. Wiring it is a server task, not a
-  circuit one (owner: HOC).
+- The demo server calls the photometric extractor per round and carries
+  `responding_patches` and `convexity_scores` in the witness, but runs the
+  circuit with both floors at zero, so the checks are vacuous until
+  [[EXP-003-presentation-attack-study]] fixes the constants. The per-round
+  values are logged and returned in the prove response for that study.
 - In-circuit HKDF derivation of the expected fingerprints is deferred; the
   verifier derives them and the digest binds them to the nonces
   ([[#ADR-011]]). Ceiling recorded there.

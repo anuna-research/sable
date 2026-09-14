@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 // Note: PalmProcessor is available for production use with proper biometric sensors
 // For webcam demo, we use image-based feature extraction instead
 use sable_core::biometric::screen_flash::{ScreenFlashExtractor, ScreenFlashThresholds};
+use sable_core::biometric::photometric::{self, PatchGrid};
 use sable_core::biometric::PalmImage;
 use sable_core::crypto::pedersen::{CommitmentOpening, Generators, commit_with_opening};
 use sable_core::crypto::poseidon::poseidon_hash;
@@ -298,9 +299,23 @@ pub struct ProveResponse {
     pub region_match_scores: Option<Vec<RegionScoreResponse>>,
     /// Average spatial differentiation score across rounds.
     pub spatial_differentiation_score: Option<f64>,
+    /// Photometric convexity evidence per flash round (SPEC-006 REQ-111..113).
+    /// Observational for now: the circuit floors are zero (ADR-010).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub photometric_rounds: Option<Vec<PhotometricRoundResponse>>,
     pub timings: ProveTimings,
     pub what_was_proven: Vec<String>,
     pub what_stayed_private: Vec<String>,
+}
+
+/// Per-round photometric evidence reported back to the client.
+#[derive(Debug, Serialize)]
+pub struct PhotometricRoundResponse {
+    pub round: usize,
+    /// Patches (of a 4×4 grid) that responded to the flash at all (REQ-118).
+    pub responding_patches: u8,
+    /// Mean L1 deviation of patch illumination mixes, Q15 over [0, 2] (REQ-113).
+    pub convexity_score: u16,
 }
 
 #[derive(Debug, Serialize)]
@@ -439,6 +454,7 @@ pub async fn auth_prove(
     let mut color_challenge_passed: Option<bool> = None;
     let mut region_match_scores: Option<Vec<RegionScoreResponse>> = None;
     let mut spatial_differentiation_score: Option<f64> = None;
+    let mut photometric_rounds: Option<Vec<PhotometricRoundResponse>> = None;
     let mut liveness_witness: Option<LivenessWitness> = None;
 
     if let (Some(c_nonce_hex), Some(frames_b64)) = (&req.c_nonce, &req.flash_frames) {
@@ -589,6 +605,52 @@ pub async fn auth_prove(
             delta_fps, expected_fps
         );
 
+        // g2. Photometric convexity evidence per round (SPEC-006 REQ-111..113,
+        // REQ-118). The extractor runs on the same frames; its outputs enter the
+        // witness as private fields. The public floors stay at zero (ADR-010),
+        // so the coverage and convexity checks are vacuous in circuit until
+        // EXP-003 fixes the constants. Logged so real faces and presentation
+        // artefacts can be measured against each other.
+        let mut responding_patches = [0u8; 3];
+        let mut convexity_scores = [0u16; 3];
+        let mut photometric_report = Vec::with_capacity(3);
+        for (r, (flash, round)) in flash_frames_decoded
+            .iter()
+            .zip(pattern.rounds.iter())
+            .enumerate()
+        {
+            let quadrant_colours = [
+                round.tl_color.to_array(),
+                round.tr_color.to_array(),
+                round.bl_color.to_array(),
+                round.br_color.to_array(),
+            ];
+            match photometric::extract(&baseline, flash, &quadrant_colours, PatchGrid::default()) {
+                Ok(pr) => {
+                    // A 4×4 grid has 16 patches; the witness field admits ≤ 64.
+                    responding_patches[r] = pr.responding_patches.min(64) as u8;
+                    convexity_scores[r] = pr.convexity_score;
+                    tracing::info!(
+                        round = r,
+                        responding_patches = pr.responding_patches,
+                        convexity_score = pr.convexity_score,
+                        "photometric round"
+                    );
+                    photometric_report.push(PhotometricRoundResponse {
+                        round: r,
+                        responding_patches: responding_patches[r],
+                        convexity_score: pr.convexity_score,
+                    });
+                }
+                Err(e) => {
+                    // Observational only while the floors are zero: leave the
+                    // round at zero rather than failing the request.
+                    tracing::warn!(round = r, error = %e, "photometric extraction failed");
+                }
+            }
+        }
+        photometric_rounds = Some(photometric_report);
+
         let witness = LivenessWitness {
             delta_fingerprints: delta_fps,
             expected_fingerprints: expected_fps,
@@ -598,9 +660,13 @@ pub async fn auth_prove(
             // SPEC-006 0.2.0 (REQ-119): bind the joint coin-flip identifier so
             // the proof answers this challenge and no other.
             challenge_id: challenge_identifier(&c_nonce_32, &challenge.nonce),
-            // Geometry floors and the corneal check ship unset (ADR-010): the
-            // server does not yet run the photometric or corneal extractors,
-            // so those checks are vacuous, and visibly so in the digest.
+            // Photometric evidence is carried, but its floors are zero (ADR-010)
+            // so the checks are vacuous, and visibly so in the digest.
+            responding_patches,
+            convexity_scores,
+            min_coverage: 0,
+            min_convexity: 0,
+            // The corneal check stays disabled: the server has no eye crops.
             ..LivenessWitness::default()
         };
 
@@ -733,6 +799,7 @@ pub async fn auth_prove(
         liveness_proved_in_zk: if color_challenge_passed.is_some() { Some(liveness_proved_in_zk) } else { None },
         region_match_scores,
         spatial_differentiation_score,
+        photometric_rounds,
         timings: ProveTimings {
             feature_scan_ms: scan_time.as_secs_f64() * 1000.0,
             distance_calc_ms: distance_time.as_secs_f64() * 1000.0,
