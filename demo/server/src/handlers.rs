@@ -903,22 +903,6 @@ pub async fn auth_prove(
             glint_magnitude_floor,
         });
 
-        // f. Reject a failed spatial challenge. This runs after the extractors
-        // above on purpose: EXP-003 needs photometric and corneal evidence for
-        // presentation attacks, which are exactly the requests this rejects.
-        if !spatial_result.passed {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: format!(
-                        "Spatial color challenge failed: overall_spatial_score={:.4}",
-                        spatial_result.overall_spatial_score,
-                    ),
-                }),
-            ));
-        }
-
-
         let witness = LivenessWitness {
             delta_fingerprints: delta_fps,
             expected_fingerprints: expected_fps,
@@ -962,6 +946,24 @@ pub async fn auth_prove(
             }
         }
         liveness_witness = Some(witness);
+
+        // f. Reject a failed spatial challenge. This runs after the extractors
+        // and the OBS-085 pre-check on purpose: EXP-003 needs the geometric
+        // evidence and the circuit's would-be verdict for presentation attacks,
+        // which are exactly the requests this rejects.
+        if !spatial_result.passed {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: format!(
+                        "Spatial color challenge failed: overall_spatial_score={:.4}",
+                        spatial_result.overall_spatial_score,
+                    ),
+                }),
+            ));
+        }
+
+
 
         // h. Set response fields
         color_challenge_passed = Some(spatial_result.passed);

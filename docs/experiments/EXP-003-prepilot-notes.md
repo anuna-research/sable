@@ -10,7 +10,7 @@
 
 These are the numbers from the first end-to-end runs after the photometric and
 corneal extractors were wired into the demo server. They exist to shape the
-pilot, not to set a threshold. n = 4 bona fide (plus 4 weak-capture rejections), n = 4 phone-screen attempts (2 with geometric evidence).
+pilot, not to set a threshold. n = 4 bona fide (plus 4 weak-capture rejections), n = 5 phone-screen attempts (3 with geometric evidence).
 
 ## Bona fide (real face), spatial check passed
 
@@ -90,8 +90,21 @@ Fourth attempt (same phone, same photo):
 | | | | 2 | **4** | 18573 → 0.567 | 0 / 4 |
 | | | | 3 | **4** | 19404 → 0.592 | 0 / 1 |
 
+Fifth attempt (06:26, demo profile with coverage floor 8):
+
+| Attempt | Face Hamming | Spatial score | Round | Patches /16 | Convexity |
+|---------|--------------|---------------|-------|-------------|-----------|
+| 06:26:49 | 182 | 0.0603 (rejected) | 1 | **4** | 0.143 |
+| | | | 2 | **5** | 0.287 |
+| | | | 3 | **5** | 0.477 |
+
+Coverage 4–5 against the floor of 8: the circuit would have set liveness = 0
+on the Coverage check. The server's cosine gate rejected the request first,
+so no proof was produced; the OBS-085 pre-check now runs before that gate so
+later attempts log the circuit's would-be verdict.
+
 The phone photo matched the enrolled template *better* than the live face
-on both measured attempts (Hamming 110 and 85 against 185–230).
+on two of three measured attempts (Hamming 110, 85, 182 against 185–230).
 
 For reference, bona fide face Hamming distances in the same session were
 185–230 against a threshold of 2048; the phone-screen photo **passed the face
