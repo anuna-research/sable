@@ -10,7 +10,7 @@
 
 These are the numbers from the first end-to-end runs after the photometric and
 corneal extractors were wired into the demo server. They exist to shape the
-pilot, not to set a threshold. n = 2 bona fide, n = 4 phone-screen attempts (2 with geometric evidence).
+pilot, not to set a threshold. n = 3 bona fide, n = 4 phone-screen attempts (2 with geometric evidence).
 
 ## Bona fide (real face), spatial check passed
 
@@ -22,6 +22,21 @@ pilot, not to set a threshold. n = 2 bona fide, n = 4 phone-screen attempts (2 w
 | 05:55 | 1 | 13 | 10339 → 0.316 | miss / miss |
 | 05:55 | 2 | 14 | 13384 → 0.408 | miss / miss |
 | 05:55 | 3 | 10 | 8058 → 0.246 | miss / miss |
+
+Third bona fide run (06:1x, after the BUG-003 fix, defaults 5/1/3, scale 128):
+
+| Run | Round | Patches /16 | Convexity | Raw mean delta TL / TR / BL / BR (RGB) | Expected quadrant colours |
+|-----|-------|-------------|-----------|----------------------------------------|---------------------------|
+| 3 | 1 | 16 | 0.098 | (3.0,6.2,6.5) (2.6,5.0,5.2) (2.2,7.2,7.9) (2.3,6.2,6.6) | blue-magenta, green, green, blue |
+| 3 | 2 | 16 | 0.216 | (5.5,6.9,6.9) (3.9,6.6,7.3) (4.5,6.2,5.4) (4.6,6.5,7.3) | — |
+| 3 | 3 | 16 | 0.153 | (5.7,4.9,10.9) (3.6,4.3,9.0) (6.4,6.1,14.3) (5.7,5.3,10.6) | — |
+
+In-circuit liveness bit still **0**, failing the colour check in round 1.
+Every quadrant's delta is the same common-mode brightening with a slight
+blue-green cast; the per-quadrant tint is below one RGB unit. The server's
+cosine test scored 0.37–0.92 and passed. Its spatial-differentiation score was
+0.996 (mean cosine between adjacent quadrant deltas, i.e. nearly parallel) and
+passed only because the ceiling is 0.9995.
 
 Glint magnitude was 1–2 on every eye in every round (max channel delta of
 roughly 4–8 RGB units). Observed glint order in the 05:55 run was
@@ -98,6 +113,19 @@ match** at 441–446.
    attack and the matcher cannot see it by construction. Not this experiment's
    question, but liveness is carrying the whole load in the demo, and the
    threshold recalibration noted in the thermometer work is not optional.
+4a. **The fingerprint colour check cannot be made faithful to the server's
+   cosine check by tuning.** The fingerprint encodes the direction of the
+   whole delta, which on a webcam is the common-mode brightening shared by all
+   quadrants; the server's cosine passes because that brightening projects
+   positively onto every saturated colour. SPEC-006 REQ-126 / ADR-013 record
+   the replacement (cosine bound on raw signed deltas in circuit). Meanwhile
+   the demo runs the legacy checks vacuous (`SABLE_LIVENESS_THRESHOLDS=11,0,0`)
+   and the coverage floor armed at 8 (`SABLE_GEOMETRY_FLOORS=8,0`) as a
+   labelled demo setting, because coverage is the one cue these runs
+   separate on (bona fide 10–16, phone 4–6).
+4b. **The server's spatial-differentiation check is nearly vacuous** at a
+   0.9995 ceiling; the phone was rejected by negative colour cosines, not by
+   geometry. The pilot should not treat that check as evidence of anything.
 5. **Attack captures must be logged even when an earlier gate rejects them.**
    Done in the server; the pilot's extraction step should run over every
    capture unconditionally, as the brief already says.

@@ -82,10 +82,12 @@ redeploy is needed to change a threshold; the verifier issues it per challenge.
 
 **Open:**
 - [[BUG-003-expected-fingerprint-magnitude-mismatch]] is fixed by
-  [[#REQ-125]] (magnitude out of the expected side; floors on the observed
-  side). Whether a real webcam face now yields `liveness = 1` depends on the
-  ratio-bit agreement at the demo's `color_threshold`, which the first live
-  runs suggest is also marginal at magnitude 1–2; EXP-003 measures it.
+  [[#REQ-125]], but a real webcam face still yields `liveness = 0` under the
+  fingerprint colour check: the direction bits encode the common-mode
+  brightening, not the quadrant tint. [[#REQ-126]] / [[#ADR-013]] propose the
+  replacement (cosine bound on raw deltas) for 0.3.0. Until then the demo
+  runs the legacy checks vacuous and the coverage floor armed as a labelled
+  demo setting.
 - Operating thresholds cannot be set without a presentation-attack study —
   see [[#ADR-010]] and [[EXP-003-presentation-attack-study]] (owner: HOC). This
   spec ships the mechanism, not the constants.
@@ -381,6 +383,68 @@ Trace:
 - [[#TEST-151]] (prohibited-action)
 - [[#CON-095]]
 
+### REQ-125: Magnitude is a floor on the observed side, never an expected value
+
+For: verifier
+
+The system SHALL produce every expected fingerprint (the twelve quadrant
+colours and the three glint composites) with a `magnitude` field of zero, SHALL
+exclude the five magnitude bits from the colour check's Hamming distance, and
+SHALL judge the observed `magnitude` only against a public floor
+(`min_magnitude` for the quadrants, `glint_magnitude_floor` for the glints).
+
+Rationale: an emitted colour has a brightness; a reflected delta has a
+magnitude in units set by distance, albedo and exposure. Comparing them, or
+bit-mixing them into a Hamming distance, compares a constant 31 to a number
+that is structurally small, and produced `liveness = 0` on every real face in
+the first live runs ([[BUG-003-expected-fingerprint-magnitude-mismatch]]).
+The magnitude scale of the delta quantiser is prover-side calibration: the
+delta fingerprints are private, so binding the scale would add nothing to
+soundness. What the verifier controls is the floor.
+
+Trace: [[#TEST-153]] · [[#TEST-154]] · [[#CON-093]] Q4 · [[#CON-095]]
+
+### REQ-126: Colour agreement as a cosine bound on raw deltas (proposed, 0.3.0)
+
+For: verifier
+
+Status: **proposed**, not implemented. Supersedes the 0.1.0 fingerprint colour
+and spatial checks when adopted.
+
+The system SHALL carry, for each flash round and quadrant, the signed mean RGB
+delta `d_q ∈ [−255, 255]³` as a private witness, and SHALL constrain in
+fixed-point arithmetic, for each quadrant, that
+`⟨d_q, c_q⟩ ≥ 0` and `⟨d_q, c_q⟩² · K ≥ ‖d_q‖² · ‖c_q‖² · τ²`, where `c_q` is
+the public quadrant colour and `τ/√K` is the public cosine floor; AND, for each
+adjacent quadrant pair, that `⟨d_a, d_b⟩² · K ≤ ‖d_a‖² · ‖d_b‖² · σ²` where
+`σ/√K` is the public parallelism ceiling; AND SHALL accept a round set when at
+least `R_min` of the three rounds satisfy both, with `R_min` public.
+
+The public colour vectors replace the twelve expected fingerprints in digest
+limb 0 (`4 rounds × 3 octets × 12 = 288 bits`, split across two limbs); `τ`,
+`σ` and `R_min` join limb 1.
+
+Rationale: the first live runs ([[EXP-003-prepilot-notes]]) show a webcam
+reflects the flash as a common-mode brightening of a few RGB units shared by
+every quadrant, with the per-quadrant tint below one unit. A fingerprint
+encodes the direction of the whole delta, so every quadrant reads the common
+mode and the categorical `order` disagrees with the expected colour on most
+quadrants regardless of threshold. The server's cosine test passes because a
+common-mode brightening has positive projection onto every saturated colour.
+The circuit can only be faithful to the server by computing the same
+quantity. Cost estimate: three multiplications for each of the dot product and
+the two norms, one squaring, and one ≈ 40-bit comparison per quadrant, plus
+the same per adjacent pair: on the order of 2 000 advice cells for twelve
+quadrants and twelve pairs, inside [[#NFR-104]].
+
+Caveat carried forward: the server's own cosine floor (0.2) and parallelism
+ceiling (0.9995) are unvalidated demo constants. A faithful circuit inherits
+their weakness; [[EXP-003-presentation-attack-study]] fixes the values. Until
+then the coverage floor ([[#REQ-120]]) is the only cue the pre-pilot data
+separates on.
+
+Trace: [[#ADR-013]] · [[#TEST-155]] · [[BUG-003-expected-fingerprint-magnitude-mismatch]]
+
 ## Non-Functional Requirements
 
 ### NFR-104: Circuit row budget
@@ -507,27 +571,6 @@ the aliasing defect of the 0.1.0 packing.
 
 Implements: [[#REQ-116]], [[#REQ-117]], [[#REQ-119]]
 Verified by: [[#TEST-140]], [[#TEST-141]], [[#TEST-146]]
-
-### REQ-125: Magnitude is a floor on the observed side, never an expected value
-
-For: verifier
-
-The system SHALL produce every expected fingerprint (the twelve quadrant
-colours and the three glint composites) with a `magnitude` field of zero, SHALL
-exclude the five magnitude bits from the colour check's Hamming distance, and
-SHALL judge the observed `magnitude` only against a public floor
-(`min_magnitude` for the quadrants, `glint_magnitude_floor` for the glints).
-
-Rationale: an emitted colour has a brightness; a reflected delta has a
-magnitude in units set by distance, albedo and exposure. Comparing them, or
-bit-mixing them into a Hamming distance, compares a constant 31 to a number
-that is structurally small, and produced `liveness = 0` on every real face in
-the first live runs ([[BUG-003-expected-fingerprint-magnitude-mismatch]]).
-The magnitude scale of the delta quantiser is prover-side calibration: the
-delta fingerprints are private, so binding the scale would add nothing to
-soundness. What the verifier controls is the floor.
-
-Trace: [[#TEST-153]] · [[#TEST-154]] · [[#CON-093]] Q4 · [[#CON-095]]
 
 ### CON-095: Liveness witness
 
@@ -695,6 +738,30 @@ and [[BUG-001-hamming-over-categorical-order-field]] does not propagate.
 Negative: about 40 comparison gadgets per proof instead of 6 popcounts. Measured
 against [[#NFR-104]] by [[#TEST-142]].
 
+### ADR-013: Colour agreement is a cosine bound on raw deltas, not a Hamming distance on fingerprints (proposed)
+
+**Context.** The 0.1.0 colour check quantises each quadrant delta to a
+16-bit fingerprint and Hamming-compares it to the quantised expected colour.
+[[BUG-001]] showed the order field is categorical; [[BUG-003]] showed the
+magnitude field is in the wrong units; the first live runs show the remaining
+direction bits encode the common-mode illumination, not the quadrant tint.
+Three defects in one encoding is a design signal, not a tuning problem.
+
+**Decision.** Adopt [[#REQ-126]] in the next normative revision: the witness
+carries signed raw deltas, the circuit evaluates the same cosine bound the
+server evaluates, and the fingerprint colour and spatial checks are retired.
+The fingerprint encoder stays for the corneal glint, where a categorical
+order test against an unpredictable per-round composite is the point.
+
+**Consequences.** Positive: the proven relation matches the server's check
+exactly, so "server passed, circuit said 0" cannot recur for this cue. The
+raw-delta witness is what EXP-003 records anyway. Negative: a witness format
+change and a digest limb change, so a new circuit shape and keygen; and the
+circuit becomes faithful to a weak test, which is honest but not strong. The
+coverage floor carries the load until the study reports.
+
+**Not decided here.** The values of `τ`, `σ` and `R_min`.
+
 ## Test Specifications
 
 Each test follows requirement-targeted decomposition: positive, negative-input,
@@ -821,6 +888,16 @@ Validates: [[#REQ-122]], [[#REQ-125]]
 - A glint with the composite's direction at magnitude 1 passes at
   `glint_magnitude_floor = 1` and fails at 2, natively and in circuit.
 
+### TEST-155: Cosine bound on raw deltas (proposed with REQ-126)
+Validates: [[#REQ-126]]
+- *Positive*: the twelve raw deltas from a recorded bona fide capture that the
+  server accepted → result 1 at the server's `τ`, `σ`, `R_min`.
+- *Negative-output*: the deltas from a recorded phone-screen capture the server
+  rejected → result 0.
+- *Equivalence*: over a corpus of recorded captures, the circuit's bit equals
+  the server's boolean on every capture.
+- *Boundary*: a synthetic delta at cosine exactly `τ` passes; at `τ − ε` fails.
+
 ### TEST-151: Threshold aliasing is unsatisfiable
 Validates: [[#REQ-124]] (prohibited-action)
 - Construct a witness with `color_threshold = 256 + t` and
@@ -900,6 +977,10 @@ Hard stops:     [[#REQ-123]] no Hamming comparison of the glint ·
 
 <details>
 <summary>Revision history — 0.1.0 → 0.2.0</summary>
+
+- 0.2.0+ (2026-09-14, same revision): REQ-125 magnitude-as-floor (BUG-003);
+  REQ-126 / ADR-013 / TEST-155 recorded as *proposed* for 0.3.0 after the
+  first live runs; not normative in 0.2.0.
 
 - 0.2.0 — normative: REQ-119 nonce binding, REQ-120/121 in-circuit coverage and
   convexity floors, REQ-122 in-circuit corneal agreement, REQ-123 (prohibition)
