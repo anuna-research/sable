@@ -126,13 +126,21 @@ function renderGeometricEvidence(proof: ProveResponse): string {
       </tr>`;
   }).join('');
 
-  const cornealLive = corneal?.some(c => c.enabled) ?? false;
+  const p = proof.liveness_parameters;
+  const cornealLive = p?.corneal_enabled ?? corneal?.some(c => c.enabled) ?? false;
+  const coverageLive = (p?.min_coverage ?? 0) > 0;
+  const convexityLive = (p?.min_convexity ?? 0) > 0;
+  const legacyVacuous = p ? (p.color_threshold >= 11 && p.spatial_threshold === 0 && p.min_magnitude === 0) : false;
+  const status = (live: boolean, detail: string) =>
+    `<strong style="color: ${live ? 'var(--accent-success)' : 'var(--text-secondary)'};">${live ? 'live' : 'off'}</strong>${detail}`;
   return `
     <h3>Geometric Liveness Evidence</h3>
     <p style="font-size: 0.8rem; color: var(--text-secondary);">
-      Photometric floors are zero and the corneal check is
-      <strong>${cornealLive ? 'live' : 'observational'}</strong>, so these values
-      are carried in the proof digest but do not yet gate it (SPEC-006 ADR-010).
+      In-circuit checks this proof ran with (demo settings, bound in the digest, none validated; SPEC-006 ADR-010):
+      coverage ${status(coverageLive, coverageLive ? ` ≥ ${p!.min_coverage}/16` : '')} ·
+      convexity ${status(convexityLive, convexityLive ? ` ≥ ${(p!.min_convexity / 32768).toFixed(3)}` : '')} ·
+      corneal ${status(cornealLive, '')} ·
+      legacy colour/spatial/magnitude ${p ? `${p.color_threshold}/${p.spatial_threshold}/${p.min_magnitude}${legacyVacuous ? ' (vacuous)' : ''}` : '–'}.
     </p>
     <div style="overflow-x: auto;">
       <table style="font-size: 0.8rem; border-collapse: collapse; width: 100%;">
@@ -411,9 +419,10 @@ function renderAuthPhase(
               </p>
               ${!proof.liveness_proved_in_zk && proof.liveness_passed ? `
                 <p style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem;">
-                  The server's floating-point check passed but the circuit's quantised
-                  fingerprint check did not, so a verifier reading only the proof sees
-                  liveness = 0. See BUG-003 in docs/specs.
+                  The server's floating-point check passed but the circuit's liveness relation
+                  did not hold${proof.liveness_failing_check
+                    ? `: the <strong>${proof.liveness_failing_check.check}</strong> check failed in round ${proof.liveness_failing_check.round + 1}`
+                    : ''}. A verifier reading only the proof sees liveness = 0.
                 </p>
               ` : ''}
             ` : ''}

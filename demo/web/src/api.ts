@@ -54,6 +54,23 @@ export interface FingerprintFields {
   magnitude: number;
 }
 
+export interface LivenessParameters {
+  color_threshold: number;
+  spatial_threshold: number;
+  min_magnitude: number;
+  magnitude_scale: number;
+  min_coverage: number;
+  min_convexity: number;
+  corneal_enabled: boolean;
+  glint_ratio_tolerance: number;
+  glint_magnitude_floor: number;
+}
+
+export interface LivenessFailingCheck {
+  check: string;
+  round: number;
+}
+
 export interface CornealRound {
   round: number;
   left_glint: FingerprintFields;
@@ -92,6 +109,8 @@ export interface ProveResponse {
   spatial_differentiation_score?: number;
   photometric_rounds?: PhotometricRound[];
   corneal_rounds?: CornealRound[];
+  liveness_parameters?: LivenessParameters;
+  liveness_failing_check?: LivenessFailingCheck;
   timings: ProveTimings;
   what_was_proven: string[];
   what_stayed_private: string[];

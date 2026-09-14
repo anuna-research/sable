@@ -313,6 +313,13 @@ pub struct ProveResponse {
     /// Observational unless SABLE_CORNEAL_TOLERANCE is set (ADR-010).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub corneal_rounds: Option<Vec<CornealRoundResponse>>,
+    /// Every public liveness parameter the circuit was run with, so the UI can
+    /// say which checks were live. All are demo settings (ADR-010).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liveness_parameters: Option<LivenessParameters>,
+    /// The first sub-check the native pre-check failed, if any (OBS-085).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liveness_failing_check: Option<LivenessFailureResponse>,
     pub timings: ProveTimings,
     pub what_was_proven: Vec<String>,
     pub what_stayed_private: Vec<String>,
@@ -360,6 +367,40 @@ pub struct CornealRoundResponse {
     /// the check is not enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agrees: Option<[bool; 2]>,
+}
+
+/// Public liveness parameters as run, echoed for the result screen.
+#[derive(Debug, Clone, Serialize)]
+pub struct LivenessParameters {
+    pub color_threshold: u8,
+    pub spatial_threshold: u8,
+    pub min_magnitude: u8,
+    pub magnitude_scale: u32,
+    pub min_coverage: u8,
+    pub min_convexity: u16,
+    pub corneal_enabled: bool,
+    pub glint_ratio_tolerance: u8,
+    pub glint_magnitude_floor: u8,
+}
+
+/// Which sub-check the native mirror of the circuit failed first.
+#[derive(Debug, Clone, Serialize)]
+pub struct LivenessFailureResponse {
+    pub check: String,
+    pub round: usize,
+}
+
+/// Geometry floors from `SABLE_GEOMETRY_FLOORS="<min_coverage>,<min_convexity>"`.
+///
+/// Coverage is a patch count out of 16 (4×4 grid, ≤ 64); convexity is Q15 over
+/// [0, 2]. Zero disables a floor. Any non-zero value here is a *demo* setting:
+/// SPEC-006 ADR-010 reserves the real constants for EXP-003.
+fn geometry_floors_from_env() -> (u8, u16) {
+    let Ok(raw) = std::env::var("SABLE_GEOMETRY_FLOORS") else { return (0, 0) };
+    let Some((a, b)) = raw.split_once(',') else { return (0, 0) };
+    let coverage: u8 = a.trim().parse().unwrap_or(0);
+    let convexity: u16 = b.trim().parse().unwrap_or(0);
+    (coverage.min(64), convexity)
 }
 
 /// Corneal parameters from `SABLE_CORNEAL_TOLERANCE="<ratio>,<magnitude_floor>"`.
@@ -532,6 +573,8 @@ pub async fn auth_prove(
     let mut spatial_differentiation_score: Option<f64> = None;
     let mut photometric_rounds: Option<Vec<PhotometricRoundResponse>> = None;
     let mut corneal_rounds: Option<Vec<CornealRoundResponse>> = None;
+    let mut liveness_parameters: Option<LivenessParameters> = None;
+    let mut liveness_failing_check: Option<LivenessFailureResponse> = None;
     let mut liveness_witness: Option<LivenessWitness> = None;
 
     if let (Some(c_nonce_hex), Some(frames_b64)) = (&req.c_nonce, &req.flash_frames) {
@@ -847,6 +890,18 @@ pub async fn auth_prove(
         } else {
             (0, 0)
         };
+        let (min_coverage, min_convexity) = geometry_floors_from_env();
+        liveness_parameters = Some(LivenessParameters {
+            color_threshold,
+            spatial_threshold,
+            min_magnitude,
+            magnitude_scale: crate::flash_challenge::magnitude_scale(),
+            min_coverage,
+            min_convexity,
+            corneal_enabled: corneal_live,
+            glint_ratio_tolerance,
+            glint_magnitude_floor,
+        });
 
         // f. Reject a failed spatial challenge. This runs after the extractors
         // above on purpose: EXP-003 needs photometric and corneal evidence for
@@ -874,12 +929,12 @@ pub async fn auth_prove(
             // SPEC-006 0.2.0 (REQ-119): bind the joint coin-flip identifier so
             // the proof answers this challenge and no other.
             challenge_id: challenge_identifier(&c_nonce_32, &challenge.nonce),
-            // Photometric evidence is carried, but its floors are zero (ADR-010)
-            // so the checks are vacuous, and visibly so in the digest.
+            // Photometric floors default to zero (ADR-010); SABLE_GEOMETRY_FLOORS
+            // arms them as an explicit demo setting, visible in the digest.
             responding_patches,
             convexity_scores,
-            min_coverage: 0,
-            min_convexity: 0,
+            min_coverage,
+            min_convexity,
             // Corneal evidence is carried whenever the client sent eye crops;
             // the check is live only with SABLE_CORNEAL_TOLERANCE set.
             corneal_enabled: corneal_live,
@@ -893,12 +948,18 @@ pub async fn auth_prove(
         // OBS-085: which check family the native pre-check fails, without values.
         match LivenessCheckCircuit::new(witness.clone()).first_failing_check() {
             None => tracing::info!(obs = "OBS-085", outcome = "pass", "liveness pre-check"),
-            Some(f) => tracing::warn!(
-                obs = "OBS-085",
-                check = ?f.check,
-                round = f.round,
-                "liveness pre-check failed"
-            ),
+            Some(f) => {
+                tracing::warn!(
+                    obs = "OBS-085",
+                    check = ?f.check,
+                    round = f.round,
+                    "liveness pre-check failed"
+                );
+                liveness_failing_check = Some(LivenessFailureResponse {
+                    check: format!("{:?}", f.check),
+                    round: f.round,
+                });
+            }
         }
         liveness_witness = Some(witness);
 
@@ -1021,6 +1082,8 @@ pub async fn auth_prove(
         spatial_differentiation_score,
         photometric_rounds,
         corneal_rounds,
+        liveness_parameters: liveness_parameters.clone(),
+        liveness_failing_check,
         timings: ProveTimings {
             feature_scan_ms: scan_time.as_secs_f64() * 1000.0,
             distance_calc_ms: distance_time.as_secs_f64() * 1000.0,
@@ -1042,8 +1105,16 @@ pub async fn auth_prove(
             } else if color_challenge_passed == Some(true) {
                 proven.push("Server-side spatial reflectance check passed; the circuit's quantised check did not, so the proof's liveness bit is 0 (see BUG-003)".to_string());
             }
-            if color_challenge_passed.is_some() {
-                proven.push("Coverage, convexity and corneal floors are carried in the digest at zero: observational until EXP-003 fixes them (SPEC-006 ADR-010)".to_string());
+            if let Some(p) = &liveness_parameters {
+                let mut live = Vec::new();
+                if p.min_coverage > 0 { live.push(format!("coverage ≥ {}/16", p.min_coverage)); }
+                if p.min_convexity > 0 { live.push(format!("convexity ≥ {:.3}", p.min_convexity as f64 / 32768.0)); }
+                if p.corneal_enabled { live.push("corneal glint agreement".to_string()); }
+                if live.is_empty() {
+                    proven.push("Coverage, convexity and corneal floors are carried in the digest at zero: observational until EXP-003 fixes them (SPEC-006 ADR-010)".to_string());
+                } else {
+                    proven.push(format!("Geometric checks live in circuit: {} (demo settings, not validated; the floors are bound in the digest)", live.join(", ")));
+                }
             }
             proven
         },

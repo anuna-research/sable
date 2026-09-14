@@ -77,8 +77,23 @@ SABLE_MAGNITUDE_SCALE=32 \
 # Arm the in-circuit corneal check: max ordinal delta on the ratio fields, then
 # the minimum observed glint magnitude (a floor; the composite has none).
 SABLE_CORNEAL_TOLERANCE=15,1 \
+# Arm the geometry floors: minimum responding patches (of 16), minimum
+# convexity (Q15 over [0,2]). Zero disables each.
+SABLE_GEOMETRY_FLOORS=8,0 \
 cargo run --release --features halo2-proofs
 ```
+
+**Demo profile that yields liveness = 1 for a real face on a webcam** (the
+legacy fingerprint checks made vacuous, the coverage floor armed; see SPEC-006
+REQ-126 for why the fingerprint checks cannot pass on webcam data):
+
+```bash
+SABLE_LIVENESS_THRESHOLDS=11,0,0 SABLE_GEOMETRY_FLOORS=8,0 \
+cargo run --release --features halo2-proofs
+```
+
+The result screen shows which checks were live for each proof and, when the
+in-circuit bit is 0, which check failed in which round.
 
 Every value above is a demo guess; none is validated (SPEC-006 ADR-010, BUG-003).
 The server logs the raw mean RGB delta per quadrant on each prove request so
