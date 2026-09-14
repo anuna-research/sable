@@ -183,14 +183,15 @@ export function renderVerificationScreen(
                 <div class="timing-label">Liveness Check</div>
               </div>
             ` : ''}
-            ${result.details.liveness_proved_in_zk ? `
+            ${result.details.liveness_proved_in_zk != null ? `
               <div class="timing-item">
-                <div class="timing-value" style="color: var(--accent-success);">
-                  \u2713
+                <div class="timing-value" style="color: ${result.details.liveness_proved_in_zk ? 'var(--accent-success)' : 'var(--accent-error)'};">
+                  ${result.details.liveness_proved_in_zk ? '\u2713' : '\u2717'}
                 </div>
                 <div class="timing-label">ZK Liveness</div>
               </div>
-            ` : result.details.color_challenge_passed != null ? `
+            ` : ''}
+            ${result.details.color_challenge_passed != null ? `
               <div class="timing-item">
                 <div class="timing-value" style="color: ${result.details.color_challenge_passed ? 'var(--accent-success)' : 'var(--accent-error)'};">
                   ${result.details.color_challenge_passed ? '\u2713' : '\u2717'}

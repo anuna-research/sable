@@ -81,6 +81,11 @@ Rollback is the verifier refusing digests whose thresholds it did not issue. No
 redeploy is needed to change a threshold; the verifier issues it per challenge.
 
 **Open:**
+- [[BUG-003-expected-fingerprint-magnitude-mismatch]]: expected fingerprints
+  carry emitted-colour magnitude (31) while observed carry reflected-delta
+  magnitude (0–2 on a webcam), so the 0.1.0 colour check yields
+  `liveness = 0` for real faces and the corneal check cannot be armed at a
+  finite magnitude tolerance. Fix proposed there; blocks EXP-003 thresholds.
 - Operating thresholds cannot be set without a presentation-attack study —
   see [[#ADR-010]] and [[EXP-003-presentation-attack-study]] (owner: HOC). This
   spec ships the mechanism, not the constants.

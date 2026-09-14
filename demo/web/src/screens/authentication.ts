@@ -397,9 +397,25 @@ function renderAuthPhase(
             <h3>Liveness Check</h3>
             <p style="font-size: 0.875rem;">
               <span style="color: ${proof.liveness_passed ? 'var(--accent-success)' : 'var(--accent-error)'};">
-                ${proof.liveness_passed ? 'Passed - real face detected via screen flash reflectance' : 'Failed - liveness check did not pass'}
+                ${proof.liveness_passed ? 'Server check passed - screen flash reflectance consistent with a real face' : 'Server check failed - liveness check did not pass'}
               </span>
             </p>
+            ${proof.liveness_proved_in_zk != null ? `
+              <p style="font-size: 0.875rem; margin-top: 0.25rem;">
+                <span style="color: ${proof.liveness_proved_in_zk ? 'var(--accent-success)' : 'var(--accent-error)'};">
+                  ${proof.liveness_proved_in_zk
+                    ? 'In-circuit liveness bit: 1 - the proof itself attests liveness'
+                    : 'In-circuit liveness bit: 0 - the proof does not attest liveness'}
+                </span>
+              </p>
+              ${!proof.liveness_proved_in_zk && proof.liveness_passed ? `
+                <p style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem;">
+                  The server's floating-point check passed but the circuit's quantised
+                  fingerprint check did not, so a verifier reading only the proof sees
+                  liveness = 0. See BUG-003 in docs/specs.
+                </p>
+              ` : ''}
+            ` : ''}
           ` : ''}
 
           ${proof.color_challenge_passed != null ? `
