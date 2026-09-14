@@ -640,19 +640,6 @@ pub async fn auth_prove(
             spatial_result.region_scores.len(),
         );
 
-        // f. If failed, return 401 error
-        if !spatial_result.passed {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: format!(
-                        "Spatial color challenge failed: overall_spatial_score={:.4}",
-                        spatial_result.overall_spatial_score,
-                    ),
-                }),
-            ));
-        }
-
         // g. Compute delta fingerprints for ZK liveness proof
         let (delta_fps, expected_fps) =
             compute_liveness_fingerprints(&baseline, &flash_frames_decoded, &pattern);
@@ -825,6 +812,22 @@ pub async fn auth_prove(
         } else {
             (0, 0)
         };
+
+        // f. Reject a failed spatial challenge. This runs after the extractors
+        // above on purpose: EXP-003 needs photometric and corneal evidence for
+        // presentation attacks, which are exactly the requests this rejects.
+        if !spatial_result.passed {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: format!(
+                        "Spatial color challenge failed: overall_spatial_score={:.4}",
+                        spatial_result.overall_spatial_score,
+                    ),
+                }),
+            ));
+        }
+
 
         let witness = LivenessWitness {
             delta_fingerprints: delta_fps,
