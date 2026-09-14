@@ -5,8 +5,8 @@
 | id | SPEC-006 |
 | title | Geometric and Corneal Liveness Cues |
 | status | draft |
-| version | 0.1.0 |
-| last-updated | 2026-07-28 |
+| version | 0.2.0 |
+| last-updated | 2026-09-14 |
 | review-tier | 1 (no-go area: cryptography, authentication core, privacy-sensitive transforms) |
 
 The key words MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT,
@@ -19,7 +19,10 @@ capitals.
 **Intent:** The existing spatial-flash check proves that face quadrants reflect
 *different colours*. It does not prove the face has *shape*. This spec adds two
 cues that do — a geometric one derived from light already being emitted, and a
-corneal one — without new capture hardware.
+corneal one — without new capture hardware, and carries both into the
+[[Liveness Circuit]] so the proof, not the server, enforces them. Version 0.2.0
+also binds the proof to the [[Joint Coin-Flip Challenge]] that produced the flash
+pattern, so a proof answers one challenge and no other.
 
 **Metaphor:** The screen is already a four-lamp photographic studio firing three
 times. Today we only check that the lamps were different colours; this spec reads
@@ -41,23 +44,57 @@ the *shadows*.
         ▼                                            ▼
   ┌──────────────────┐   u16 fingerprint   ┌────────────────────┐
   │ Corneal glint    │────────────────────▶│ Liveness circuit   │
-  │ [[#CON-093]]     │  (existing encoder) │ [[#CON-094]] k=16  │
-  └──────────────────┘                     └────────────────────┘
+  │ [[#CON-093]]     │  (existing encoder) │ [[#CON-095]] k=16  │
+  └──────────────────┘                     │  coverage ≥ floor  │
+                                           │  convexity ≥ floor │
+  c_nonce ‖ s_nonce ──▶ challenge_id ─────▶│  glint ≈ composite │
+        (SHA-256, both sides)              │  Poseidon digest   │
+                                           │  [[#CON-094]]      │
+                                           └─────────┬──────────┘
+                                                     │ public: result, digest
+                                                     ▼
+                                             verifier recomputes digest
+                                             from nonces + thresholds
         arrows point inward → the circuit never calls the extractors
 ```
 
 **Decisions:** [[#ADR-007]] response contrast instead of an explicit normal
 solve · [[#ADR-008]] reuse the existing quantiser for the glint · [[#ADR-009]]
 Poseidon digest replaces the 216-bit packing · [[#ADR-010]] thresholds ship unset
+· [[#ADR-011]] nonces bound by digest, HKDF stays verifier-side · [[#ADR-012]]
+field-wise glint comparison in circuit, never Hamming
 
 **Load-bearing:** [[#REQ-113]] convexity discriminator · [[#REQ-115]] corneal
-agreement · [[#REQ-117]] digest migration · [[#NFR-104]] circuit row budget
+agreement · [[#REQ-117]] digest migration · [[#REQ-119]] nonce binding ·
+[[#REQ-121]] in-circuit convexity floor · [[#REQ-123]] no Hamming on the glint ·
+[[#NFR-104]] circuit row budget
+
+**Controls:** [[#REQ-123]] prohibits Hamming comparison of the glint in circuit ·
+[[#REQ-124]] requires every digest field to be range-constrained to its declared
+width ([[BUG-002-unconstrained-threshold-aliasing]]) · [[#ADR-010]] no threshold
+default enters the relation · [[#NFR-104]] row budget is a hard stop before k=17
+
+**Enable path:** every new check is switched on by its public threshold. A
+threshold of zero (or `corneal_enabled = 0`) makes the check vacuous, and because
+thresholds are inside the digest the verifier can see which checks were live.
+Rollback is the verifier refusing digests whose thresholds it did not issue. No
+redeploy is needed to change a threshold; the verifier issues it per challenge.
 
 **Open:**
 - Operating thresholds cannot be set without a presentation-attack study —
-  see [[#ADR-010]] (owner: HOC). This spec ships the mechanism, not the constants.
+  see [[#ADR-010]] and [[EXP-003-presentation-attack-study]] (owner: HOC). This
+  spec ships the mechanism, not the constants.
 - Eye localisation is out of scope; [[#CON-093]] takes a pre-cropped region.
-  Selecting a [[Face Landmark Model]] is deferred (owner: HOC).
+  Selecting a [[Face Landmark Model]] is deferred (owner: HOC). Until it exists
+  the server runs with `corneal_enabled = 0`.
+- The demo server does not yet call the photometric extractor; it runs the
+  circuit with geometry thresholds at zero. Wiring it is a server task, not a
+  circuit one (owner: HOC).
+- In-circuit HKDF derivation of the expected fingerprints is deferred; the
+  verifier derives them and the digest binds them to the nonces
+  ([[#ADR-011]]). Ceiling recorded there.
+- The rolling-shutter timing axis is not in this spec. It enters as its own REQ
+  set only after [[EXP-002-rolling-shutter-hardware]] passes.
 - Tier 1 review obligation (cross-model adversarial review + human domain
   expert) is **not** satisfied by the authoring session (owner: HOC).
 
@@ -181,9 +218,14 @@ Trace: [[#TEST-139]] · [[#CON-093]]
 
 ### REQ-116: Witness binding
 
-The system SHALL include the patch codes, convexity scores, and glint
-fingerprints in the challenge digest, SO THAT a prover cannot substitute values
-not agreed with the verifier.
+The system SHALL include every public parameter of the liveness relation in the
+challenge digest — the twelve expected fingerprints, the three legacy thresholds,
+the coverage floor, the convexity floor, the corneal enable flag and tolerances,
+the three expected glint composites, and the challenge identifier — SO THAT a
+prover cannot substitute a parameter the verifier did not issue.
+
+Private witnesses (delta fingerprints, convexity scores, coverage counts, glint
+fingerprints) are NOT in the digest. They are what the proof hides.
 
 Trace: [[#TEST-140]] · [[#CON-094]]
 
@@ -196,6 +238,135 @@ Rationale: the existing packing consumes 216 of 254 available bits
 (`12×16 + 3×8`). The witness fields added by [[#REQ-116]] exceed the remainder.
 
 Trace: [[#TEST-141]] · [[#CON-094]] · [[#ADR-009]]
+
+### REQ-119: Challenge nonce binding
+
+For: verifier
+
+WHEN a liveness proof is generated, the system SHALL include in the challenge
+digest a 256-bit challenge identifier equal to `SHA-256(c_nonce ‖ s_nonce)`,
+carried as two 128-bit limbs.
+
+Rationale: the flash pattern is derived from the joint coin-flip
+(`HKDF(c_nonce ‖ s_nonce)`, see [[Joint Coin-Flip Challenge]]). Today the digest
+binds the *expected fingerprints* but not the nonces they came from, so the
+relation the proof establishes is "this response matches these fingerprints",
+and the link from fingerprints back to a specific fresh challenge lives only in
+the verifier's process. Binding the identifier makes "this response answers
+challenge X" part of the proven statement, so a proof cannot be re-presented
+against a second session that happened to issue the same colours.
+
+The identifier is a hash of both nonces rather than the nonces themselves because
+each nonce is 256 bits and the two together would need four limbs for no gain:
+the verifier already knows both and can recompute the hash.
+
+Acceptance:
+- Two witnesses identical except for the challenge identifier produce different
+  digests.
+
+Trace: [[#TEST-146]] · [[#CON-094]] · [[#ADR-011]]
+
+### REQ-120: In-circuit coverage floor
+
+For: verifier
+
+WHEN `min_coverage > 0`, the system SHALL constrain, for every flash round, that
+the number of responding patches is at least `min_coverage`, AND SHALL set the
+liveness result to zero when any round falls below it.
+
+Rationale: [[#REQ-118]] made coverage a reported value. Reporting is not
+enforcing. A convexity score over two patches is not evidence, and the check that
+says so must be in the relation, not in the caller.
+
+Acceptance:
+- A witness with one round at `min_coverage − 1` responding patches yields
+  result 0.
+- A witness with every round at exactly `min_coverage` yields result 1 when all
+  other checks pass.
+
+Trace: [[#TEST-147]] · [[#CON-095]]
+
+### REQ-121: In-circuit convexity floor
+
+For: verifier
+
+WHEN `min_convexity > 0`, the system SHALL constrain, for every flash round, that
+the convexity score is at least `min_convexity`, AND SHALL set the liveness
+result to zero when any round falls below it.
+
+Rationale: this is the geometry axis. The score is prover-supplied, so the
+circuit does not make it honest; what it does is fix the threshold the server
+may not lower after the fact, and it makes a pass a *proven* pass rather than a
+server assertion. Per [[#ADR-010]] the floor ships with no default.
+
+Acceptance:
+- A witness with one round at `min_convexity − 1` yields result 0.
+- A witness with every round at exactly `min_convexity` yields result 1 when all
+  other checks pass.
+
+Trace: [[#TEST-148]] · [[#CON-095]]
+
+### REQ-122: In-circuit corneal agreement
+
+For: verifier
+
+WHEN `corneal_enabled = 1`, the system SHALL constrain, for each eye and each
+flash round, that the glint fingerprint's categorical `order` field equals the
+expected composite's `order` field AND that each ordinal field (`mid_ratio`,
+`min_ratio`, `magnitude`) differs from the composite's by no more than the
+corresponding public tolerance, AND SHALL set the liveness result to zero when
+any eye in any round disagrees.
+
+Rationale: this is the sequence axis. The composite changes per round under the
+HKDF sequence, so an artefact that reflects a stale challenge fails at the
+categorical field regardless of tolerance. Moving the check from
+[[#CON-093]]'s `agrees` into the circuit gives the same guarantee as
+[[#REQ-121]]: the tolerances are fixed in the digest and a pass is proven.
+
+Acceptance:
+- Glints equal to each round's composite pass under tolerance zero.
+- A glint equal to the *previous* round's composite fails under the maximum
+  ordinal tolerances (15, 15, 31).
+
+Trace: [[#TEST-149]] · [[#CON-095]] · [[#ADR-012]]
+
+### REQ-123: No Hamming comparison of the glint in circuit
+
+The system SHALL NOT compare a glint fingerprint against its expected composite
+by Hamming distance WHEN enforcing [[#REQ-122]].
+
+Rationale: [[BUG-001-hamming-over-categorical-order-field]]. The `order` field
+is categorical; a bit distance rates red and blue one apart. The existing
+`color_threshold` check is Hamming-based and remains affected; this requirement
+stops the defect propagating into the new check.
+
+Trace:
+- [[#TEST-150]] (prohibited-action)
+- [[#TEST-152]] (scope-invariant)
+
+### REQ-124: Range-constrained digest fields
+
+The system SHALL constrain every field that enters the challenge digest to its
+declared bit width in circuit BEFORE that field is used in any check or packed
+into a digest limb.
+
+Rationale: [[BUG-002-unconstrained-threshold-aliasing]]. The 0.1.0 packing
+loads `color_threshold`, `spatial_threshold` and `min_magnitude` as unconstrained
+witnesses at adjacent 8-bit offsets. A prover can choose
+`color_threshold' = color_threshold + 256` and
+`spatial_threshold' = spatial_threshold − 1`, which packs to the *same* digest
+the verifier recomputes, while the circuit's checks run against the looser
+`color_threshold'`. Any field that is packed beside another field, in a bit
+packing or inside a Poseidon limb, has this aliasing unless its width is
+enforced.
+
+Acceptance:
+- A witness whose thresholds are aliased as above is unsatisfiable: the circuit
+  rejects it at synthesis rather than producing a matching digest.
+
+Trace:
+- [[#TEST-151]] (prohibited-action)
+- [[#CON-095]]
 
 ## Non-Functional Requirements
 
@@ -293,18 +464,82 @@ Verified by: [[#TEST-138]], [[#TEST-139]]
 ### CON-094: Challenge digest
 
 ```
-Interface: challenge_digest(witness) -> Fr
+Interface: challenge_digest(witness: &LivenessWitness) -> Fr
+           (native) — evaluates the identical in-circuit gadget in witness-
+           generation mode, so native and in-circuit values cannot diverge
 Pre-conditions:
-  P1. all witness field widths are within their declared bit budgets
+  P1. witness recognised by CON-095 (every field within its declared width)
 Post-conditions:
-  Q1. digest = Poseidon(fp[0..12] ‖ patch_codes ‖ convexity ‖ glints ‖ thresholds)
-  Q2. digest is collision-resistant over the full witness           (REQ-117)
-  Q3. changing any single witness field changes the digest          (REQ-116)
-Error model: total function over well-typed input.
+  Q1. digest = Poseidon(limb0 ‖ limb1 ‖ limb2 ‖ limb3) where
+        limb0 = Σ_i expected_fp[i] · 2^(16·i)                      (192 bits)
+        limb1 = color_t ‖ spatial_t ‖ min_mag ‖ min_coverage ‖
+                corneal_enabled ‖ glint_ratio_tol ‖ glint_mag_tol ‖
+                min_convexity ‖ expected_glint[0..3]                (≤ 120 bits)
+        limb2 = challenge_id[0..16]  little-endian                  (128 bits)
+        limb3 = challenge_id[16..32] little-endian                  (128 bits)
+  Q2. digest is collision-resistant over the public parameter set   (REQ-117)
+  Q3. changing any single public field changes the digest           (REQ-116)
+  Q4. changing the challenge identifier changes the digest          (REQ-119)
+  Q5. no private witness field participates                         (REQ-116)
+Error model: total function over a recognised witness.
 ```
 
-Implements: [[#REQ-116]], [[#REQ-117]]
-Verified by: [[#TEST-140]], [[#TEST-141]]
+Packing several narrow fields into one limb is deliberate: Poseidon cost scales
+with the number of absorbed elements, and four limbs is two permutations where
+twenty-four bare fields would be twelve. The packing is sound only because
+[[#REQ-124]] enforces every field's width in circuit; without that the limb has
+the aliasing defect of the 0.1.0 packing.
+
+Implements: [[#REQ-116]], [[#REQ-117]], [[#REQ-119]]
+Verified by: [[#TEST-140]], [[#TEST-141]], [[#TEST-146]]
+
+### CON-095: Liveness witness
+
+```
+Interface: LivenessCheckCircuit::build_circuit(builder) -> (result, digest)
+           LivenessWitness::recognise(&self) -> Result<()>
+Pre-conditions (recognised natively AND range-constrained in circuit):
+  P1. delta_fingerprints[12], expected_fingerprints[12]     each ≤ 0xFFFF
+  P2. color_threshold, spatial_threshold, min_magnitude     each ≤ 0xFF
+  P3. responding_patches[3]                                 each ≤ 64
+  P4. min_coverage                                          ≤ 64
+  P5. convexity_scores[3], min_convexity                    each ≤ 0xFFFF
+  P6. corneal_enabled                                       ∈ {0, 1}
+  P7. glint_fingerprints[6], expected_glints[3]             each ≤ 0xFFFF
+  P8. glint_ratio_tolerance ≤ 15, glint_magnitude_tolerance ≤ 31
+  P9. challenge_id                                          32 octets
+Post-conditions:
+  Q1. result ∈ {0, 1}
+  Q2. result = 1  iff  every check in REQ-111..REQ-122 that is enabled holds
+  Q3. digest satisfies CON-094
+  Q4. with min_coverage = min_convexity = corneal_enabled = 0 the result equals
+      the 0.1.0 result for the same twelve fingerprints and thresholds
+Error model: native recogniser returns SableError::InvalidInput; an in-circuit
+             width violation is unsatisfiable (no proof exists).
+```
+
+**Input grammar** (LangSec, Constitutional Principle 14). The witness crosses a
+trust boundary — the prover supplies it. The language is regular and is
+recognised twice: natively before synthesis so a malformed witness fails fast,
+and in circuit so a prover who skips the native check gains nothing.
+
+```abnf
+witness        = 12fp 12fp thresholds geometry corneal challenge-id
+fp             = %x0000-FFFF
+thresholds     = u8 u8 u8                  ; color, spatial, min_magnitude
+geometry       = 3coverage u8 3fp fp       ; responding, min_coverage,
+                                           ; convexity, min_convexity
+coverage       = %d0-64
+corneal        = bit ratio-tol mag-tol 6fp 3fp
+bit            = %d0-1
+ratio-tol      = %d0-15
+mag-tol        = %d0-31
+challenge-id   = 32OCTET
+```
+
+Implements: [[#REQ-120]], [[#REQ-121]], [[#REQ-122]], [[#REQ-123]], [[#REQ-124]]
+Verified by: [[#TEST-147]], [[#TEST-148]], [[#TEST-149]], [[#TEST-150]],
+[[#TEST-151]], [[#TEST-152]]
 
 ## Architecture Decisions
 
@@ -387,6 +622,43 @@ Negative: the feature cannot be enabled in production until a
 [[Presentation Attack Detection Study]] fixes the constants. This is the intended
 ordering.
 
+### ADR-011: Nonces bound by digest; HKDF stays verifier-side
+
+**Context.** The strongest form of [[#REQ-119]] would derive the expected
+fingerprints from the nonces *inside* the circuit, so the proof itself
+establishes `expected = HKDF(c_nonce ‖ s_nonce)`. HKDF-SHA256 in halo2 costs on
+the order of 30k rows per compression, and the pattern derivation needs two.
+
+**Decision.** Bind `SHA-256(c_nonce ‖ s_nonce)` into the Poseidon digest as two
+limbs. The verifier derives the expected fingerprints natively, exactly as today,
+and recomputes the digest from the nonces it holds.
+
+**Consequences.** Positive: two Poseidon limbs, no SHA-256 gadget, no change to
+the row budget class. The proven statement gains "answers challenge X". Negative:
+the link `expected = HKDF(nonces)` remains a verifier-side computation. A
+verifier that derives the pattern wrongly is not caught by the proof.
+
+```
+// SIMPLIFY: nonce binding by hash, not by in-circuit HKDF — upgrade when a
+// SHA-256 gadget fits the NFR-104 budget or the budget moves to k=17
+// (trace: ADR-011)
+```
+
+### ADR-012: Field-wise glint comparison in circuit
+
+**Context.** The circuit already has a lookup-backed popcount for Hamming
+distance, so the cheapest implementation of [[#REQ-122]] would reuse it.
+
+**Decision.** Decompose the glint and composite fingerprints into their four
+fields in circuit and compare `order` by equality and the ordinals by bounded
+absolute difference. Never Hamming.
+
+**Consequences.** Positive: the check has the semantics of
+[[#CON-093]]'s `agrees`, so the native and in-circuit decisions cannot disagree,
+and [[BUG-001-hamming-over-categorical-order-field]] does not propagate.
+Negative: about 40 comparison gadgets per proof instead of 6 popcounts. Measured
+against [[#NFR-104]] by [[#TEST-142]].
+
 ## Test Specifications
 
 Each test follows requirement-targeted decomposition: positive, negative-input,
@@ -440,16 +712,76 @@ Validates: [[#REQ-113]], [[#REQ-118]]
 
 ### TEST-140: Witness binding
 Validates: [[#REQ-116]]
-- *Negative-output*: mutating any single witness field changes the digest
-  (property-based over all fields).
+- *Negative-output*: mutating any single **public** field changes the digest
+  (enumerated over every public field).
+- *Scope-invariant*: mutating any single **private** field leaves the digest
+  unchanged.
 
 ### TEST-141: Digest migration
 Validates: [[#REQ-117]]
-- *Positive*: digest is stable for identical input across runs.
-- *Negative-output*: two distinct witnesses producing an equal digest fails.
+- *Positive*: digest is stable for identical input across runs, and the native
+  value equals the in-circuit value.
+- *Negative-output*: two distinct public parameter sets producing an equal
+  digest fails.
 
 ### TEST-142: Circuit row budget
-Validates: [[#NFR-104]] — measured advice-cell count stays within budget.
+Validates: [[#NFR-104]]
+- *Positive*: advice cells of the liveness gadget at the production shape,
+  divided by the advice column count, are ≤ 8,000 rows above the 0.1.0
+  measurement. The test prints the measured count so [[#OBS-084]] has a value.
+
+**Core / depth.** Core: [[#TEST-146]] to [[#TEST-152]] and the positive case of
+[[#TEST-142]] — all runnable with `MockProver` and no rig. Depth: [[#TEST-143]]
+(Criterion latency) and the real-prover timing that [[#NFR-104]] ultimately
+protects; both are deferred to the row-budget task owner.
+
+### TEST-146: Nonce binding
+Validates: [[#REQ-119]]
+- *Positive*: a witness with a fixed challenge identifier produces the same
+  digest natively and in circuit.
+- *Negative-output*: two witnesses identical except for one byte of the
+  challenge identifier produce different digests.
+
+### TEST-147: Coverage floor
+Validates: [[#REQ-120]]
+- *Positive*: every round at exactly `min_coverage` → result 1.
+- *Negative-output*: one round at `min_coverage − 1` → result 0.
+- *Boundary*: `min_coverage = 0` with all rounds at 0 → coverage check is
+  vacuous; result is governed by the other checks.
+
+### TEST-148: Convexity floor
+Validates: [[#REQ-121]]
+- *Positive*: every round at exactly `min_convexity` → result 1.
+- *Negative-output*: one round at `min_convexity − 1` → result 0.
+- *Boundary*: `min_convexity = 0` → vacuous.
+
+### TEST-149: In-circuit corneal agreement
+Validates: [[#REQ-122]]
+- *Positive*: glints equal to each round's composite, tolerances 0 → result 1.
+- *Negative-output*: one eye's glint equal to the previous round's composite
+  under tolerances (15, 31) → result 0. The rejection is carried by the
+  categorical field.
+- *Boundary*: an ordinal field differing by exactly the tolerance passes; by
+  tolerance + 1 fails.
+
+### TEST-150: Glint is not compared by Hamming distance
+Validates: [[#REQ-123]] (prohibited-action)
+- Construct a glint whose Hamming distance from the composite is 1 but whose
+  `order` differs (red versus blue, see BUG-001). Under tolerances (15, 31) the
+  circuit MUST output 0. A Hamming implementation would output 1.
+
+### TEST-151: Threshold aliasing is unsatisfiable
+Validates: [[#REQ-124]] (prohibited-action)
+- Construct a witness with `color_threshold = 256 + t` and
+  `spatial_threshold = s − 1`. The native recogniser MUST reject it, and a
+  circuit built from it MUST fail synthesis rather than yield a digest equal to
+  that of `(t, s)`.
+
+### TEST-152: Legacy result preserved
+Validates: [[#REQ-123]], [[#CON-095]] Q4 (scope-invariant)
+- For every 0.1.0 test witness, extending it with
+  `min_coverage = min_convexity = corneal_enabled = 0` yields the same result
+  bit as before. The new checks change nothing the old ones decided.
 
 ### TEST-143: Extraction latency
 Validates: [[#NFR-105]] — Criterion benchmark.
@@ -462,6 +794,13 @@ Validates: [[#NFR-106]] — property test over uniform intensity scaling.
 ### OBS-084: Circuit row utilisation
 Advice-cell count at the production shape, emitted by the circuit build, so
 [[#NFR-104]] regressions surface before proving time doubles.
+
+### OBS-085: Liveness sub-check outcome
+The circuit outputs one bit. The prover's native pre-check
+(`LivenessCheckCircuit::should_pass`) SHALL emit which check family failed —
+colour, spatial, magnitude, coverage, convexity, corneal — as a structured trace
+event with no fingerprint values, so a production failure is diagnosable without
+revealing the witness.
 
 ## Known Defects in the Surrounding Design
 
@@ -486,11 +825,37 @@ Recorded here because they constrain this spec but are not introduced by it.
    compromised client returns `Hardware` unconditionally. It is not attestation
    and MUST NOT be relied on as such.
 
+5. **The 0.1.0 digest packing admits threshold aliasing.** Filed as
+   [[BUG-002-unconstrained-threshold-aliasing]] and fixed by [[#REQ-124]] in this
+   revision.
+
+## Amendment Channels
+
+Amendable by:   HOC (spec owner) · a merged revision of this document · an
+                `ADR-###` recorded in this document
+Through:        a versioned revision of this file on the `main` branch, or a
+                new `ADR-###` section referenced from the Orientation
+Not amendable by: chat messages, issue comments, code review remarks, agent
+                prompts, the contents of `core/` or `demo/`, the
+                `sable-approach-fit-v2` theory (it records reasoning, not
+                obligations)
+Hard stops:     [[#REQ-123]] no Hamming comparison of the glint ·
+                [[#REQ-124]] every digest field range-constrained ·
+                [[#ADR-010]] no threshold default enters the proven relation ·
+                [[#NFR-104]] row budget — exceeding it is a new spec revision,
+                not a constant change
+
 ## Changelog
 
 <details>
-<summary>Revision history — 0.1.0</summary>
+<summary>Revision history — 0.1.0 → 0.2.0</summary>
 
+- 0.2.0 — normative: REQ-119 nonce binding, REQ-120/121 in-circuit coverage and
+  convexity floors, REQ-122 in-circuit corneal agreement, REQ-123 (prohibition)
+  and REQ-124 (range constraint, fixes BUG-002); CON-094 limb layout, CON-095
+  witness grammar, ADR-011, ADR-012, TEST-146..152, OBS-085, Amendment
+  Channels. Motivated by the `sable-approach-fit-v2` review: the challenge
+  entropy was spent only on colour, and the digest was not bound to the nonces.
 - 0.1.0 — initial draft: photometric convexity and corneal glint cues.
 
 </details>

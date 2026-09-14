@@ -807,6 +807,37 @@ mod tests {
         assert_eq!(details.challenge_digest, dummy_digest, "Verification details should include digest");
     }
 
+    /// TEST-142 (SPEC-006 NFR-104): the composed production circuit at the
+    /// 512-byte dimension must stay within 8,000 rows of the 0.1.0 shape, which
+    /// measured 54,042 rows. Counted at k=17 so the builder never hits a
+    /// capacity assert while counting.
+    #[test]
+    fn test_142_composed_circuit_row_budget_nfr_104() {
+        const ROWS_0_1_0: usize = 54_042;
+        const BUDGET_ROWS: usize = 8_000;
+        let params = BaseCircuitParams {
+            k: 17,
+            num_advice_per_phase: vec![NUM_ADVICE],
+            num_lookup_advice_per_phase: vec![NUM_LOOKUP_ADVICE],
+            num_fixed: NUM_FIXED,
+            lookup_bits: Some(LOOKUP_BITS),
+            num_instance_columns: 1,
+        };
+        let mut bld = BaseCircuitBuilder::<Fr>::new(false).use_params(params);
+        let a = vec![0u8; DEFAULT_EMBEDDING_DIM];
+        let b = vec![0u8; DEFAULT_EMBEDDING_DIM];
+        let dummy = LivenessWitness::dummy_pass();
+        let _ = build_combined_circuit_from_embeddings(&mut bld, &a, &b, 2048, &dummy, true);
+        let cells: usize = bld.statistics().gate.total_advice_per_phase.iter().sum();
+        let rows = cells.div_ceil(NUM_ADVICE);
+        println!("OBS-084 composed circuit: cells={cells} rows={rows} (0.1.0 rows={ROWS_0_1_0})");
+        assert!(
+            rows <= ROWS_0_1_0 + BUDGET_ROWS,
+            "NFR-104: {rows} rows exceeds {ROWS_0_1_0} + {BUDGET_ROWS}"
+        );
+        assert!(rows + 128 <= 1 << 16, "must still fit k=16 with blinding margin");
+    }
+
     #[test]
     fn test_prove_with_liveness_passing() {
         let mut prover = FaceVerificationProver::new();
@@ -817,6 +848,7 @@ mod tests {
             color_threshold: 3,
             spatial_threshold: 2,
             min_magnitude: 5,
+            ..LivenessWitness::default()
         };
 
         let expected_digest = challenge_digest(&liveness);
@@ -847,6 +879,7 @@ mod tests {
             color_threshold: 3,
             spatial_threshold: 1,
             min_magnitude: 1,
+            ..LivenessWitness::default()
         };
 
         let proof = prover
@@ -875,6 +908,7 @@ mod tests {
             color_threshold: 3,
             spatial_threshold: 2,
             min_magnitude: 5,
+            ..LivenessWitness::default()
         };
         let proof_with = prover_with
             .prove_with_liveness(100, 200, Some(liveness))

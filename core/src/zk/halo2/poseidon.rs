@@ -160,6 +160,21 @@ pub fn poseidon_hash_pair(
     hasher.hash_fix_len_array(ctx, &gate, &[a, b])
 }
 
+/// Poseidon-hash a fixed-length array of cells into one commitment cell.
+///
+/// Shared by the template commitment and the liveness challenge digest
+/// (SPEC-006 CON-094) so both use one sponge configuration.
+pub(crate) fn poseidon_hash_cells(
+    ctx: &mut Context<Fr>,
+    gate: &GateChip<Fr>,
+    cells: &[AssignedValue<Fr>],
+) -> AssignedValue<Fr> {
+    let spec = OptimizedPoseidonSpec::<Fr, T, RATE>::new::<R_F, R_P, 0>();
+    let mut hasher = PoseidonHasher::<Fr, T, RATE>::new(spec);
+    hasher.initialize_consts(ctx, gate);
+    hasher.hash_fix_len_array(ctx, gate, cells)
+}
+
 /// Pack a slice of byte-valued cells into field elements (`BYTES_PER_FE` bytes
 /// each, little-endian) and Poseidon-hash the packed array into a single
 /// commitment cell.

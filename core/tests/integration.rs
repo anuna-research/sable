@@ -542,6 +542,7 @@ mod halo2_integration {
             color_threshold: 3,
             spatial_threshold: 2,
             min_magnitude: 5,
+            ..LivenessWitness::default()
         };
 
         // Step 3: Generate combined proof
@@ -578,6 +579,7 @@ mod halo2_integration {
             color_threshold: 3, // strict — HD will be >> 3
             spatial_threshold: 2,
             min_magnitude: 5,
+            ..LivenessWitness::default()
         };
 
         let mut prover = FaceVerificationProver::new();

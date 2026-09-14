@@ -16,7 +16,8 @@ use std::time::Instant;
 
 // Halo2 ZK proof system
 use sable_core::zk::halo2::{
-    FaceVerificationVerifier, Proof, LivenessWitness,
+    FaceVerificationVerifier, Proof, LivenessWitness, LivenessCheckCircuit,
+    challenge_identifier,
     hamming_distance, ThresholdConfig, Halo2Fr,
     poseidon_commit_bytes_value,
     thermometer_encode, thermometer_prescale_tanh,
@@ -588,13 +589,32 @@ pub async fn auth_prove(
             delta_fps, expected_fps
         );
 
-        liveness_witness = Some(LivenessWitness {
+        let witness = LivenessWitness {
             delta_fingerprints: delta_fps,
             expected_fingerprints: expected_fps,
             color_threshold: 5,    // allow up to HD=5 between delta and expected
             spatial_threshold: 1,  // require at least HD=1 between upper/lower
             min_magnitude: 3,      // minimum magnitude for flash response
-        });
+            // SPEC-006 0.2.0 (REQ-119): bind the joint coin-flip identifier so
+            // the proof answers this challenge and no other.
+            challenge_id: challenge_identifier(&c_nonce_32, &challenge.nonce),
+            // Geometry floors and the corneal check ship unset (ADR-010): the
+            // server does not yet run the photometric or corneal extractors,
+            // so those checks are vacuous, and visibly so in the digest.
+            ..LivenessWitness::default()
+        };
+
+        // OBS-085: which check family the native pre-check fails, without values.
+        match LivenessCheckCircuit::new(witness.clone()).first_failing_check() {
+            None => tracing::info!(obs = "OBS-085", outcome = "pass", "liveness pre-check"),
+            Some(f) => tracing::warn!(
+                obs = "OBS-085",
+                check = ?f.check,
+                round = f.round,
+                "liveness pre-check failed"
+            ),
+        }
+        liveness_witness = Some(witness);
 
         // h. Set response fields
         color_challenge_passed = Some(spatial_result.passed);
