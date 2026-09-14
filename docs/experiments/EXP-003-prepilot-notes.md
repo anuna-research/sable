@@ -10,7 +10,7 @@
 
 These are the numbers from the first end-to-end runs after the photometric and
 corneal extractors were wired into the demo server. They exist to shape the
-pilot, not to set a threshold. n = 2 bona fide, n = 2 phone-screen attempts.
+pilot, not to set a threshold. n = 2 bona fide, n = 4 phone-screen attempts (2 with geometric evidence).
 
 ## Bona fide (real face), spatial check passed
 
@@ -48,8 +48,16 @@ Third attempt, after the reorder (same phone, same photo):
 | | | | 2 | **5** | 8666 → 0.264 | 0 / 0 |
 | | | | 3 | **6** | 10389 → 0.317 | 0 / 0 |
 
+Fourth attempt (same phone, same photo):
+
+| Attempt | Face Hamming | Spatial score | Round | Patches /16 | Convexity | Glint magnitude L / R |
+|---------|--------------|---------------|-------|-------------|-----------|------------------------|
+| 06:00:30 | **85** | 0.4193 (rejected) | 1 | **4** | 251 → 0.008 | 0 / 2 |
+| | | | 2 | **4** | 18573 → 0.567 | 0 / 4 |
+| | | | 3 | **4** | 19404 → 0.592 | 0 / 1 |
+
 The phone photo matched the enrolled template *better* than the live face
-(Hamming 110 against 185–230).
+on both measured attempts (Hamming 110 and 85 against 185–230).
 
 For reference, bona fide face Hamming distances in the same session were
 185–230 against a threshold of 2048; the phone-screen photo **passed the face
@@ -70,8 +78,13 @@ match** at 441–446.
    coverage, now observed rather than argued: the convexity floor is only
    meaningful above a coverage floor, and on this device a coverage floor
    anywhere in 7–9 would have rejected the attack with margin on both sides.
+   The fourth attempt makes the point harder: on four patches the convexity
+   score ranged from 0.008 to 0.592 across three rounds of the same
+   presentation, straddling and exceeding the whole bona fide band. Below
+   the coverage floor the convexity number carries no information at all.
    The pilot should sweep coverage first and report convexity curves only
-   for captures above the chosen coverage floor.
+   for captures above the chosen coverage floor. Coverage on this device:
+   bona fide 10–14, phone screen 4–6, two attempts each.
 3. **The corneal cue is not usable at this capture geometry.** One run matched
    order 5/6, the next 0/6, with magnitude 1–2 throughout. At that signal level
    even the categorical order field is noise. Before the pilot spends effort
@@ -80,8 +93,8 @@ match** at 441–446.
    magnitude field can be compared at all. Record the raw mean RGB delta per
    eye in the pilot, not only the fingerprint.
 4. **The face-match threshold admits a phone photo of the subject, and on the
-   third attempt preferred it** (Hamming 110 for the photo against 185–230 for
-   the live face). A screen replay of the enrolment session is the canonical
+   measured attempts preferred it** (Hamming 110 and 85 for the photo against
+   185–230 for the live face). A screen replay of the enrolment session is the canonical
    attack and the matcher cannot see it by construction. Not this experiment's
    question, but liveness is carrying the whole load in the demo, and the
    threshold recalibration noted in the thermometer work is not optional.
