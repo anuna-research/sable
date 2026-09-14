@@ -566,6 +566,7 @@ async function generateProof(): Promise<void> {
       face_embedding?: number[];
       c_nonce?: string;
       flash_frames?: string[];
+      eye_crops?: string[][];
     } = {
       challenge_id: state.challenge.challenge_id,
       face_embedding: state.authCapturedFace.embedding,
@@ -579,6 +580,9 @@ async function generateProof(): Promise<void> {
         state.spatialCapture.baselineDataUrl,
         ...state.spatialCapture.roundFrames,
       ];
+      if (state.spatialCapture.eyeCrops) {
+        proveRequest.eye_crops = state.spatialCapture.eyeCrops;
+      }
     }
 
     const proof = await api.prove(proveRequest);

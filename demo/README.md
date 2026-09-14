@@ -58,6 +58,20 @@ The frontend will start on `http://localhost:5173`.
 
 Navigate to `http://localhost:5173` in your browser.
 
+### Geometric liveness (SPEC-006)
+
+The prove endpoint also runs the photometric convexity extractor on each flash
+round and, when the client sends iris crops, the corneal glint extractor. Both
+are reported in the prove response (`photometric_rounds`, `corneal_rounds`) and
+in the server log. Their circuit floors ship at zero (ADR-010), so they do not
+gate the proof unless enabled:
+
+```bash
+# Arm the in-circuit corneal check: max ordinal delta on the ratio fields, then
+# on the magnitude field. Values are demo guesses until EXP-003 fixes them.
+SABLE_CORNEAL_TOLERANCE=4,8 cargo run --release --features halo2-proofs
+```
+
 ## API Endpoints
 
 | Endpoint | Method | Description |

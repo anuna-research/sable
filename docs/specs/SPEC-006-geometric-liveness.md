@@ -85,8 +85,12 @@ redeploy is needed to change a threshold; the verifier issues it per challenge.
   see [[#ADR-010]] and [[EXP-003-presentation-attack-study]] (owner: HOC). This
   spec ships the mechanism, not the constants.
 - Eye localisation is out of scope; [[#CON-093]] takes a pre-cropped region.
-  Selecting a [[Face Landmark Model]] is deferred (owner: HOC). Until it exists
-  the server runs with `corneal_enabled = 0`.
+  The demo client localises the irises with the Human face-mesh iris model and
+  sends per-eye PNG crops; the server fingerprints them and carries the glints
+  and expected composites in the witness. The check is live only when the
+  operator sets `SABLE_CORNEAL_TOLERANCE=<ratio>,<magnitude>`; otherwise
+  `corneal_enabled = 0` (ADR-010). Selecting a production
+  [[Face Landmark Model]] remains deferred (owner: HOC).
 - The demo server calls the photometric extractor per round and carries
   `responding_patches` and `convexity_scores` in the witness, but runs the
   circuit with both floors at zero, so the checks are vacuous until

@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 // Note: PalmProcessor is available for production use with proper biometric sensors
 // For webcam demo, we use image-based feature extraction instead
 use sable_core::biometric::screen_flash::{ScreenFlashExtractor, ScreenFlashThresholds};
+use sable_core::biometric::corneal;
+use sable_core::biometric::fingerprint::{self, Fields};
 use sable_core::biometric::photometric::{self, PatchGrid};
 use sable_core::biometric::PalmImage;
 use sable_core::crypto::pedersen::{CommitmentOpening, Generators, commit_with_opening};
@@ -262,6 +264,10 @@ pub struct ProveRequest {
     /// The baseline frame is captured before any flash; the 3 round frames are captured
     /// during each flash round with split-screen colors.
     pub flash_frames: Option<Vec<String>>,
+    /// Corneal crops for the glint check (SPEC-006 REQ-114, CON-093):
+    /// `[baseline, round1, round2, round3]`, each `[left_eye, right_eye]` as
+    /// base64 PNG or JPEG data URLs. All eight crops must share one size.
+    pub eye_crops: Option<Vec<Vec<String>>>,
 }
 
 /// Per-round region match score for spatial color verification.
@@ -303,6 +309,10 @@ pub struct ProveResponse {
     /// Observational for now: the circuit floors are zero (ADR-010).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub photometric_rounds: Option<Vec<PhotometricRoundResponse>>,
+    /// Corneal glint evidence per flash round (SPEC-006 REQ-114..115).
+    /// Observational unless SABLE_CORNEAL_TOLERANCE is set (ADR-010).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corneal_rounds: Option<Vec<CornealRoundResponse>>,
     pub timings: ProveTimings,
     pub what_was_proven: Vec<String>,
     pub what_stayed_private: Vec<String>,
@@ -316,6 +326,52 @@ pub struct PhotometricRoundResponse {
     pub responding_patches: u8,
     /// Mean L1 deviation of patch illumination mixes, Q15 over [0, 2] (REQ-113).
     pub convexity_score: u16,
+}
+
+/// A delta fingerprint unpacked into its fields for human reading.
+#[derive(Debug, Serialize)]
+pub struct FingerprintResponse {
+    pub hex: String,
+    /// Channel ordering, categorical 0..=5.
+    pub order: u8,
+    pub mid_ratio: u8,
+    pub min_ratio: u8,
+    pub magnitude: u8,
+}
+
+impl From<u16> for FingerprintResponse {
+    fn from(fp: u16) -> Self {
+        let Fields { order, mid_ratio, min_ratio, magnitude } = fingerprint::unpack(fp);
+        Self { hex: format!("{fp:04x}"), order, mid_ratio, min_ratio, magnitude }
+    }
+}
+
+/// Per-round corneal glint evidence reported back to the client.
+#[derive(Debug, Serialize)]
+pub struct CornealRoundResponse {
+    pub round: usize,
+    pub left_glint: FingerprintResponse,
+    pub right_glint: FingerprintResponse,
+    /// Area-weighted composite of the four quadrant colours.
+    pub expected_glint: FingerprintResponse,
+    /// Whether the in-circuit check was live for this proof.
+    pub enabled: bool,
+    /// Field-wise agreement per eye at the configured tolerances; absent when
+    /// the check is not enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agrees: Option<[bool; 2]>,
+}
+
+/// Corneal tolerances from `SABLE_CORNEAL_TOLERANCE="<ratio>,<magnitude>"`.
+///
+/// Unset means the check ships disabled (ADR-010). Values are clamped to the
+/// witness widths (ratio ≤ 15, magnitude ≤ 31).
+fn corneal_tolerances_from_env() -> Option<(u8, u8)> {
+    let raw = std::env::var("SABLE_CORNEAL_TOLERANCE").ok()?;
+    let (a, b) = raw.split_once(',')?;
+    let ratio: u8 = a.trim().parse().ok()?;
+    let magnitude: u8 = b.trim().parse().ok()?;
+    Some((ratio.min(15), magnitude.min(31)))
 }
 
 #[derive(Debug, Serialize)]
@@ -455,6 +511,7 @@ pub async fn auth_prove(
     let mut region_match_scores: Option<Vec<RegionScoreResponse>> = None;
     let mut spatial_differentiation_score: Option<f64> = None;
     let mut photometric_rounds: Option<Vec<PhotometricRoundResponse>> = None;
+    let mut corneal_rounds: Option<Vec<CornealRoundResponse>> = None;
     let mut liveness_witness: Option<LivenessWitness> = None;
 
     if let (Some(c_nonce_hex), Some(frames_b64)) = (&req.c_nonce, &req.flash_frames) {
@@ -651,6 +708,124 @@ pub async fn auth_prove(
         }
         photometric_rounds = Some(photometric_report);
 
+        // g3. Corneal glint evidence per eye per round (SPEC-006 REQ-114..115,
+        // CON-093). The client localises the irises and sends crops; the server
+        // fingerprints each crop's delta against the baseline crop and derives
+        // the expected composite from the quadrant colours weighted by the
+        // grid split. The check enters the circuit only when the operator has
+        // set SABLE_CORNEAL_TOLERANCE (ADR-010); otherwise the values are
+        // carried and logged but the check is vacuous.
+        let mut glint_fingerprints = [0u16; 6];
+        let mut expected_glints = [0u16; 3];
+        let corneal_tolerances = corneal_tolerances_from_env();
+        let mut corneal_live = false;
+        if let Some(crops_b64) = &req.eye_crops {
+            let shape_ok = crops_b64.len() == 4 && crops_b64.iter().all(|pair| pair.len() == 2);
+            if !shape_ok {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "eye_crops must be 4 frames × 2 eyes".to_string(),
+                    }),
+                ));
+            }
+            let mut crops: Vec<[PalmImage; 2]> = Vec::with_capacity(4);
+            for (f, pair) in crops_b64.iter().enumerate() {
+                let mut decoded = Vec::with_capacity(2);
+                for (e, b64) in pair.iter().enumerate() {
+                    let img = decode_base64_image(b64).map_err(|err| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse {
+                                error: format!("Invalid eye crop frame {f} eye {e}: {err}"),
+                            }),
+                        )
+                    })?;
+                    decoded.push(img);
+                }
+                let right = decoded.pop().unwrap();
+                let left = decoded.pop().unwrap();
+                crops.push([left, right]);
+            }
+
+            let mut report = Vec::with_capacity(3);
+            let mut all_extracted = true;
+            for (r, round) in pattern.rounds.iter().enumerate() {
+                let quadrant_colours = [
+                    round.tl_color.to_array(),
+                    round.tr_color.to_array(),
+                    round.bl_color.to_array(),
+                    round.br_color.to_array(),
+                ];
+                // Quadrant areas from the same split the client renders
+                // (35%–65%), scaled to integers.
+                let sx = 0.5 + round.offset_x * 0.3 - 0.15;
+                let sy = 0.5 + round.offset_y * 0.3 - 0.15;
+                let weights = [
+                    (sx * sy * 10_000.0) as u32,
+                    ((1.0 - sx) * sy * 10_000.0) as u32,
+                    (sx * (1.0 - sy) * 10_000.0) as u32,
+                    ((1.0 - sx) * (1.0 - sy) * 10_000.0) as u32,
+                ];
+                let expected = match corneal::expected_composite(&quadrant_colours, &weights) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(round = r, error = %e, "corneal expected composite failed");
+                        all_extracted = false;
+                        continue;
+                    }
+                };
+                let mut observed = [0u16; 2];
+                for eye in 0..2 {
+                    match corneal::glint_fingerprint(&crops[0][eye], &crops[r + 1][eye]) {
+                        Ok(fp) => observed[eye] = fp,
+                        Err(e) => {
+                            tracing::warn!(round = r, eye, error = %e, "corneal glint extraction failed");
+                            all_extracted = false;
+                        }
+                    }
+                }
+                glint_fingerprints[r * 2] = observed[0];
+                glint_fingerprints[r * 2 + 1] = observed[1];
+                expected_glints[r] = expected;
+
+                let agrees = corneal_tolerances.map(|(ratio, mag)| {
+                    [
+                        corneal::agrees(observed[0], expected, ratio, mag),
+                        corneal::agrees(observed[1], expected, ratio, mag),
+                    ]
+                });
+                tracing::info!(
+                    round = r,
+                    left = ?fingerprint::unpack(observed[0]),
+                    right = ?fingerprint::unpack(observed[1]),
+                    expected = ?fingerprint::unpack(expected),
+                    agrees = ?agrees,
+                    "corneal round"
+                );
+                report.push(CornealRoundResponse {
+                    round: r,
+                    left_glint: observed[0].into(),
+                    right_glint: observed[1].into(),
+                    expected_glint: expected.into(),
+                    enabled: false, // patched below once liveness is decided
+                    agrees,
+                });
+            }
+            // Only arm the in-circuit check when every crop fingerprinted, so a
+            // decode failure cannot masquerade as a corneal mismatch.
+            corneal_live = corneal_tolerances.is_some() && all_extracted;
+            for entry in &mut report {
+                entry.enabled = corneal_live;
+            }
+            corneal_rounds = Some(report);
+        }
+        let (glint_ratio_tolerance, glint_magnitude_tolerance) = if corneal_live {
+            corneal_tolerances.unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
+
         let witness = LivenessWitness {
             delta_fingerprints: delta_fps,
             expected_fingerprints: expected_fps,
@@ -666,7 +841,13 @@ pub async fn auth_prove(
             convexity_scores,
             min_coverage: 0,
             min_convexity: 0,
-            // The corneal check stays disabled: the server has no eye crops.
+            // Corneal evidence is carried whenever the client sent eye crops;
+            // the check is live only with SABLE_CORNEAL_TOLERANCE set.
+            corneal_enabled: corneal_live,
+            glint_ratio_tolerance,
+            glint_magnitude_tolerance,
+            glint_fingerprints,
+            expected_glints,
             ..LivenessWitness::default()
         };
 
@@ -800,6 +981,7 @@ pub async fn auth_prove(
         region_match_scores,
         spatial_differentiation_score,
         photometric_rounds,
+        corneal_rounds,
         timings: ProveTimings {
             feature_scan_ms: scan_time.as_secs_f64() * 1000.0,
             distance_calc_ms: distance_time.as_secs_f64() * 1000.0,
@@ -1337,6 +1519,24 @@ fn check_ratio_smoothness(baseline: &PalmImage, flash: &PalmImage) -> RatioSmoot
 }
 
 /// Decode a base64-encoded JPEG image (with optional data URL prefix) to a PalmImage
+/// Decode a base64 (optionally data-URL) PNG or JPEG into an RGB8 image.
+///
+/// Eye crops arrive as PNG: at ~16 px a JPEG's chroma subsampling would smear
+/// the very colour the glint check measures.
+fn decode_base64_image(input: &str) -> std::result::Result<PalmImage, String> {
+    use base64::Engine;
+    use image::GenericImageView;
+
+    let b64_data = input.rsplit(',').next().unwrap_or(input);
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64_data)
+        .map_err(|e| format!("Base64 decode failed: {}", e))?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("Image decode failed: {}", e))?;
+    let rgb = img.to_rgb8();
+    let (w, h) = img.dimensions();
+    Ok(PalmImage::new(w, h, 3, rgb.into_raw()))
+}
+
 fn decode_base64_jpeg(input: &str) -> std::result::Result<PalmImage, String> {
     use base64::Engine;
     use image::GenericImageView;

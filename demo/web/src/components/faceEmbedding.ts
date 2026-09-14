@@ -22,7 +22,7 @@ const humanConfig = {
       enabled: true,        // Needed for accurate embedding
     },
     iris: {
-      enabled: false,       // Not needed for embedding
+      enabled: true,        // Iris centres locate the corneal glint crops (SPEC-006 REQ-114)
     },
     description: {
       enabled: true,        // This generates the face embedding!
@@ -142,6 +142,53 @@ export async function detectFace(
     gender: face.gender,
     genderConfidence: face.genderScore,
   };
+}
+
+/** An iris located in image pixels. */
+export interface IrisLocation {
+  cx: number;
+  cy: number;
+  /** Mean distance from centre to the four iris boundary points. */
+  radius: number;
+}
+
+export interface IrisPair {
+  left: IrisLocation;
+  right: IrisLocation;
+}
+
+function irisFromPoints(points: [number, number, number?][]): IrisLocation | null {
+  if (!points || points.length < 5) return null;
+  const [cx, cy] = points[0];
+  let sum = 0;
+  for (let i = 1; i < 5; i++) {
+    const [x, y] = points[i];
+    sum += Math.hypot(x - cx, y - cy);
+  }
+  const radius = sum / 4;
+  if (!Number.isFinite(radius) || radius <= 0) return null;
+  return { cx, cy, radius };
+}
+
+/**
+ * Locate both irises in a still frame.
+ *
+ * Runs with result caching disabled: the flash frames are near-identical
+ * stills and Human would otherwise return the previous frame's landmarks.
+ */
+export async function detectIrises(
+  input: HTMLCanvasElement | HTMLImageElement
+): Promise<IrisPair | null> {
+  if (!human) {
+    throw new Error('Human not initialized. Call initHuman() first.');
+  }
+  const result = await human.detect(input, { cacheSensitivity: 0 });
+  const face = result.face?.[0];
+  if (!face?.annotations) return null;
+  const left = irisFromPoints(face.annotations.leftEyeIris);
+  const right = irisFromPoints(face.annotations.rightEyeIris);
+  if (!left || !right) return null;
+  return { left, right };
 }
 
 /**

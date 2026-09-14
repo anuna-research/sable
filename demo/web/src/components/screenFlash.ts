@@ -3,6 +3,7 @@
 // Based on Tang et al. "Face Flashing" (NDSS 2018)
 
 import type { FlashRound } from '../crypto/flashChallenge';
+import { detectIrises, IrisPair } from './faceEmbedding';
 
 export interface ScreenFlashCapture {
   baselineDataUrl: string;  // JPEG data URL of frame before flash
@@ -12,6 +13,13 @@ export interface ScreenFlashCapture {
 export interface SpatialFlashCapture {
   baselineDataUrl: string;    // JPEG data URL of frame before any flash (ambient)
   roundFrames: string[];      // 3 JPEG data URLs, one per round
+  /**
+   * Corneal crops for the glint check (SPEC-006 REQ-114): one entry per frame
+   * in [baseline, round0, round1, round2] order, each [leftEye, rightEye] as
+   * PNG data URLs of identical size. Undefined when the irises could not be
+   * located in the baseline.
+   */
+  eyeCrops?: string[][];
 }
 
 /** Duration of the screen flash in milliseconds */
@@ -189,7 +197,81 @@ export async function performSpatialFlash(
     setTimeout(() => last.remove(), crossfadeDuration + 50);
   }
 
-  return { baselineDataUrl, roundFrames };
+  // Locate the irises in every captured frame and crop them. This runs after
+  // the flash sequence so detection latency cannot disturb round timing.
+  let eyeCrops: string[][] | undefined;
+  try {
+    eyeCrops = await extractEyeCrops([baselineDataUrl, ...roundFrames]) ?? undefined;
+  } catch (err) {
+    console.warn('Eye crop extraction failed; corneal check will be skipped', err);
+  }
+
+  return { baselineDataUrl, roundFrames, eyeCrops };
+}
+
+// ---------------------------------------------------------------------------
+// Corneal crops
+// ---------------------------------------------------------------------------
+
+/** Crop side as a multiple of the iris radius; 2.4 covers the iris plus rim. */
+const CROP_RADIUS_FACTOR = 2.4;
+/** Server rejects crops under 8 px; keep a margin. */
+const MIN_CROP_SIDE = 12;
+
+function loadImage(dataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Failed to decode captured frame'));
+    img.src = dataUrl;
+  });
+}
+
+function cropSquare(img: HTMLImageElement, cx: number, cy: number, side: number): string {
+  const sx = Math.min(Math.max(0, Math.round(cx - side / 2)), Math.max(0, img.width - side));
+  const sy = Math.min(Math.max(0, Math.round(cy - side / 2)), Math.max(0, img.height - side));
+  const canvas = document.createElement('canvas');
+  canvas.width = side;
+  canvas.height = side;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Failed to get canvas context');
+  ctx.drawImage(img, sx, sy, side, side, 0, 0, side, side);
+  // PNG: at this size JPEG chroma subsampling would smear the glint colour.
+  return canvas.toDataURL('image/png');
+}
+
+/**
+ * Crop both irises out of each frame.
+ *
+ * The crop side is fixed from the baseline irises so every crop has identical
+ * dimensions (the server requires this). Each frame's own iris centres are
+ * used when found; otherwise the baseline centres are reused, which tolerates
+ * a momentary detection miss but not head motion.
+ */
+export async function extractEyeCrops(frames: string[]): Promise<string[][] | null> {
+  const images = await Promise.all(frames.map(loadImage));
+
+  const baseline = await detectIrises(images[0]);
+  if (!baseline) {
+    console.warn('No irises located in baseline frame; corneal check skipped');
+    return null;
+  }
+  const meanRadius = (baseline.left.radius + baseline.right.radius) / 2;
+  const side = Math.max(MIN_CROP_SIDE, Math.round(meanRadius * CROP_RADIUS_FACTOR));
+
+  const crops: string[][] = [];
+  for (let i = 0; i < images.length; i++) {
+    let irises: IrisPair | null = i === 0 ? baseline : await detectIrises(images[i]);
+    if (!irises) {
+      console.warn(`No irises located in frame ${i}; reusing baseline centres`);
+      irises = baseline;
+    }
+    crops.push([
+      cropSquare(images[i], irises.left.cx, irises.left.cy, side),
+      cropSquare(images[i], irises.right.cx, irises.right.cy, side),
+    ]);
+  }
+  return crops;
 }
 
 /**

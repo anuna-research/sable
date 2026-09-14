@@ -91,6 +91,62 @@ function rgbCss(color: [number, number, number]): string {
   return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
 }
 
+const ORDER_NAMES = ['R≥G≥B', 'R≥B≥G', 'G≥R≥B', 'G≥B≥R', 'B≥R≥G', 'B≥G≥R'];
+
+function fpLabel(fp: { order: number; magnitude: number }): string {
+  return `${ORDER_NAMES[fp.order] ?? '?'} ·${fp.magnitude}`;
+}
+
+/**
+ * Render the SPEC-006 geometric evidence (photometric and corneal) per round.
+ * These values are observational until the presentation-attack study fixes
+ * the thresholds; the badge says whether the corneal check was live.
+ */
+function renderGeometricEvidence(proof: ProveResponse): string {
+  const photo = proof.photometric_rounds;
+  const corneal = proof.corneal_rounds;
+  if (!photo?.length && !corneal?.length) return '';
+
+  const rows = [0, 1, 2].map(r => {
+    const p = photo?.find(x => x.round === r);
+    const c = corneal?.find(x => x.round === r);
+    const convexity = p ? (p.convexity_score / 32768).toFixed(3) : '–';
+    const patches = p ? `${p.responding_patches}/16` : '–';
+    const agree = (i: 0 | 1) =>
+      c?.agrees ? (c.agrees[i] ? ' ✓' : ' ✗') : '';
+    return `
+      <tr>
+        <td>${r + 1}</td>
+        <td>${patches}</td>
+        <td>${convexity}</td>
+        <td>${c ? fpLabel(c.left_glint) + agree(0) : '–'}</td>
+        <td>${c ? fpLabel(c.right_glint) + agree(1) : '–'}</td>
+        <td>${c ? fpLabel(c.expected_glint) : '–'}</td>
+      </tr>`;
+  }).join('');
+
+  const cornealLive = corneal?.some(c => c.enabled) ?? false;
+  return `
+    <h3>Geometric Liveness Evidence</h3>
+    <p style="font-size: 0.8rem; color: var(--text-secondary);">
+      Photometric floors are zero and the corneal check is
+      <strong>${cornealLive ? 'live' : 'observational'}</strong>, so these values
+      are carried in the proof digest but do not yet gate it (SPEC-006 ADR-010).
+    </p>
+    <div style="overflow-x: auto;">
+      <table style="font-size: 0.8rem; border-collapse: collapse; width: 100%;">
+        <thead>
+          <tr style="text-align: left; color: var(--text-secondary);">
+            <th>Round</th><th>Patches</th><th>Convexity</th>
+            <th>Left glint</th><th>Right glint</th><th>Expected</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
 /**
  * Render the flash pattern as a row of 3 quadrant cards.
  */
@@ -363,6 +419,8 @@ function renderAuthPhase(
           ` : ''}
 
           ${flashRounds && flashRounds.length === 3 ? renderFlashPatternCards(flashRounds) : ''}
+
+          ${renderGeometricEvidence(proof)}
 
           <h3>ZK Proof (truncated)</h3>
           <div class="code" style="font-size: 0.75rem; word-break: break-all;">

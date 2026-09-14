@@ -37,6 +37,30 @@ export interface ProveRequest {
   face_embedding?: number[];  // 1024-dim face embedding from live scan
   c_nonce?: string;           // hex-encoded client nonce for spatial flash verification
   flash_frames?: string[];    // baseline + 3 round JPEG data URLs
+  eye_crops?: string[][];     // [baseline, r0, r1, r2] × [left, right] PNG data URLs
+}
+
+export interface PhotometricRound {
+  round: number;
+  responding_patches: number;   // of a 4×4 grid
+  convexity_score: number;      // Q15 over [0, 2]
+}
+
+export interface FingerprintFields {
+  hex: string;
+  order: number;
+  mid_ratio: number;
+  min_ratio: number;
+  magnitude: number;
+}
+
+export interface CornealRound {
+  round: number;
+  left_glint: FingerprintFields;
+  right_glint: FingerprintFields;
+  expected_glint: FingerprintFields;
+  enabled: boolean;
+  agrees?: [boolean, boolean];
 }
 
 export interface ProveTimings {
@@ -66,6 +90,8 @@ export interface ProveResponse {
   liveness_proved_in_zk?: boolean;
   region_match_scores?: RegionMatchScore[];
   spatial_differentiation_score?: number;
+  photometric_rounds?: PhotometricRound[];
+  corneal_rounds?: CornealRound[];
   timings: ProveTimings;
   what_was_proven: string[];
   what_stayed_private: string[];
