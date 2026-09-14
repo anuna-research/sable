@@ -10,7 +10,7 @@
 
 These are the numbers from the first end-to-end runs after the photometric and
 corneal extractors were wired into the demo server. They exist to shape the
-pilot, not to set a threshold. n = 3 bona fide, n = 4 phone-screen attempts (2 with geometric evidence).
+pilot, not to set a threshold. n = 4 bona fide (plus 4 weak-capture rejections), n = 4 phone-screen attempts (2 with geometric evidence).
 
 ## Bona fide (real face), spatial check passed
 
@@ -37,6 +37,25 @@ blue-green cast; the per-quadrant tint is below one RGB unit. The server's
 cosine test scored 0.37–0.92 and passed. Its spatial-differentiation score was
 0.996 (mean cosine between adjacent quadrant deltas, i.e. nearly parallel) and
 passed only because the ceiling is 0.9995.
+
+Weak-capture episode (06:21, four attempts, bright afternoon sun through a
+window): quadrant deltas 1–3 RGB units (camera noise) on three attempts and a
+grey ±12 left/right split on the fourth (subject motion or a lamp). Server
+cosine check rejected all four at 0.60, 0.37, 0.16, 0.04. Coverage 3–10.
+
+Fourth bona fide run (06:25, blind partly closed, demo profile
+`SABLE_LIVENESS_THRESHOLDS=11,0,0 SABLE_GEOMETRY_FLOORS=8,0`):
+
+| Run | Round | Patches /16 | Convexity | Raw mean delta TL / TR / BL / BR (RGB) |
+|-----|-------|-------------|-----------|----------------------------------------|
+| 4 | 1 | 10 | 0.232 | (2.4,0.2,4.0) (1.6,0.0,6.5) (3.4,0.3,4.9) (2.5,0.2,6.3) |
+| 4 | 2 | 10 | 0.253 | (1.9,1.7,−0.5) (2.7,5.1,0.0) (3.0,2.6,−0.4) (3.8,6.2,−0.1) |
+| 4 | 3 | 11 | 0.320 | (1.7,2.6,2.7) (2.8,5.1,6.2) (2.1,3.6,3.8) (2.9,4.6,5.5) |
+
+**In-circuit liveness bit 1** for the first time, on the coverage floor
+alone (legacy checks vacuous, digest binds `min_coverage = 8`). Deltas were
+2–6 units, weaker than run 3's 3–14, and coverage sat only two patches above
+the floor.
 
 Glint magnitude was 1–2 on every eye in every round (max channel delta of
 roughly 4–8 RGB units). Observed glint order in the 05:55 run was
@@ -123,6 +142,14 @@ match** at 441–446.
    and the coverage floor armed at 8 (`SABLE_GEOMETRY_FLOORS=8,0`) as a
    labelled demo setting, because coverage is the one cue these runs
    separate on (bona fide 10–16, phone 4–6).
+4c. **Coverage cannot tell "flat" from "barely lit".** Under direct sun the
+   bona fide coverage fell to 3–10, overlapping the phone's 4–6, because the
+   flash was a small fraction of the light on the face. REQ-118 anticipated
+   this. The pilot needs a client-side illumination pre-check before the
+   sequence runs (for example: mean absolute quadrant delta on a trial flash
+   ≥ some units, else ask the subject to dim the room or move closer), so a
+   dim capture is retried, not scored. Ambient at 40/150/400 lux in the brief
+   already spans this; add a "direct sunlight" condition explicitly.
 4b. **The server's spatial-differentiation check is nearly vacuous** at a
    0.9995 ceiling; the phone was rejected by negative colour cosines, not by
    geometry. The pilot should not treat that check as evidence of anything.
