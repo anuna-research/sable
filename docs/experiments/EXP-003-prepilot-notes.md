@@ -38,8 +38,18 @@ in-circuit liveness bit **0** on both, per [[BUG-003-expected-fingerprint-magnit
 | 05:54:36 | 446 | 0.7448, 0.8878, 0.0287 | 0.5538 | rejected by spatial check |
 
 No photometric or corneal values were recorded for either attempt: the
-extractors ran only after the spatial gate until the reorder in the commit
-following `3f8f08d`. Rerun the attack to fill this in.
+extractors ran only after the spatial gate until the reorder in `9f7fce1`.
+
+Third attempt, after the reorder (same phone, same photo):
+
+| Attempt | Face Hamming | Spatial score | Round | Patches /16 | Convexity | Glint magnitude L / R |
+|---------|--------------|---------------|-------|-------------|-----------|------------------------|
+| 05:59:50 | **110** | 0.0468 (rejected) | 1 | **5** | 11780 → 0.359 | 0 / 1 |
+| | | | 2 | **5** | 8666 → 0.264 | 0 / 0 |
+| | | | 3 | **6** | 10389 → 0.317 | 0 / 0 |
+
+The phone photo matched the enrolled template *better* than the live face
+(Hamming 110 against 185–230).
 
 For reference, bona fide face Hamming distances in the same session were
 185–230 against a threshold of 2048; the phone-screen photo **passed the face
@@ -50,11 +60,18 @@ match** at 441–446.
 1. **Coverage and convexity look stable on one subject.** Two runs ten minutes
    apart gave 10–14 patches and 0.23–0.41 convexity. The pilot can expect the
    bona fide distribution to be tight enough that a floor is meaningful.
-2. **The legacy spatial cosine check separated the flat phone screen
-   completely** (0.003 vs 0.97). The first attempt is close to a textbook flat
-   reflector. The second attempt was partially specular (two rounds high, one
-   near zero), which is the case the convexity floor is meant to catch; we have
-   no convexity number for it yet.
+2. **The legacy spatial cosine check separated the phone screen every time**
+   (0.003, 0.55, 0.047 against 0.97 and 0.965 bona fide).
+2a. **Convexity alone does not separate; coverage does.** The phone attempt
+   scored 0.26–0.36 convexity, inside the bona fide band, but on only 5–6
+   responding patches against 10–14 for the face. With five patches the
+   "mean deviation of mixes" is the spread of five noisy vectors, not
+   geometry. This is precisely the REQ-118 argument for gating convexity on
+   coverage, now observed rather than argued: the convexity floor is only
+   meaningful above a coverage floor, and on this device a coverage floor
+   anywhere in 7–9 would have rejected the attack with margin on both sides.
+   The pilot should sweep coverage first and report convexity curves only
+   for captures above the chosen coverage floor.
 3. **The corneal cue is not usable at this capture geometry.** One run matched
    order 5/6, the next 0/6, with magnitude 1–2 throughout. At that signal level
    even the categorical order field is noise. Before the pilot spends effort
@@ -62,10 +79,12 @@ match** at 441–446.
    camera, or a higher-resolution crop, and BUG-003 needs fixing so the
    magnitude field can be compared at all. Record the raw mean RGB delta per
    eye in the pilot, not only the fingerprint.
-4. **The face-match threshold admits a phone photo of the subject.** Not this
-   experiment's question, but it means liveness is carrying the whole load in
-   the demo, and the threshold recalibration noted in the thermometer work is
-   not optional.
+4. **The face-match threshold admits a phone photo of the subject, and on the
+   third attempt preferred it** (Hamming 110 for the photo against 185–230 for
+   the live face). A screen replay of the enrolment session is the canonical
+   attack and the matcher cannot see it by construction. Not this experiment's
+   question, but liveness is carrying the whole load in the demo, and the
+   threshold recalibration noted in the thermometer work is not optional.
 5. **Attack captures must be logged even when an earlier gate rejects them.**
    Done in the server; the pilot's extraction step should run over every
    capture unconditionally, as the brief already says.
