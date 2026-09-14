@@ -6,8 +6,8 @@ Interactive demonstration of SABLE's privacy-preserving biometric authentication
 
 This demo showcases how SABLE enables biometric authentication without exposing actual biometric data. Users can:
 
-1. **Enroll** - Simulate a palm scan and create a cryptographic commitment
-2. **Authenticate** - Generate a zero-knowledge proof that matches enrolled biometrics
+1. **Enroll** - Capture your face via webcam, thermometer-encode the embedding, and register a Poseidon template commitment (plus a Pedersen commitment, or a fuzzy-extractor commitment in the opt-in mode)
+2. **Authenticate** - Recapture your face, run the four-quadrant flash liveness challenge, and generate a Halo2 proof that computes the biometric distance in-circuit, binds the template commitment, and carries a liveness bit bound to the challenge
 3. **Verify** - Verify the proof and see what was proven vs. what stayed private
 
 ## Architecture
@@ -15,22 +15,22 @@ This demo showcases how SABLE enables biometric authentication without exposing 
 ```
 ┌─────────────────────┐         ┌─────────────────────┐
 │  Browser (TS/HTML)  │  HTTP   │  Rust Backend       │
-│  - Enrollment UI    │ ◄─────► │  - sable-core       │
-│  - Auth flow        │         │  - Groth16 proofs   │
-│  - Visualizations   │         │  - Session state    │
+│  - Webcam + Human   │ ◄─────► │  - sable-core       │
+│  - Flash challenge  │         │  - Halo2 prover     │
+│  - Iris crops       │         │  - Session state    │
 └─────────────────────┘         └─────────────────────┘
 ```
 
-The server-side architecture was chosen because:
-- Proof generation requires ~850ms and 128MB memory - practical on server
-- Complex dependencies (ark-groth16, blstrs) have WASM compilation challenges
-- Mirrors production architecture where edge devices generate proofs
+The server-side prover was chosen because:
+- Proof generation takes ~1-1.5s and a few hundred MB on a laptop - fine on a server, not yet in the browser
+- halo2-lib has no WASM build in this project
+- Mirrors production architecture where the prover runs on a trusted device
 
 ## Quick Start
 
 ### Prerequisites
 
-- Rust 1.75+ with cargo
+- Nightly Rust via rustup (`rust-toolchain.toml` pins it)
 - Node.js 18+ with npm
 
 ### Running the Demo
@@ -39,10 +39,10 @@ The server-side architecture was chosen because:
 
 ```bash
 cd demo/server
-cargo run --release
+cargo run --release --features halo2-proofs
 ```
 
-The server will start on `http://localhost:3000`.
+The server will start on `http://localhost:3001` (override with `PORT`). Keygen for the Halo2 circuit runs once at startup and takes a couple of seconds.
 
 2. **Start the frontend (in a new terminal):**
 
@@ -112,7 +112,7 @@ the scale can be calibrated from real captures.
 ### Example: Enrollment
 
 ```bash
-curl -X POST http://localhost:3000/api/enroll \
+curl -X POST http://localhost:3001/api/enroll \
   -H "Content-Type: application/json" \
   -d '{"user_id": "demo-user"}'
 ```
@@ -143,20 +143,20 @@ Hiding commitment: `C = g^hash × h^salt`
 - **Binding**: Can't find two messages with same commitment
 - **Hiding**: Commitment reveals nothing about the message
 
-### Groth16 ZK-SNARK (~850ms proof, ~12ms verify)
-Succinct proof that demonstrates:
-- Features hash to the committed value
-- Distance between live and enrolled features is below threshold
-- Capture timestamp is recent
-- Quality score meets minimum threshold
+### Halo2 proof (~1-1.5s proof, ~2ms verify, 2KB)
+Transparent-setup proof on BN254 whose circuit constrains:
+- The enrolled template matches its Poseidon commitment (a public input)
+- The Hamming distance between thermometer-encoded embeddings is within the public threshold
+- The reflectance fingerprints and geometric evidence satisfy the liveness relation, yielding one public liveness bit
+- The challenge nonces and every liveness parameter hash to the public challenge digest
 
 ## What's Proven vs. What's Hidden
 
 ### Proven (Public)
-- User possesses matching biometric features
-- Distance is below threshold (0.25)
-- Scan was captured recently
-- Quality meets minimum standard
+- The live embedding is within the Hamming threshold of the committed template
+- Which template: its Poseidon commitment
+- One liveness bit, and the digest naming the challenge and the parameters it was checked under
+- Server-side only, not in the proof: scan quality and the floating-point reflectance check
 
 ### Hidden (Private)
 - Actual biometric feature values (512 floats)
@@ -318,12 +318,13 @@ cargo build --release
 
 ## Performance Targets
 
-| Operation | Target | Typical |
-|-----------|--------|---------|
+| Operation | Target | Typical (Apple M4, release) |
+|-----------|--------|-----------------------------|
 | Poseidon hash | <20ms | ~16ms |
 | Pedersen commit | <1ms | ~140μs |
-| Proof generation | <1s | ~850ms |
-| Verification | <20ms | ~12ms |
+| Halo2 keygen (once at startup) | <5s | ~2s |
+| Proof generation (match + liveness, k=16) | <2s | ~1.0-1.5s |
+| Verification | <20ms | ~2ms |
 
 ## License
 

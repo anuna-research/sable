@@ -197,22 +197,31 @@ SABLE uses a spatial flash challenge-response protocol to make it significantly 
 
 1. **Unpredictable challenge** -- Both client and server contribute random 32-byte nonces. The client commits to its nonce (SHA-256) before the server reveals its own. Their combined hash (HKDF-SHA256) determines the color pattern -- neither side can predict or replay it. The challenge expires after 30 seconds and can only be used once.
 
-2. **Split-screen color flash** -- The screen flashes a *different color on top vs. bottom* across 3 rounds. The colors are derived deterministically from the HKDF output, with photosensitive safety clamping (WCAG 2.3.1) and minimum angular distance enforcement between paired colors.
+2. **Four-quadrant color flash** -- The screen flashes a *different color in each of four quadrants* across 3 rounds, with the grid boundary shifted per round by the HKDF output. Colors are derived deterministically with photosensitive safety clamping (WCAG 2.3.1) and a minimum angular distance between adjacent quadrants.
 
-3. **3D geometry detection** -- The camera captures how light reflects off the face in each round. The server checks that the upper and lower face regions respond *differently* to the different colors (cosine similarity between delta vectors must be below a threshold). A real 3D face reflects split-screen colors differently in forehead vs. chin regions due to geometry; a flat photo or screen reflects them identically.
+3. **Reflectance and geometry** -- The camera captures a baseline frame and one frame per round. The server checks that each quadrant's mean color delta points toward its quadrant color (cosine similarity) and that adjacent quadrants respond differently. On top of that, SPEC-006 adds three *geometric* cues extracted from the same frames: **coverage** (how many patches of a 4×4 face grid responded at all), **convexity** (how much the illumination mix varies across patches, which a flat reflector cannot produce), and a **corneal glint** fingerprint per eye compared field-wise against the round's expected composite color.
 
-4. **ZK proof of liveness** -- The per-region color responses are quantized into 16-bit delta fingerprints (encoding channel ordering, ratios, and magnitude). These fingerprints are fed into the Halo2 circuit alongside the face-match check, producing a single composite proof. The verifier learns only pass/fail -- no raw reflectance data is exposed.
+4. **ZK proof of liveness** -- Twelve quantized delta fingerprints, the per-round coverage counts, convexity scores and glint fingerprints enter the Halo2 circuit as private witnesses. Every public liveness parameter -- the expected colors, every threshold and floor, and SHA-256 of both coin-flip nonces -- is hashed with Poseidon into one **challenge digest** the verifier recomputes, so a proof answers exactly one challenge under exactly the parameters the verifier issued. The circuit outputs a single liveness bit. The verifier learns that bit and the digest; no reflectance data is exposed.
 
 **Fingerprint encoding** (16-bit, identical in Rust and TypeScript):
 ```
 [order:3 | mid_ratio:4 | min_ratio:4 | magnitude:5]
 ```
+`order` is categorical and is compared by equality, never by bit distance. Expected fingerprints carry no magnitude; magnitude is judged only against a public floor on the observed side (SPEC-006 REQ-125).
+
+**Status of the in-circuit relation (honest reading, September 2026):**
+- Every threshold and floor ships **unset** (SPEC-006 ADR-010). A threshold of zero makes its check vacuous, visibly so in the digest. The operating constants come from a presentation-attack study (EXP-003) that has not yet run; the demo exposes them as environment variables labelled as demo settings.
+- The 0.1.0 fingerprint colour check does not hold on a webcam: the reflected delta is a common-mode brightening of a few RGB units shared by every quadrant, so a fingerprint of its direction cannot agree with the quadrant colour at any threshold. A cosine bound on raw deltas, matching the server's own check, is specified as SPEC-006 REQ-126 for the next revision.
+- In the first live runs on one device, **coverage** was the cue that separated a face (10-16 of 16 patches) from a phone-screen replay (4-6). The demo profile arms only that floor. Under direct sunlight a real face fell to 3-10, so coverage cannot tell "flat" from "barely lit"; a client-side illumination pre-check is a pilot requirement.
+- The corneal glint at 640×480 has a magnitude of one or two units, which is noise. It needs brighter flash or a closer camera before it carries evidence.
+
+Details: `docs/specs/SPEC-006-geometric-liveness.md`, `docs/specs/BUG-003-expected-fingerprint-magnitude-mismatch.md`, `docs/experiments/EXP-003-prepilot-notes.md`.
 
 **Limitations:**
-- Defeats static photos and simple screen replays
+- Defeats static photos and simple screen replays in the demo; no claim beyond one subject and one device
 - Not a substitute for depth sensors or infrared
 - Sophisticated 3D masks or real-time video manipulation are not addressed
-- Calibrated for typical webcam distances (~40-80cm); extreme distances may affect accuracy
+- Needs the screen to be the dominant light change on the face: bright ambient light or direct sun defeats the capture, not the check
 
 ### Verification flow
 
@@ -240,7 +249,7 @@ sequenceDiagram
     rect rgb(240, 255, 240)
     Note over P,SC: Spatial Flash Liveness
     P->>P: 7. Derive flash pattern from HKDF(c_nonce ‖ s_nonce)
-    P->>P: 8. Display 3 rounds of split-screen colors (top ≠ bottom)
+    P->>P: 8. Display 3 rounds of four-quadrant colors (grid offset per round)
     P->>P: 9. Capture baseline + 3 flash frames via camera
     P->>P: 10. Recapture face embedding (live scan)
     end
@@ -248,9 +257,9 @@ sequenceDiagram
     rect rgb(248, 240, 255)
     Note over P,SC: ZK Proof Generation
     P->>SC: 11. Thermometer-encode embedding, bind Poseidon template commitment
-    P->>SC: 12. Quantize per-region reflectance deltas → 16-bit fingerprints
-    P->>SC: 13. Generate Halo2 ZK proof (~970ms, 2KB), distance computed in-circuit
-    Note over SC: Proves: face match + liveness + quality<br/>without revealing biometric data
+    P->>SC: 12. Quantize quadrant deltas → fingerprints; extract coverage, convexity, glints
+    P->>SC: 13. Generate Halo2 ZK proof (~1-1.5s, 2KB), distance computed in-circuit
+    Note over SC: Proves: face match + liveness bit + challenge digest<br/>without revealing biometric data
     SC->>P: 14. Return proof + commitment
     end
 
@@ -327,7 +336,7 @@ sable/
 | Commitments | Pedersen | Hiding commitment acts as "biometric public key" |
 | ZK proofs | Halo2 | Transparent setup, in-circuit Hamming distance (k=16), ~970ms proof gen, ~2ms verification, 2KB proofs |
 | Biometric encoding | Thermometer (L=9) | Ordinal encoding at 8 bits/dim; recovers accuracy that binary Hamming discards, constrained valid in-circuit |
-| Liveness | Spatial flash | Split-screen color challenge-response with 3D geometry detection (Tang et al., NDSS 2018) |
+| Liveness | Spatial flash + geometric cues | Four-quadrant color challenge-response (after Tang et al., NDSS 2018) with coverage, convexity and corneal cues in circuit (SPEC-006); nonce-bound Poseidon challenge digest; thresholds pending EXP-003 |
 | Biometrics | Face / Palm | 1024-dim embeddings, Gabor filters, multi-modal fusion |
 | P2P | NFC/BLE/WiFi Direct | X25519 ECDH + ChaCha20-Poly1305 AEAD |
 | Attestation | X.509 / Verifiable Credentials | Government identity binding with selective disclosure |
@@ -374,7 +383,9 @@ sable/
 
 **Biometric attack vectors:**
 - Presentation attacks (silicone faces, 3D prints) remain a risk without enhanced PAD
-- Liveness detection is calibrated for screen-based attacks; sophisticated physical replicas may bypass it
+- Liveness detection targets screen-based attacks; sophisticated physical replicas may bypass it
+- Every liveness threshold is an unvalidated demo value until EXP-003 reports; the geometric floors ship at zero (SPEC-006 ADR-010)
+- In the demo the face matcher accepted a phone-screen photo of the enrolled subject at a *lower* Hamming distance than the live face; liveness carries the whole load against replay, and the match threshold needs recalibration
 
 **System dependencies:**
 - Relies on Secure Enclave / Android Keystore integrity
@@ -398,7 +409,7 @@ sable/
 
 **Active development.** The core library is feature-complete across all milestones but has not been audited for production use.
 
-**557 tests passing | ~95 Halo2-specific tests | Interactive demo with ZK liveness detection**
+**635 tests passing (614 lib + 21 integration) | 128 Halo2-specific tests | Interactive demo with ZK liveness detection**
 
 | Milestone | Status |
 |-----------|--------|
@@ -406,7 +417,8 @@ sable/
 | Halo2 ZK face verification (transparent setup, demo server) | Complete |
 | In-circuit Hamming matcher + Poseidon template-commitment binding | Complete |
 | Thermometer (ordinal) biometric encoding | Complete |
-| Spatial flash liveness with ZK proof (challenge-response, 3D geometry) | Complete |
+| Spatial flash liveness with ZK proof (challenge-response, quadrant reflectance) | Complete; fingerprint colour check under redesign (SPEC-006 REQ-126) |
+| Geometric liveness cues in circuit: coverage, convexity, corneal glint; nonce-bound challenge digest (SPEC-006 0.2.0) | Mechanism complete; thresholds unset pending EXP-003 |
 | Interactive demo (enrollment, auth, liveness, verification) | Complete |
 | Palm biometrics (vein + print extraction, fusion) | Complete |
 | Mobile integration (Android JNI, iOS Swift, FFI) | Complete |
@@ -419,6 +431,9 @@ sable/
 - Post-quantum migration (quantum-resistant curves and hash functions)
 - Hardware security module integration
 - Formal verification of circuit correctness
+- EXP-003 presentation-attack study to fix the liveness thresholds and floors
+- SPEC-006 REQ-126: in-circuit cosine bound on raw reflectance deltas, replacing the fingerprint colour check
+- Client-side illumination pre-check before the flash sequence
 - Advanced multi-spectral liveness detection
 - Real-device testing and performance validation
 
