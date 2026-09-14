@@ -750,3 +750,50 @@ fn test_protocol_e2e_with_hex_encoding() {
 
     assert!(result.passed, "full e2e protocol with hex encoding should pass");
 }
+
+#[test]
+fn photometric_coverage_excludes_background_and_preserves_face_response() {
+    use demo_server::flash_challenge::crop_face_region;
+    use sable_core::biometric::photometric::{extract, PatchGrid};
+
+    let baseline = PalmImage::new(160, 160, 3, vec![100; 160 * 160 * 3]);
+    let mut background_flash = baseline.clone();
+    for y in 0..160 {
+        for x in 0..160 {
+            if x < 32 || x >= 128 || y < 32 || y >= 128 {
+                for c in 0..3 {
+                    background_flash.data[(y * 160 + x) * 3 + c] += 20;
+                }
+            }
+        }
+    }
+    let colours = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]];
+    let old = extract(&baseline, &background_flash, &colours, PatchGrid::default()).unwrap();
+    assert_eq!(
+        old.responding_patches, 12,
+        "background alone used to exceed the demo floor of 8"
+    );
+    let face = crop_face_region(&baseline).unwrap();
+    let background = crop_face_region(&background_flash).unwrap();
+    assert_eq!((face.width, face.height), (96, 96));
+    let evidence = extract(&face, &background, &colours, PatchGrid::default()).unwrap();
+    assert_eq!(evidence.responding_patches, 0);
+    assert_eq!(evidence.convexity_score, 0);
+
+    let mut face_flash = baseline.clone();
+    for y in 32..128 {
+        for x in 32..128 {
+            for c in 0..3 {
+                face_flash.data[(y * 160 + x) * 3 + c] += 20;
+            }
+        }
+    }
+    let evidence = extract(
+        &face,
+        &crop_face_region(&face_flash).unwrap(),
+        &colours,
+        PatchGrid::default(),
+    )
+    .unwrap();
+    assert_eq!(evidence.responding_patches, 16);
+}

@@ -73,6 +73,11 @@ export async function performScreenFlash(
  * Capture a single frame from a video element as JPEG data URL.
  */
 function captureVideoFrame(video: HTMLVideoElement): string {
+  return captureVideoCanvas(video).toDataURL('image/jpeg', 0.85);
+}
+
+/** Retain original camera pixels for corneal crops before JPEG compression. */
+function captureVideoCanvas(video: HTMLVideoElement): HTMLCanvasElement {
   const canvas = document.createElement('canvas');
   canvas.width = video.videoWidth || 640;
   canvas.height = video.videoHeight || 480;
@@ -83,7 +88,7 @@ function captureVideoFrame(video: HTMLVideoElement): string {
   }
 
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL('image/jpeg', 0.85);
+  return canvas;
 }
 
 /**
@@ -155,8 +160,9 @@ export async function performSpatialFlash(
   const useReducedMotion = prefersReducedMotion();
   const crossfadeDuration = useReducedMotion ? REDUCED_MOTION_CROSSFADE_MS : CROSSFADE_MS;
 
-  // 1. Capture baseline frame (ambient lighting, no overlay)
-  const baselineDataUrl = captureVideoFrame(video);
+  // Keep original pixels from each capture for lossless eye crops.
+  const capturedFrames = [captureVideoCanvas(video)];
+  const baselineDataUrl = capturedFrames[0].toDataURL('image/jpeg', 0.85);
 
   const roundFrames: string[] = [];
   let previousOverlay: HTMLDivElement | null = null;
@@ -185,7 +191,9 @@ export async function performSpatialFlash(
     await sleep(settleTime);
 
     // Capture frame for this round
-    roundFrames.push(captureVideoFrame(video));
+    const frame = captureVideoCanvas(video);
+    capturedFrames.push(frame);
+    roundFrames.push(frame.toDataURL('image/jpeg', 0.85));
 
     previousOverlay = overlay;
   }
@@ -201,9 +209,9 @@ export async function performSpatialFlash(
   // the flash sequence so detection latency cannot disturb round timing.
   let eyeCrops: string[][] | undefined;
   try {
-    eyeCrops = await extractEyeCrops([baselineDataUrl, ...roundFrames]) ?? undefined;
+    eyeCrops = await extractEyeCrops(capturedFrames) ?? undefined;
   } catch (err) {
-    console.warn('Eye crop extraction failed; corneal check will be skipped', err);
+    console.warn('Eye crop extraction failed; a configured corneal check will reject this capture', err);
   }
 
   return { baselineDataUrl, roundFrames, eyeCrops };
@@ -218,16 +226,7 @@ const CROP_RADIUS_FACTOR = 2.4;
 /** Server rejects crops under 8 px; keep a margin. */
 const MIN_CROP_SIDE = 12;
 
-function loadImage(dataUrl: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error('Failed to decode captured frame'));
-    img.src = dataUrl;
-  });
-}
-
-function cropSquare(img: HTMLImageElement, cx: number, cy: number, side: number): string {
+function cropSquare(img: HTMLCanvasElement, cx: number, cy: number, side: number): string {
   const sx = Math.min(Math.max(0, Math.round(cx - side / 2)), Math.max(0, img.width - side));
   const sy = Math.min(Math.max(0, Math.round(cy - side / 2)), Math.max(0, img.height - side));
   const canvas = document.createElement('canvas');
@@ -248,12 +247,12 @@ function cropSquare(img: HTMLImageElement, cx: number, cy: number, side: number)
  * used when found; otherwise the baseline centres are reused, which tolerates
  * a momentary detection miss but not head motion.
  */
-export async function extractEyeCrops(frames: string[]): Promise<string[][] | null> {
-  const images = await Promise.all(frames.map(loadImage));
+export async function extractEyeCrops(images: HTMLCanvasElement[]): Promise<string[][] | null> {
+  if (images.length !== 4) throw new Error('Expected baseline and three flash frames');
 
   const baseline = await detectIrises(images[0]);
   if (!baseline) {
-    console.warn('No irises located in baseline frame; corneal check skipped');
+    console.warn('No irises located in baseline frame; eye crops unavailable');
     return null;
   }
   const meanRadius = (baseline.left.radius + baseline.right.radius) / 2;

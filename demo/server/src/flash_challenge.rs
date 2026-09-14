@@ -516,6 +516,35 @@ const SPATIAL_DIFF_MIN_PASSING_ROUNDS: usize = 2;
 /// Face region margin: 20% on each side, leaving center 60%.
 const FACE_MARGIN_FRACTION: f64 = 0.20;
 
+/// Crop the fixed central face region used by the spatial verifier.
+/// All evidence from a capture sequence must use these same bounds.
+pub fn crop_face_region(frame: &PalmImage) -> Result<PalmImage, String> {
+    if frame.channels != 3
+        || !(64..=4096).contains(&frame.width)
+        || !(64..=4096).contains(&frame.height)
+        || frame.data.len() != frame.width as usize * frame.height as usize * 3
+    {
+        return Err("face frame must be RGB8 with dimensions in [64, 4096]".into());
+    }
+    let w = frame.width as usize;
+    let h = frame.height as usize;
+    let mx = (w as f64 * FACE_MARGIN_FRACTION) as usize;
+    let my = (h as f64 * FACE_MARGIN_FRACTION) as usize;
+    if w - 2 * mx < 64 || h - 2 * my < 64 {
+        return Err("central face region must be at least 64 × 64 pixels".into());
+    }
+    let mut data = Vec::with_capacity((w - 2 * mx) * (h - 2 * my) * 3);
+    for y in my..h - my {
+        data.extend_from_slice(&frame.data[(y * w + mx) * 3..(y * w + w - mx) * 3]);
+    }
+    Ok(PalmImage::new(
+        (w - 2 * mx) as u32,
+        (h - 2 * my) as u32,
+        3,
+        data,
+    ))
+}
+
 /// Per-region, per-round match score.
 #[derive(Debug, Clone)]
 pub struct RegionMatchScore {

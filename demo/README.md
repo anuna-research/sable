@@ -60,8 +60,14 @@ Navigate to `http://localhost:5173` in your browser.
 
 ### Geometric liveness (SPEC-006)
 
-The prove endpoint also runs the photometric convexity extractor on each flash
-round and, when the client sends iris crops, the corneal glint extractor. Both
+The prove endpoint also runs the photometric convexity extractor on the fixed
+central 60% face region of each flash round, matching the spatial gate. The
+cropped region must be at least 64×64 pixels. This excludes the outer background;
+it remains a fixed capture region, not a detected face mask. When the client sends
+iris crops, the server also runs the corneal glint extractor. The browser crops
+from retained camera canvases before JPEG compression and encodes the crops as
+PNG. When `SABLE_CORNEAL_TOLERANCE` is configured, missing flash evidence or
+missing/invalid eye crops reject the request instead of disabling the check. Both
 are reported in the prove response (`photometric_rounds`, `corneal_rounds`) and
 in the server log. Their circuit floors ship at zero (ADR-010), so they do not
 gate the proof unless enabled:

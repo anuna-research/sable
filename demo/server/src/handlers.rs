@@ -31,7 +31,10 @@ use crate::simulation::{
     calculate_distance, calculate_quality_score, generate_similar_features,
     generate_simulated_features,
 };
-use crate::flash_challenge::{compute_liveness_evidence, derive_flash_pattern, verify_client_commitment, verify_spatial_flash};
+use crate::flash_challenge::{
+    compute_liveness_evidence, crop_face_region, derive_flash_pattern, verify_client_commitment,
+    verify_spatial_flash,
+};
 use crate::state::{AppState, AuthChallenge, EnrollmentSession, LivenessResult};
 
 // Feature vector size (must match SABLE core)
@@ -448,6 +451,8 @@ pub async fn auth_prove(
     Json(req): Json<ProveRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let total_start = Instant::now();
+    let corneal_tolerances = corneal_tolerances_from_env();
+    require_corneal_evidence(&req, corneal_tolerances.is_some()).map_err(bad_liveness_input)?;
 
     // Get and validate challenge
     let challenge = state.remove_challenge(&req.challenge_id).ok_or_else(|| {
@@ -728,14 +733,14 @@ pub async fn auth_prove(
         let (color_threshold, spatial_threshold, min_magnitude) = liveness_thresholds_from_env();
 
         // g2. Photometric convexity evidence per round (SPEC-006 REQ-111..113,
-        // REQ-118). The extractor runs on the same frames; its outputs enter the
-        // witness as private fields. The public floors stay at zero (ADR-010),
-        // so the coverage and convexity checks are vacuous in circuit until
-        // EXP-003 fixes the constants. Logged so real faces and presentation
-        // artefacts can be measured against each other.
+        // REQ-118). Crop the fixed central face region used by the spatial gate
+        // before laying out patches, so background illumination cannot count as
+        // facial coverage or convexity. Floors are configured by the operator;
+        // zero leaves each check observational (ADR-010).
         let mut responding_patches = [0u8; 3];
         let mut convexity_scores = [0u16; 3];
         let mut photometric_report = Vec::with_capacity(3);
+        let face_baseline = crop_face_region(&baseline).map_err(bad_liveness_input)?;
         for (r, (flash, round)) in flash_frames_decoded
             .iter()
             .zip(pattern.rounds.iter())
@@ -747,7 +752,13 @@ pub async fn auth_prove(
                 round.bl_color.to_array(),
                 round.br_color.to_array(),
             ];
-            match photometric::extract(&baseline, flash, &quadrant_colours, PatchGrid::default()) {
+            let face_flash = crop_face_region(flash).map_err(bad_liveness_input)?;
+            match photometric::extract(
+                &face_baseline,
+                &face_flash,
+                &quadrant_colours,
+                PatchGrid::default(),
+            ) {
                 Ok(pr) => {
                     // A 4×4 grid has 16 patches; the witness field admits ≤ 64.
                     responding_patches[r] = pr.responding_patches.min(64) as u8;
@@ -782,39 +793,10 @@ pub async fn auth_prove(
         // carried and logged but the check is vacuous.
         let mut glint_fingerprints = [0u16; 6];
         let mut expected_glints = [0u16; 3];
-        let corneal_tolerances = corneal_tolerances_from_env();
-        let mut corneal_live = false;
+        let corneal_live = corneal_tolerances.is_some();
         if let Some(crops_b64) = &req.eye_crops {
-            let shape_ok = crops_b64.len() == 4 && crops_b64.iter().all(|pair| pair.len() == 2);
-            if !shape_ok {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: "eye_crops must be 4 frames × 2 eyes".to_string(),
-                    }),
-                ));
-            }
-            let mut crops: Vec<[PalmImage; 2]> = Vec::with_capacity(4);
-            for (f, pair) in crops_b64.iter().enumerate() {
-                let mut decoded = Vec::with_capacity(2);
-                for (e, b64) in pair.iter().enumerate() {
-                    let img = decode_base64_image(b64).map_err(|err| {
-                        (
-                            StatusCode::BAD_REQUEST,
-                            Json(ErrorResponse {
-                                error: format!("Invalid eye crop frame {f} eye {e}: {err}"),
-                            }),
-                        )
-                    })?;
-                    decoded.push(img);
-                }
-                let right = decoded.pop().unwrap();
-                let left = decoded.pop().unwrap();
-                crops.push([left, right]);
-            }
-
+            let crops = decode_eye_crops(crops_b64).map_err(bad_liveness_input)?;
             let mut report = Vec::with_capacity(3);
-            let mut all_extracted = true;
             for (r, round) in pattern.rounds.iter().enumerate() {
                 let quadrant_colours = [
                     round.tl_color.to_array(),
@@ -832,23 +814,14 @@ pub async fn auth_prove(
                     (sx * (1.0 - sy) * 10_000.0) as u32,
                     ((1.0 - sx) * (1.0 - sy) * 10_000.0) as u32,
                 ];
-                let expected = match corneal::expected_composite(&quadrant_colours, &weights) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!(round = r, error = %e, "corneal expected composite failed");
-                        all_extracted = false;
-                        continue;
-                    }
-                };
+                let expected = corneal::expected_composite(&quadrant_colours, &weights)
+                    .map_err(|e| bad_liveness_input(e.to_string()))?;
                 let mut observed = [0u16; 2];
                 for eye in 0..2 {
-                    match corneal::glint_fingerprint(&crops[0][eye], &crops[r + 1][eye]) {
-                        Ok(fp) => observed[eye] = fp,
-                        Err(e) => {
-                            tracing::warn!(round = r, eye, error = %e, "corneal glint extraction failed");
-                            all_extracted = false;
-                        }
-                    }
+                    observed[eye] = corneal::glint_fingerprint(&crops[0][eye], &crops[r + 1][eye])
+                        .map_err(|e| {
+                            bad_liveness_input(format!("Invalid eye crop round {r} eye {eye}: {e}"))
+                        })?;
                 }
                 glint_fingerprints[r * 2] = observed[0];
                 glint_fingerprints[r * 2 + 1] = observed[1];
@@ -873,15 +846,9 @@ pub async fn auth_prove(
                     left_glint: observed[0].into(),
                     right_glint: observed[1].into(),
                     expected_glint: expected.into(),
-                    enabled: false, // patched below once liveness is decided
+                    enabled: corneal_live,
                     agrees,
                 });
-            }
-            // Only arm the in-circuit check when every crop fingerprinted, so a
-            // decode failure cannot masquerade as a corneal mismatch.
-            corneal_live = corneal_tolerances.is_some() && all_extracted;
-            for entry in &mut report {
-                entry.enabled = corneal_live;
             }
             corneal_rounds = Some(report);
         }
@@ -1631,7 +1598,42 @@ fn check_ratio_smoothness(baseline: &PalmImage, flash: &PalmImage) -> RatioSmoot
     }
 }
 
-/// Decode a base64-encoded JPEG image (with optional data URL prefix) to a PalmImage
+fn bad_liveness_input(error: String) -> (StatusCode, Json<ErrorResponse>) {
+    (StatusCode::BAD_REQUEST, Json(ErrorResponse { error }))
+}
+
+fn require_corneal_evidence(req: &ProveRequest, enabled: bool) -> Result<(), String> {
+    if enabled && (req.eye_crops.is_none() || req.c_nonce.is_none() || req.flash_frames.is_none()) {
+        return Err("Configured corneal check requires eye_crops, c_nonce and flash_frames".into());
+    }
+    Ok(())
+}
+
+/// Validate all eight crops before computing any corneal evidence.
+fn decode_eye_crops(encoded: &[Vec<String>]) -> Result<Vec<[PalmImage; 2]>, String> {
+    if encoded.len() != 4 || encoded.iter().any(|pair| pair.len() != 2) {
+        return Err("eye_crops must be 4 frames × 2 eyes".into());
+    }
+    let mut dimensions = None;
+    let mut crops = Vec::with_capacity(4);
+    for pair in encoded {
+        let left = decode_base64_image(&pair[0])?;
+        let right = decode_base64_image(&pair[1])?;
+        for image in [&left, &right] {
+            let size = (image.width, image.height);
+            if !(8..=4096).contains(&size.0)
+                || !(8..=4096).contains(&size.1)
+                || dimensions.is_some_and(|expected| expected != size)
+            {
+                return Err("All eye crops must share dimensions in [8, 4096]".into());
+            }
+            dimensions = Some(size);
+        }
+        crops.push([left, right]);
+    }
+    Ok(crops)
+}
+
 /// Decode a base64 (optionally data-URL) PNG or JPEG into an RGB8 image.
 ///
 /// Eye crops arrive as PNG: at ~16 px a JPEG's chroma subsampling would smear
@@ -2109,4 +2111,63 @@ pub async fn fuzzy_check_unique(
         timing_ms: timing.as_secs_f64() * 1000.0,
         checked_count,
     }))
+}
+
+#[cfg(test)]
+mod liveness_input_tests {
+    use super::*;
+    use base64::Engine;
+    use image::ImageEncoder;
+
+    fn png(side: u32) -> String {
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                &vec![100; (side * side * 3) as usize],
+                side,
+                side,
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn configured_corneal_check_requires_all_capture_inputs() {
+        let complete = serde_json::json!({
+            "challenge_id": "test", "c_nonce": "00", "flash_frames": [], "eye_crops": []
+        });
+        let req = serde_json::from_value(complete.clone()).unwrap();
+        assert!(require_corneal_evidence(&req, true).is_ok());
+        for field in ["c_nonce", "flash_frames", "eye_crops"] {
+            let mut missing = complete.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            let req = serde_json::from_value(missing).unwrap();
+            assert!(
+                require_corneal_evidence(&req, true).is_err(),
+                "missing {field}"
+            );
+            assert!(require_corneal_evidence(&req, false).is_ok());
+        }
+    }
+
+    #[test]
+    fn corneal_crops_reject_invalid_shapes_images_and_dimensions() {
+        let valid = vec![vec![png(16); 2]; 4];
+        assert_eq!(decode_eye_crops(&valid).unwrap().len(), 4);
+        assert!(decode_eye_crops(&valid[..3]).is_err());
+        for replacement in [
+            vec![],
+            vec![png(16)],
+            vec![png(4); 2],
+            vec![png(24); 2],
+            vec!["invalid".into(); 2],
+        ] {
+            let mut invalid = valid.clone();
+            invalid[2] = replacement;
+            assert!(decode_eye_crops(&invalid).is_err());
+        }
+        // Even a consistent size per eye must not allow different sizes between eyes.
+        assert!(decode_eye_crops(&vec![vec![png(16), png(24)]; 4]).is_err());
+    }
 }
