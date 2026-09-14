@@ -122,11 +122,10 @@ export function renderVerificationScreen(
   const extraProven: string[] = [];
   const extraPrivate: string[] = [];
   if (proof?.liveness_proved_in_zk) {
-    // ZK liveness — server-side text already covers this, just add spatial geometry note
-    extraProven.push('Face reflects spatially structured light consistent with 3D geometry');
+    extraProven.push('Face reflects spatially structured light consistent with 3D geometry (in circuit)');
     extraPrivate.push('Per-region facial reflectance signals (proven without revealing)');
   } else if (proof?.color_challenge_passed != null) {
-    extraProven.push('Face reflects spatially structured light consistent with 3D geometry');
+    extraProven.push('Server-side spatial reflectance check only; the proof\'s liveness bit is 0');
     extraPrivate.push('Per-region reflectance signals');
   }
 

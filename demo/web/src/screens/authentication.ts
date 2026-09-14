@@ -64,16 +64,17 @@ export function renderAuthenticationScreen(
           <strong>Live Face Scan:</strong> A new face embedding is extracted from your webcam
         </li>
         <li style="margin-bottom: 0.75rem;">
-          <strong>Liveness Check:</strong> Screen flash reflectance analysis verifies a real face
-          (Tang et al., NDSS 2018)
+          <strong>Liveness Challenge:</strong> A joint coin-flip picks a four-quadrant color flash
+          pattern; the camera records how your face reflects it (after Tang et al., NDSS 2018).
+          The server checks the reflectance, then quantises it into fingerprints for the circuit.
         </li>
         <li style="margin-bottom: 0.75rem;">
-          <strong>Circuit Execution:</strong> The Halo2 circuit verifies:
+          <strong>Circuit Execution:</strong> The Halo2 circuit constrains:
           <ul style="margin-top: 0.5rem; margin-left: 1rem;">
-            <li>Features hash to the committed value</li>
-            <li>Embedding similarity is above threshold</li>
-            <li>Timestamp is recent</li>
-            <li>Quality score is acceptable</li>
+            <li>The enrolled template matches its Poseidon commitment</li>
+            <li>Hamming distance between the thermometer-encoded embeddings is within the public threshold</li>
+            <li>The reflectance fingerprints satisfy the liveness relation, yielding one public liveness bit</li>
+            <li>The challenge nonces and every liveness threshold hash to the public digest</li>
           </ul>
         </li>
         <li style="margin-bottom: 0.75rem;">

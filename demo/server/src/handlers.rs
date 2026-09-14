@@ -31,7 +31,7 @@ use crate::simulation::{
     calculate_distance, calculate_quality_score, generate_similar_features,
     generate_simulated_features,
 };
-use crate::flash_challenge::{compute_liveness_fingerprints, derive_flash_pattern, verify_client_commitment, verify_spatial_flash};
+use crate::flash_challenge::{compute_liveness_evidence, derive_flash_pattern, verify_client_commitment, verify_spatial_flash};
 use crate::state::{AppState, AuthChallenge, EnrollmentSession, LivenessResult};
 
 // Feature vector size (must match SABLE core)
@@ -362,16 +362,36 @@ pub struct CornealRoundResponse {
     pub agrees: Option<[bool; 2]>,
 }
 
-/// Corneal tolerances from `SABLE_CORNEAL_TOLERANCE="<ratio>,<magnitude>"`.
+/// Corneal parameters from `SABLE_CORNEAL_TOLERANCE="<ratio>,<magnitude_floor>"`.
 ///
-/// Unset means the check ships disabled (ADR-010). Values are clamped to the
-/// witness widths (ratio ≤ 15, magnitude ≤ 31).
+/// The first value is the allowed ordinal difference on the two ratio fields;
+/// the second is the minimum observed glint magnitude (BUG-003: the composite
+/// carries no magnitude, so this is a floor, not a tolerance). Unset means the
+/// check ships disabled (ADR-010). Values are clamped to the witness widths
+/// (ratio ≤ 15, floor ≤ 31).
 fn corneal_tolerances_from_env() -> Option<(u8, u8)> {
     let raw = std::env::var("SABLE_CORNEAL_TOLERANCE").ok()?;
     let (a, b) = raw.split_once(',')?;
     let ratio: u8 = a.trim().parse().ok()?;
     let magnitude: u8 = b.trim().parse().ok()?;
     Some((ratio.min(15), magnitude.min(31)))
+}
+
+/// Legacy liveness thresholds from `SABLE_LIVENESS_THRESHOLDS="<colour>,<spatial>,<magnitude>"`.
+///
+/// Colour: maximum Hamming distance over the 11 direction bits of a quadrant
+/// fingerprint against the expected colour. Spatial: minimum Hamming distance
+/// between adjacent quadrant fingerprints. Magnitude: minimum observed
+/// magnitude per quadrant at the configured `SABLE_MAGNITUDE_SCALE`. Defaults
+/// are the demo's historical guesses (5, 1, 3); none is validated (ADR-010).
+fn liveness_thresholds_from_env() -> (u8, u8, u8) {
+    const DEFAULT: (u8, u8, u8) = (5, 1, 3);
+    let Ok(raw) = std::env::var("SABLE_LIVENESS_THRESHOLDS") else { return DEFAULT };
+    let parts: Vec<Option<u8>> = raw.split(',').map(|p| p.trim().parse().ok()).collect();
+    match parts.as_slice() {
+        [Some(c), Some(s), Some(m)] => (*c, *s, (*m).min(31)),
+        _ => DEFAULT,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -641,13 +661,28 @@ pub async fn auth_prove(
         );
 
         // g. Compute delta fingerprints for ZK liveness proof
-        let (delta_fps, expected_fps) =
-            compute_liveness_fingerprints(&baseline, &flash_frames_decoded, &pattern);
+        let (delta_fps, expected_fps, raw_deltas) =
+            compute_liveness_evidence(&baseline, &flash_frames_decoded, &pattern);
 
         tracing::info!(
             "Liveness fingerprints: delta={:?}, expected={:?}",
             delta_fps, expected_fps
         );
+        // BUG-003 / EXP-003: the raw mean RGB deltas the fingerprints came from,
+        // so the magnitude scale can be calibrated from real captures.
+        for r in 0..3 {
+            let q = |i: usize| {
+                let d = raw_deltas[r * 4 + i];
+                format!("[{:.1},{:.1},{:.1}]", d[0], d[1], d[2])
+            };
+            tracing::info!(
+                round = r,
+                tl = %q(0), tr = %q(1), bl = %q(2), br = %q(3),
+                magnitude_scale = crate::flash_challenge::magnitude_scale(),
+                "raw quadrant deltas"
+            );
+        }
+        let (color_threshold, spatial_threshold, min_magnitude) = liveness_thresholds_from_env();
 
         // g2. Photometric convexity evidence per round (SPEC-006 REQ-111..113,
         // REQ-118). The extractor runs on the same frames; its outputs enter the
@@ -807,7 +842,7 @@ pub async fn auth_prove(
             }
             corneal_rounds = Some(report);
         }
-        let (glint_ratio_tolerance, glint_magnitude_tolerance) = if corneal_live {
+        let (glint_ratio_tolerance, glint_magnitude_floor) = if corneal_live {
             corneal_tolerances.unwrap_or((0, 0))
         } else {
             (0, 0)
@@ -832,9 +867,10 @@ pub async fn auth_prove(
         let witness = LivenessWitness {
             delta_fingerprints: delta_fps,
             expected_fingerprints: expected_fps,
-            color_threshold: 5,    // allow up to HD=5 between delta and expected
-            spatial_threshold: 1,  // require at least HD=1 between upper/lower
-            min_magnitude: 3,      // minimum magnitude for flash response
+            // Demo guesses unless SABLE_LIVENESS_THRESHOLDS overrides them.
+            color_threshold,
+            spatial_threshold,
+            min_magnitude,
             // SPEC-006 0.2.0 (REQ-119): bind the joint coin-flip identifier so
             // the proof answers this challenge and no other.
             challenge_id: challenge_identifier(&c_nonce_32, &challenge.nonce),
@@ -848,7 +884,7 @@ pub async fn auth_prove(
             // the check is live only with SABLE_CORNEAL_TOLERANCE set.
             corneal_enabled: corneal_live,
             glint_ratio_tolerance,
-            glint_magnitude_tolerance,
+            glint_magnitude_floor,
             glint_fingerprints,
             expected_glints,
             ..LivenessWitness::default()
@@ -992,36 +1028,37 @@ pub async fn auth_prove(
             total_ms: total_time.as_secs_f64() * 1000.0,
         },
         what_was_proven: {
+            // Only statements the Halo2 circuit actually constrains are labelled
+            // "in circuit"; server-side checks are labelled as such.
             let mut proven = vec![
-                "I possess biometric features matching the enrolled template (Halo2 ZK proof)".to_string(),
-                format!("Hamming distance {} ≤ threshold {} (ZK verified)", hamming_dist, threshold),
-                "The biometric scan was captured recently (temporal validity)".to_string(),
-                format!("Scan quality meets minimum threshold (score: {:.2})", quality_score),
+                "The live embedding is within the Hamming threshold of the enrolled template, on thermometer-encoded features (in circuit)".to_string(),
+                format!("Hamming distance ≤ {} (public threshold; the distance itself stays private)", threshold),
+                "The template used is the one committed at enrolment: its Poseidon commitment is a public input (in circuit)".to_string(),
+                "The proof answers this challenge and no other: the liveness digest binds both coin-flip nonces and every public liveness parameter (in circuit)".to_string(),
+                format!("Server-side scan quality check passed (score {:.2}; not in circuit)", quality_score),
             ];
-            if liveness_passed == Some(true) {
-                proven.push("Screen flash liveness check passed (real face detected)".to_string());
-            }
             if liveness_proved_in_zk && color_challenge_passed == Some(true) {
-                proven.push("Spatial liveness verified in zero knowledge (Halo2 ZK-SNARK)".to_string());
+                proven.push("Liveness relation satisfied: colour, spatial and magnitude checks on the reflected-flash fingerprints, public liveness bit = 1 (in circuit)".to_string());
             } else if color_challenge_passed == Some(true) {
-                proven.push("Spatial color challenge passed (3D face geometry verified)".to_string());
+                proven.push("Server-side spatial reflectance check passed; the circuit's quantised check did not, so the proof's liveness bit is 0 (see BUG-003)".to_string());
+            }
+            if color_challenge_passed.is_some() {
+                proven.push("Coverage, convexity and corneal floors are carried in the digest at zero: observational until EXP-003 fixes them (SPEC-006 ADR-010)".to_string());
             }
             proven
         },
         what_stayed_private: {
             let mut private = vec![
-                "The actual biometric feature values (512 quantized bytes)".to_string(),
-                "The cryptographic salt used in the commitment".to_string(),
-                "The exact Hamming distance (only that it's below threshold)".to_string(),
+                "The live embedding and the enrolled template (512 quantised bytes each)".to_string(),
+                "The exact Hamming distance (only that it is within the threshold)".to_string(),
                 "Any identifying information about the biometric pattern".to_string(),
             ];
-            if liveness_passed.is_some() {
-                private.push("Screen flash reflectance signals (variance, gradient, softness, consistency)".to_string());
+            if color_challenge_passed.is_some() {
+                private.push("The twelve reflected-colour fingerprints (one per screen quadrant per round)".to_string());
+                private.push("Per-round patch coverage, convexity scores and corneal glint fingerprints (private witnesses)".to_string());
             }
-            if liveness_proved_in_zk && color_challenge_passed.is_some() {
-                private.push("Per-region facial reflectance signals (proven without revealing)".to_string());
-            } else if color_challenge_passed.is_some() {
-                private.push("Per-region color reflectance deltas (spatial flash analysis)".to_string());
+            if liveness_passed.is_some() {
+                private.push("The captured frames never leave the prover; only derived fingerprints enter the witness".to_string());
             }
             private
         },

@@ -67,10 +67,22 @@ in the server log. Their circuit floors ship at zero (ADR-010), so they do not
 gate the proof unless enabled:
 
 ```bash
+# Legacy liveness thresholds in the circuit: colour (max Hamming distance over
+# the 11 direction bits), spatial (min Hamming distance between adjacent
+# quadrants), magnitude (min observed magnitude). Defaults 5,1,3.
+SABLE_LIVENESS_THRESHOLDS=6,1,1 \
+# Delta quantiser scale: the channel delta that maps to magnitude 31. Default
+# 128; a webcam reflects the flash as a 4-8 unit delta, so 16-32 is realistic.
+SABLE_MAGNITUDE_SCALE=32 \
 # Arm the in-circuit corneal check: max ordinal delta on the ratio fields, then
-# on the magnitude field. Values are demo guesses until EXP-003 fixes them.
-SABLE_CORNEAL_TOLERANCE=4,8 cargo run --release --features halo2-proofs
+# the minimum observed glint magnitude (a floor; the composite has none).
+SABLE_CORNEAL_TOLERANCE=15,1 \
+cargo run --release --features halo2-proofs
 ```
+
+Every value above is a demo guess; none is validated (SPEC-006 ADR-010, BUG-003).
+The server logs the raw mean RGB delta per quadrant on each prove request so
+the scale can be calibrated from real captures.
 
 ## API Endpoints
 

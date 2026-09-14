@@ -91,10 +91,11 @@ pub fn expected_composite(
 ///
 /// Uses the structured field comparison, **not** Hamming distance: the
 /// fingerprint's `order` field is categorical, so a bit distance would accept a
-/// blue glint against a red challenge (BUG-001). Thresholds are caller-supplied
-/// per ADR-010.
-pub fn agrees(observed: u16, expected: u16, max_ratio_delta: u8, max_magnitude_delta: u8) -> bool {
-    matches(observed, expected, max_ratio_delta, max_magnitude_delta)
+/// blue glint against a red challenge (BUG-001). The composite carries no
+/// magnitude; the observed magnitude must reach `magnitude_floor` (BUG-003).
+/// Thresholds are caller-supplied per ADR-010.
+pub fn agrees(observed: u16, expected: u16, max_ratio_delta: u8, magnitude_floor: u8) -> bool {
+    matches(observed, expected, max_ratio_delta, magnitude_floor)
 }
 
 /// Recogniser for the CON-093 input grammar.
@@ -223,6 +224,24 @@ mod tests {
         );
     }
 
+    /// BUG-003: the composite has no magnitude, and a faint glint with the
+    /// right direction agrees at a finite floor.
+    #[test]
+    fn faint_glint_agrees_at_finite_magnitude_floor() {
+        let colours = [[255, 0, 0], [255, 40, 0], [200, 20, 0], [255, 10, 10]];
+        let expected = expected_composite(&colours, &EQUAL).unwrap();
+        assert_eq!(expected & 0x1F, 0, "composite carries no magnitude");
+
+        // A 6-unit reflected delta in the composite's direction: magnitude 1.
+        let base = eye(16, [100, 100, 100]);
+        let flash = eye(16, [106, 100, 100]);
+        let observed = glint_fingerprint(&base, &flash).unwrap();
+        assert_eq!(observed & 0x1F, 1);
+
+        assert!(agrees(observed, expected, 4, 1));
+        assert!(!agrees(observed, expected, 4, 2), "below the floor");
+    }
+
     #[test]
     fn glint_matching_the_previous_round_is_rejected() {
         // This is the replay case REQ-115 exists for: an artefact reflecting a
@@ -236,21 +255,21 @@ mod tests {
         // Generous tolerances: the rejection must come from the categorical
         // order field, not from a tight ordinal bound.
         assert!(
-            !agrees(stale, expected, 15, 31),
+            !agrees(stale, expected, 15, 0),
             "a glint reflecting the previous round must not agree with this one"
         );
     }
 
     #[test]
     fn composite_is_area_weighted() {
-        let colours = [[255, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
-        // Dominated by quadrant 0 → red; then dominated by quadrant 1 → black.
+        // The composite carries direction only (BUG-003), so the weighting
+        // must show up in the order field: red-dominated vs blue-dominated.
+        let colours = [[255, 0, 0], [0, 0, 255], [0, 0, 255], [0, 0, 255]];
         let red_heavy = expected_composite(&colours, &[100, 1, 1, 1]).unwrap();
-        let red_light = expected_composite(&colours, &[1, 100, 100, 100]).unwrap();
-        assert_ne!(
-            red_heavy, red_light,
-            "composite must respond to quadrant areas"
-        );
+        let blue_heavy = expected_composite(&colours, &[1, 100, 100, 100]).unwrap();
+        assert_eq!(crate::biometric::fingerprint::unpack(red_heavy).order, 1, "R≥B≥G: red with a trace of blue");
+        assert_eq!(crate::biometric::fingerprint::unpack(blue_heavy).order, 4, "B≥R≥G");
+        assert_eq!(red_heavy & 0x1F, 0, "no magnitude on the expected side");
     }
 
     #[test]

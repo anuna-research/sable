@@ -41,6 +41,28 @@ pub const MAGNITUDE_SCALE: u32 = 128;
 /// The encoding is sign-invariant: a delta and its negation encode identically,
 /// because channels are taken in absolute value.
 pub fn quantize_delta(delta: &[f64; 3]) -> u16 {
+    quantize_delta_scaled(delta, MAGNITUDE_SCALE)
+}
+
+/// Mask selecting the direction fields (`order`, `mid_ratio`, `min_ratio`) and
+/// dropping `magnitude`. The colour check compares direction only (BUG-003).
+pub const DIRECTION_MASK: u16 = 0xFFE0;
+
+/// The direction fields of a fingerprint with the magnitude cleared.
+pub const fn direction(fp: u16) -> u16 {
+    fp & DIRECTION_MASK
+}
+
+/// [`quantize_delta`] with a caller-supplied magnitude scale.
+///
+/// `scale` is the maximum channel delta that maps to `magnitude = 31`. It is a
+/// prover-side calibration for the capture device, not a public parameter of
+/// the relation: the delta fingerprints are private witnesses, so the verifier
+/// never sees the scale and gains nothing from binding it. What the verifier
+/// does control is the public `min_magnitude` floor, which only means something
+/// once the deployment has fixed its scale (BUG-003, ADR-010).
+pub fn quantize_delta_scaled(delta: &[f64; 3], scale: u32) -> u16 {
+    let scale = scale.max(1);
     // Round to nearest for cross-platform stability.
     let abs_channels: [u32; 3] = [
         delta[0].abs().round() as u32,
@@ -77,14 +99,19 @@ pub fn quantize_delta(delta: &[f64; 3]) -> u16 {
 
     let mid_ratio = ((mid_val * 15) / max_val).min(15) as u16;
     let min_ratio = ((min_val * 15) / max_val).min(15) as u16;
-    let magnitude = ((max_val * 31) / MAGNITUDE_SCALE).min(31) as u16;
+    let magnitude = ((max_val * 31) / scale).min(31) as u16;
 
     (order << 13) | (mid_ratio << 9) | (min_ratio << 5) | magnitude
 }
 
-/// Quantise an RGB colour into the same fingerprint space as a delta.
+/// Quantise an RGB colour into the *direction* half of the fingerprint space.
+///
+/// The magnitude field is zero. An emitted colour has a brightness, but a
+/// reflected delta has a magnitude in different units (distance, albedo,
+/// exposure), so an expected fingerprint must carry no magnitude to compare
+/// against. Magnitude is judged only against a floor (BUG-003).
 pub fn quantize_colour(colour: &[u8; 3]) -> u16 {
-    quantize_delta(&[colour[0] as f64, colour[1] as f64, colour[2] as f64])
+    direction(quantize_delta(&[colour[0] as f64, colour[1] as f64, colour[2] as f64]))
 }
 
 /// Hamming distance between two fingerprints.
@@ -128,15 +155,17 @@ pub fn unpack(fp: u16) -> Fields {
 
 /// Compare two fingerprints by field semantics rather than as a bit string.
 ///
-/// `order` must match exactly — it is categorical. The ordinal fields must lie
-/// within the supplied tolerances. This is the comparison BUG-001 requires;
-/// thresholds stay caller-supplied per ADR-010.
-pub fn matches(observed: u16, expected: u16, max_ratio_delta: u8, max_magnitude_delta: u8) -> bool {
+/// `order` must match exactly — it is categorical. The ratio fields must lie
+/// within `max_ratio_delta` of the expected. The observed `magnitude` must be
+/// at least `magnitude_floor`; the expected magnitude is ignored because an
+/// expected fingerprint carries none (BUG-003). This is the comparison BUG-001
+/// requires; thresholds stay caller-supplied per ADR-010.
+pub fn matches(observed: u16, expected: u16, max_ratio_delta: u8, magnitude_floor: u8) -> bool {
     let (o, e) = (unpack(observed), unpack(expected));
     o.order == e.order
         && o.mid_ratio.abs_diff(e.mid_ratio) <= max_ratio_delta
         && o.min_ratio.abs_diff(e.min_ratio) <= max_ratio_delta
-        && o.magnitude.abs_diff(e.magnitude) <= max_magnitude_delta
+        && o.magnitude >= magnitude_floor
 }
 
 #[cfg(test)]
@@ -226,7 +255,41 @@ mod tests {
         let a = quantize_colour(&[255, 20, 5]);
         let b = quantize_colour(&[250, 26, 8]);
         assert_eq!(unpack(a).order, unpack(b).order);
-        assert!(matches(a, b, 2, 2));
+        assert!(matches(a, b, 2, 0));
+    }
+
+    /// BUG-003: an expected fingerprint carries no magnitude.
+    #[test]
+    fn expected_colour_has_zero_magnitude() {
+        for c in [[255u8, 0, 0], [0, 255, 0], [10, 20, 30], [255, 255, 255]] {
+            assert_eq!(quantize_colour(&c) & 0x1F, 0, "{c:?}");
+        }
+    }
+
+    /// BUG-003: the observed magnitude is judged against a floor, never
+    /// against the expected side.
+    #[test]
+    fn structured_match_treats_magnitude_as_a_floor() {
+        let expected = quantize_colour(&[255, 0, 0]);
+        let weak = quantize_delta(&[4.0, 0.0, 0.0]); // magnitude 0 at scale 128
+        let faint = quantize_delta(&[8.0, 0.0, 0.0]); // magnitude 1
+        assert_eq!(faint & 0x1F, 1);
+        assert!(matches(faint, expected, 0, 1));
+        assert!(matches(faint, expected, 0, 0));
+        assert!(!matches(faint, expected, 0, 2));
+        assert!(matches(weak, expected, 0, 0));
+        assert!(!matches(weak, expected, 0, 1));
+    }
+
+    #[test]
+    fn scaled_quantiser_rescales_magnitude_only() {
+        let d = [8.0, 4.0, 2.0];
+        let coarse = quantize_delta_scaled(&d, 128);
+        let fine = quantize_delta_scaled(&d, 16);
+        assert_eq!(direction(coarse), direction(fine));
+        assert_eq!(coarse & 0x1F, 1);
+        assert_eq!(fine & 0x1F, 15);
+        assert_eq!(quantize_delta(&d), coarse);
     }
 
     #[test]

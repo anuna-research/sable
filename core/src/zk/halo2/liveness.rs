@@ -34,7 +34,7 @@
 //! ```text
 //! limb0 = Σ expected_fp[i] · 2^(16 i)                                    192 bits
 //! limb1 = color_t ‖ spatial_t ‖ min_mag ‖ min_coverage ‖ corneal_enabled ‖
-//!         ratio_tol ‖ mag_tol ‖ min_convexity ‖ expected_glint[0..3]      120 bits
+//!         ratio_tol ‖ mag_floor ‖ min_convexity ‖ expected_glint[0..3]    120 bits
 //! limb2 = SHA-256(c_nonce ‖ s_nonce)[0..16]                               128 bits
 //! limb3 = SHA-256(c_nonce ‖ s_nonce)[16..32]                              128 bits
 //! digest = Poseidon(limb0, limb1, limb2, limb3)
@@ -70,6 +70,7 @@ use halo2_base::Context;
 use halo2_base::QuantumCell;
 use sha2::{Digest, Sha256};
 
+use crate::biometric::fingerprint;
 use crate::error::{Result, SableError};
 
 // ---------------------------------------------------------------------------
@@ -162,8 +163,9 @@ pub struct LivenessWitness {
     pub corneal_enabled: bool,
     /// Allowed ordinal difference on the two ratio fields (public, ≤ 15).
     pub glint_ratio_tolerance: u8,
-    /// Allowed ordinal difference on the magnitude field (public, ≤ 31).
-    pub glint_magnitude_tolerance: u8,
+    /// Minimum observed glint magnitude (public, ≤ 31). Zero disables it.
+    /// The expected composite carries no magnitude (BUG-003).
+    pub glint_magnitude_floor: u8,
     /// Glint fingerprint per eye per round (private), `round * 2 + eye`.
     pub glint_fingerprints: [u16; NUM_GLINTS],
     /// Expected area-weighted composite fingerprint per round (public).
@@ -205,7 +207,7 @@ impl LivenessWitness {
             min_convexity: 0,
             corneal_enabled: false,
             glint_ratio_tolerance: 0,
-            glint_magnitude_tolerance: 0,
+            glint_magnitude_floor: 0,
             glint_fingerprints: [0; NUM_GLINTS],
             expected_glints: [0; NUM_ROUNDS],
             challenge_id: [0; 32],
@@ -237,10 +239,10 @@ impl LivenessWitness {
                 self.glint_ratio_tolerance
             )));
         }
-        if self.glint_magnitude_tolerance > 31 {
+        if self.glint_magnitude_floor > 31 {
             return Err(SableError::InvalidInput(format!(
-                "glint_magnitude_tolerance = {} exceeds 31",
-                self.glint_magnitude_tolerance
+                "glint_magnitude_floor = {} exceeds 31",
+                self.glint_magnitude_floor
             )));
         }
         Ok(())
@@ -264,7 +266,7 @@ impl LivenessWitness {
             min_convexity: self.min_convexity as u64,
             corneal_enabled: self.corneal_enabled as u64,
             ratio_tol: self.glint_ratio_tolerance as u64,
-            mag_tol: self.glint_magnitude_tolerance as u64,
+            mag_floor: self.glint_magnitude_floor as u64,
             glints: self.glint_fingerprints.map(u64::from),
             expected_glints: self.expected_glints.map(u64::from),
             challenge_lo: u128::from_le_bytes(lo),
@@ -291,7 +293,7 @@ pub(crate) struct LivenessFieldValues {
     pub min_convexity: u64,
     pub corneal_enabled: u64,
     pub ratio_tol: u64,
-    pub mag_tol: u64,
+    pub mag_floor: u64,
     pub glints: [u64; NUM_GLINTS],
     pub expected_glints: [u64; NUM_ROUNDS],
     pub challenge_lo: u128,
@@ -363,7 +365,7 @@ pub fn challenge_digest(witness: &LivenessWitness) -> Fr {
         min_coverage: ctx.load_witness(Fr::from(v.min_coverage)),
         corneal_enabled: ctx.load_witness(Fr::from(v.corneal_enabled)),
         ratio_tol: ctx.load_witness(Fr::from(v.ratio_tol)),
-        mag_tol: ctx.load_witness(Fr::from(v.mag_tol)),
+        mag_floor: ctx.load_witness(Fr::from(v.mag_floor)),
         min_convexity: ctx.load_witness(Fr::from(v.min_convexity)),
         expected_glints: v.expected_glints.map(|x| ctx.load_witness(Fr::from(x))),
         challenge_lo: ctx.load_witness(fr_from_u128(v.challenge_lo)),
@@ -381,7 +383,7 @@ struct PublicCells {
     min_coverage: AssignedValue<Fr>,
     corneal_enabled: AssignedValue<Fr>,
     ratio_tol: AssignedValue<Fr>,
-    mag_tol: AssignedValue<Fr>,
+    mag_floor: AssignedValue<Fr>,
     min_convexity: AssignedValue<Fr>,
     expected_glints: [AssignedValue<Fr>; NUM_ROUNDS],
     challenge_lo: AssignedValue<Fr>,
@@ -404,7 +406,7 @@ fn digest_gadget(ctx: &mut Context<Fr>, gate: &GateChip<Fr>, p: &PublicCells) ->
         (p.min_coverage, L1_MIN_COVERAGE),
         (p.corneal_enabled, L1_CORNEAL_ENABLED),
         (p.ratio_tol, L1_RATIO_TOL),
-        (p.mag_tol, L1_MAG_TOL),
+        (p.mag_floor, L1_MAG_TOL),
         (p.min_convexity, L1_MIN_CONVEXITY),
         (p.expected_glints[0], L1_EXPECTED_GLINT[0]),
         (p.expected_glints[1], L1_EXPECTED_GLINT[1]),
@@ -455,10 +457,13 @@ impl LivenessCheckCircuit {
             let base = r * 4;
             let idx = [base, base + 1, base + 2, base + 3];
 
-            // Colour match: HD(delta, expected) <= color_threshold for all 4 quadrants.
+            // Colour match: HD over the direction bits <= color_threshold for all
+            // 4 quadrants. Magnitude is excluded (BUG-003, REQ-125).
             for &i in &idx {
-                if hamming_u16(w.delta_fingerprints[i], w.expected_fingerprints[i])
-                    > w.color_threshold as u32
+                if hamming_u16(
+                    fingerprint::direction(w.delta_fingerprints[i]),
+                    fingerprint::direction(w.expected_fingerprints[i]),
+                ) > w.color_threshold as u32
                 {
                     return Some(LivenessFailure { check: LivenessCheck::Colour, round: r });
                 }
@@ -493,7 +498,7 @@ impl LivenessCheckCircuit {
                         g,
                         w.expected_glints[r],
                         w.glint_ratio_tolerance,
-                        w.glint_magnitude_tolerance,
+                        w.glint_magnitude_floor,
                     ) {
                         return Some(LivenessFailure { check: LivenessCheck::Corneal, round: r });
                     }
@@ -556,7 +561,7 @@ impl LivenessCheckCircuit {
         let corneal_enabled = ctx.load_witness(Fr::from(v.corneal_enabled));
         gate.assert_bit(ctx, corneal_enabled);
         let ratio_tol = load_ranged(ctx, &gate, v.ratio_tol, RATIO_TOL_BITS);
-        let mag_tol = load_ranged(ctx, &gate, v.mag_tol, MAG_TOL_BITS);
+        let mag_floor = load_ranged(ctx, &gate, v.mag_floor, MAG_TOL_BITS);
         let min_convexity = load_ranged(ctx, &gate, v.min_convexity, CONVEXITY_BITS);
 
         let mut expected_witnesses: Vec<AssignedValue<Fr>> = Vec::with_capacity(NUM_FINGERPRINTS);
@@ -583,8 +588,14 @@ impl LivenessCheckCircuit {
                     load_with_bits(ctx, &gate, v.expected[idx], FINGERPRINT_BITS);
                 expected_witnesses.push(expected);
 
-                // ---- Colour match: HD(delta, expected) <= color_threshold ----
-                let xor_color = xor_bits(ctx, &gate, &delta_bits, &expected_bits);
+                // ---- Colour match: HD(direction bits) <= color_threshold ----
+                // REQ-125 / BUG-003: the five magnitude bits are excluded.
+                let xor_color = xor_bits(
+                    ctx,
+                    &gate,
+                    &delta_bits[MAGNITUDE_BITS..],
+                    &expected_bits[MAGNITUDE_BITS..],
+                );
                 let hd_color = popcount(ctx, &gate, &xor_color);
                 let color_ok = compare_le(ctx, &gate, hd_color, color_t, THRESHOLD_BITS);
                 result = gate.mul(ctx, result, color_ok);
@@ -622,7 +633,6 @@ impl LivenessCheckCircuit {
             let e_order = bits_to_value(ctx, &gate, &e_bits[ORDER_LO..ORDER_LO + ORDER_BITS]);
             let e_mid = bits_to_value(ctx, &gate, &e_bits[MID_RATIO_LO..MID_RATIO_LO + RATIO_BITS]);
             let e_min = bits_to_value(ctx, &gate, &e_bits[MIN_RATIO_LO..MIN_RATIO_LO + RATIO_BITS]);
-            let e_mag = bits_to_value(ctx, &gate, &e_bits[..MAGNITUDE_BITS]);
             for eye in 0..NUM_EYES {
                 let (_g, g_bits) =
                     load_with_bits(ctx, &gate, v.glints[r * NUM_EYES + eye], FINGERPRINT_BITS);
@@ -634,7 +644,8 @@ impl LivenessCheckCircuit {
                 let order_ok = gate.is_equal(ctx, g_order, e_order);
                 let mid_ok = within_tolerance(ctx, &gate, g_mid, e_mid, ratio_tol, RATIO_BITS);
                 let min_ok = within_tolerance(ctx, &gate, g_min, e_min, ratio_tol, RATIO_BITS);
-                let mag_ok = within_tolerance(ctx, &gate, g_mag, e_mag, mag_tol, MAGNITUDE_BITS);
+                // REQ-122 (BUG-003): magnitude is a floor on the observed glint.
+                let mag_ok = compare_le(ctx, &gate, mag_floor, g_mag, MAGNITUDE_BITS);
 
                 let mut eye_ok = gate.mul(ctx, order_ok, mid_ok);
                 eye_ok = gate.mul(ctx, eye_ok, min_ok);
@@ -660,7 +671,7 @@ impl LivenessCheckCircuit {
             min_coverage,
             corneal_enabled,
             ratio_tol,
-            mag_tol,
+            mag_floor,
             min_convexity,
             expected_glints: [
                 expected_glint_cells[0],
@@ -1020,7 +1031,8 @@ mod tests {
     #[test]
     fn test_liveness_color_threshold_boundary() {
         let w = legacy(
-            [0x0015, 0xA015, 0x6015, 0xC015, 0x0015, 0xA015, 0x6015, 0xC015, 0x0015, 0xA015, 0x6015, 0xC015],
+            // One mid_ratio bit differs per quadrant: direction HD = 1.
+            [0x0214, 0xA214, 0x6214, 0xC214, 0x0214, 0xA214, 0x6214, 0xC214, 0x0214, 0xA214, 0x6214, 0xC214],
             [0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014],
             1,
             2,
@@ -1034,7 +1046,8 @@ mod tests {
     #[test]
     fn test_liveness_color_threshold_just_over() {
         let w = legacy(
-            [0x0017, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014],
+            // Two mid_ratio bits differ in TL: direction HD = 2 > 1.
+            [0x0614, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014],
             [0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014],
             1,
             2,
@@ -1205,8 +1218,8 @@ mod tests {
         w.glint_ratio_tolerance = 2;
         variants.push(("glint_ratio_tolerance", w));
         let mut w = base.clone();
-        w.glint_magnitude_tolerance = 2;
-        variants.push(("glint_magnitude_tolerance", w));
+        w.glint_magnitude_floor = 2;
+        variants.push(("glint_magnitude_floor", w));
         let mut w = base.clone();
         w.expected_glints[1] = 0x401F;
         variants.push(("expected_glints", w));
@@ -1345,8 +1358,9 @@ mod tests {
     #[test]
     fn test_149_glint_from_previous_round_is_rejected_at_max_tolerance() {
         let mut w = corneal_witness();
+        // Most lenient settings: ratio tolerance 15, magnitude floor 0.
         w.glint_ratio_tolerance = 15;
-        w.glint_magnitude_tolerance = 31;
+        w.glint_magnitude_floor = 0;
         // Round 1, left eye reflects round 0's composite.
         w.glint_fingerprints[2] = w.expected_glints[0];
         let c = LivenessCheckCircuit::new(w);
@@ -1367,22 +1381,22 @@ mod tests {
         w.corneal_enabled = true;
         w.expected_glints = [expected; 3];
         w.glint_fingerprints = [expected; 6];
-        // Left eye of round 0: mid_ratio off by exactly 2, magnitude off by 3.
+        // Left eye of round 0: mid_ratio off by exactly 2, magnitude 17.
         w.glint_fingerprints[0] = fp(2, 8, 3, 17);
         w.glint_ratio_tolerance = 2;
-        w.glint_magnitude_tolerance = 3;
+        w.glint_magnitude_floor = 17;
         let c = LivenessCheckCircuit::new(w.clone());
         assert!(c.should_pass());
-        assert!(c.test_circuit().expect("satisfiable"), "difference == tolerance passes");
+        assert!(c.test_circuit().expect("satisfiable"), "difference == tolerance and magnitude == floor pass");
 
         w.glint_ratio_tolerance = 1;
         let c = LivenessCheckCircuit::new(w.clone());
         assert!(!c.test_circuit().expect("satisfiable"), "ratio difference > tolerance fails");
 
         w.glint_ratio_tolerance = 2;
-        w.glint_magnitude_tolerance = 2;
+        w.glint_magnitude_floor = 18;
         let c = LivenessCheckCircuit::new(w);
-        assert!(!c.test_circuit().expect("satisfiable"), "magnitude difference > tolerance fails");
+        assert!(!c.test_circuit().expect("satisfiable"), "magnitude below floor fails");
     }
 
     #[test]
@@ -1406,7 +1420,7 @@ mod tests {
         let mut w = passing_witness();
         w.corneal_enabled = true;
         w.glint_ratio_tolerance = 15;
-        w.glint_magnitude_tolerance = 31;
+        w.glint_magnitude_floor = 0;
         w.expected_glints = [red; 3];
         w.glint_fingerprints = [red; 6];
         w.glint_fingerprints[5] = blue;
@@ -1415,6 +1429,82 @@ mod tests {
             !c.test_circuit().expect("satisfiable"),
             "a blue glint against a red challenge must be rejected"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // TEST-153 / TEST-154 — magnitude units (REQ-125, REQ-122, BUG-003)
+    // -----------------------------------------------------------------
+
+    /// TEST-153: the colour check ignores magnitude. A faint reflected delta
+    /// (magnitude 1) against a legacy expected fingerprint (magnitude 31) with
+    /// identical direction passes; the same against a magnitude-0 expected
+    /// fingerprint passes; and direction still decides.
+    #[test]
+    fn test_153_colour_check_compares_direction_only() {
+        let direction = [0x0000, 0xA000, 0x6000, 0xC000];
+        let mut delta = [0u16; 12];
+        let mut legacy_expected = [0u16; 12];
+        let mut expected = [0u16; 12];
+        for r in 0..3 {
+            for q in 0..4 {
+                delta[r * 4 + q] = direction[q] | 1; // magnitude 1
+                legacy_expected[r * 4 + q] = direction[q] | 31; // emitted-colour magnitude
+                expected[r * 4 + q] = direction[q]; // quantize_colour output
+            }
+        }
+        // color_threshold 0: any direction bit difference fails; min_magnitude 0.
+        let c = LivenessCheckCircuit::new(legacy(delta, legacy_expected, 0, 2, 0));
+        assert!(c.should_pass(), "magnitude 1 vs 31 must not count");
+        assert!(c.test_circuit().expect("satisfiable"));
+
+        let c = LivenessCheckCircuit::new(legacy(delta, expected, 0, 2, 0));
+        assert!(c.should_pass());
+        assert!(c.test_circuit().expect("satisfiable"));
+
+        // Direction still decides: flip one mid_ratio bit in TL of round 2.
+        let mut wrong = delta;
+        wrong[8] ^= 0x0200;
+        let c = LivenessCheckCircuit::new(legacy(wrong, expected, 0, 2, 0));
+        assert_eq!(
+            c.first_failing_check(),
+            Some(LivenessFailure { check: LivenessCheck::Colour, round: 2 })
+        );
+        assert!(!c.test_circuit().expect("satisfiable"));
+
+        // And the magnitude floor is still enforced on the observed side.
+        let c = LivenessCheckCircuit::new(legacy(delta, expected, 0, 2, 2));
+        assert_eq!(
+            c.first_failing_check(),
+            Some(LivenessFailure { check: LivenessCheck::Magnitude, round: 0 })
+        );
+        assert!(!c.test_circuit().expect("satisfiable"));
+    }
+
+    /// TEST-154: a faint glint with the composite's direction is accepted at a
+    /// finite magnitude floor and rejected just above it.
+    #[test]
+    fn test_154_glint_magnitude_is_a_floor_on_the_observed_side() {
+        let red = quantize_colour(&[255, 0, 0]);
+        assert_eq!(red & 0x1F, 0, "composite carries no magnitude");
+        let faint_red = red | 1;
+        let mut w = passing_witness();
+        w.corneal_enabled = true;
+        w.expected_glints = [red; 3];
+        w.glint_fingerprints = [faint_red; 6];
+        w.glint_ratio_tolerance = 0;
+
+        w.glint_magnitude_floor = 1;
+        let c = LivenessCheckCircuit::new(w.clone());
+        assert!(c.should_pass());
+        assert!(c.test_circuit().expect("satisfiable"), "magnitude 1 at floor 1 passes");
+
+        w.glint_magnitude_floor = 2;
+        let c = LivenessCheckCircuit::new(w);
+        assert_eq!(
+            c.first_failing_check(),
+            Some(LivenessFailure { check: LivenessCheck::Corneal, round: 0 })
+        );
+        assert!(!c.test_circuit().expect("satisfiable"), "magnitude 1 at floor 2 fails");
     }
 
     // -----------------------------------------------------------------
@@ -1433,7 +1523,7 @@ mod tests {
         w.glint_ratio_tolerance = 16;
         assert!(w.recognise().is_err());
         let mut w = passing_witness();
-        w.glint_magnitude_tolerance = 32;
+        w.glint_magnitude_floor = 32;
         assert!(w.recognise().is_err());
         assert!(passing_witness().recognise().is_ok());
     }

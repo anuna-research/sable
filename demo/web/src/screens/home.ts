@@ -235,22 +235,22 @@ export function renderHomeScreen(_onStart: () => void): string {
         <div class="liveness-step">
           <div class="liveness-step-num">2</div>
           <div class="liveness-step-body">
-            <div class="liveness-step-title">Split-screen color flash</div>
-            <div class="liveness-step-detail">The screen flashes a <em>different color on top vs. bottom</em> across 3 rounds. A real 3D face reflects each color differently in the upper and lower regions; a flat photo or screen reflects them the same way.</div>
+            <div class="liveness-step-title">Four-quadrant color flash</div>
+            <div class="liveness-step-detail">The screen flashes a <em>different color in each of four quadrants</em> across 3 rounds, with the grid boundary shifted by the challenge. A real 3D face reflects each quadrant differently across its surface; a flat photo or screen reflects them uniformly.</div>
           </div>
         </div>
         <div class="liveness-step">
           <div class="liveness-step-num">3</div>
           <div class="liveness-step-body">
             <div class="liveness-step-title">3D geometry detection</div>
-            <div class="liveness-step-detail">The camera captures how light reflects off your face in each round. The server checks that upper and lower regions respond <em>differently</em> to different colors &mdash; confirming a real 3D surface.</div>
+            <div class="liveness-step-detail">The camera captures how light reflects off your face in each round. The server checks that adjacent regions respond <em>differently</em> to their quadrant colors, and measures how many face patches responded and how convex the response is. Those geometric cues are recorded but not yet enforced: their thresholds await a presentation-attack study.</div>
           </div>
         </div>
         <div class="liveness-step">
           <div class="liveness-step-num">4</div>
           <div class="liveness-step-body">
             <div class="liveness-step-title">ZK proof of liveness</div>
-            <div class="liveness-step-detail">Color-match fingerprints are fed into the Halo2 circuit alongside the face-match check. The verifier learns <strong>pass/fail</strong> only &mdash; no raw reflectance data is ever exposed.</div>
+            <div class="liveness-step-detail">Quantised reflectance fingerprints enter the Halo2 circuit alongside the face match. The challenge nonces and every liveness threshold are bound into a Poseidon digest the verifier recomputes, so the proof answers this challenge only. The verifier learns a single <strong>liveness bit</strong> plus that digest &mdash; no raw reflectance data is ever exposed. The result screen shows that bit separately from the server's own check.</div>
           </div>
         </div>
       </div>

@@ -67,7 +67,7 @@ field-wise glint comparison in circuit, never Hamming
 **Load-bearing:** [[#REQ-113]] convexity discriminator · [[#REQ-115]] corneal
 agreement · [[#REQ-117]] digest migration · [[#REQ-119]] nonce binding ·
 [[#REQ-121]] in-circuit convexity floor · [[#REQ-123]] no Hamming on the glint ·
-[[#NFR-104]] circuit row budget
+[[#REQ-125]] magnitude is a floor on the observed side · [[#NFR-104]] circuit row budget
 
 **Controls:** [[#REQ-123]] prohibits Hamming comparison of the glint in circuit ·
 [[#REQ-124]] requires every digest field to be range-constrained to its declared
@@ -81,11 +81,11 @@ Rollback is the verifier refusing digests whose thresholds it did not issue. No
 redeploy is needed to change a threshold; the verifier issues it per challenge.
 
 **Open:**
-- [[BUG-003-expected-fingerprint-magnitude-mismatch]]: expected fingerprints
-  carry emitted-colour magnitude (31) while observed carry reflected-delta
-  magnitude (0–2 on a webcam), so the 0.1.0 colour check yields
-  `liveness = 0` for real faces and the corneal check cannot be armed at a
-  finite magnitude tolerance. Fix proposed there; blocks EXP-003 thresholds.
+- [[BUG-003-expected-fingerprint-magnitude-mismatch]] is fixed by
+  [[#REQ-125]] (magnitude out of the expected side; floors on the observed
+  side). Whether a real webcam face now yields `liveness = 1` depends on the
+  ratio-bit agreement at the demo's `color_threshold`, which the first live
+  runs suggest is also marginal at magnitude 1–2; EXP-003 measures it.
 - Operating thresholds cannot be set without a presentation-attack study —
   see [[#ADR-010]] and [[EXP-003-presentation-attack-study]] (owner: HOC). This
   spec ships the mechanism, not the constants.
@@ -323,10 +323,12 @@ For: verifier
 
 WHEN `corneal_enabled = 1`, the system SHALL constrain, for each eye and each
 flash round, that the glint fingerprint's categorical `order` field equals the
-expected composite's `order` field AND that each ordinal field (`mid_ratio`,
-`min_ratio`, `magnitude`) differs from the composite's by no more than the
-corresponding public tolerance, AND SHALL set the liveness result to zero when
-any eye in any round disagrees.
+expected composite's `order` field AND that each ratio field (`mid_ratio`,
+`min_ratio`) differs from the composite's by no more than the public
+`glint_ratio_tolerance` AND that the glint's `magnitude` is at least the
+public `glint_magnitude_floor`, AND SHALL set the liveness result to zero
+when any eye in any round disagrees. The composite's magnitude field is zero
+and is never compared ([[#REQ-125]]).
 
 Rationale: this is the sequence axis. The composite changes per round under the
 HKDF sequence, so an artefact that reflects a stale challenge fails at the
@@ -456,13 +458,15 @@ Verified by: [[#TEST-135]], [[#TEST-136]], [[#TEST-137]], [[#TEST-144]]
 ```
 Interface: corneal::glint_fingerprint(baseline_eye, flash_eye) -> u16
            corneal::expected_composite(colours, area_weights) -> u16
-           corneal::agrees(observed, expected, max_ratio_delta, max_magnitude_delta) -> bool
+           corneal::agrees(observed, expected, max_ratio_delta, magnitude_floor) -> bool
 Pre-conditions:
   P1. baseline_eye and flash_eye have identical dimensions, each ≥ 8×8
 Post-conditions:
   Q1. output is a valid Delta Fingerprint: order ≤ 5                 (REQ-114)
   Q2. a zero delta yields fingerprint 0                              (REQ-114)
   Q3. agreement requires order equality, never a bit distance        (REQ-115)
+  Q4. expected_composite has magnitude 0; agreement tests the observed
+      magnitude against magnitude_floor only                         (REQ-125)
 Error model: SableError::InvalidInput on precondition violation.
 ```
 
@@ -504,6 +508,27 @@ the aliasing defect of the 0.1.0 packing.
 Implements: [[#REQ-116]], [[#REQ-117]], [[#REQ-119]]
 Verified by: [[#TEST-140]], [[#TEST-141]], [[#TEST-146]]
 
+### REQ-125: Magnitude is a floor on the observed side, never an expected value
+
+For: verifier
+
+The system SHALL produce every expected fingerprint (the twelve quadrant
+colours and the three glint composites) with a `magnitude` field of zero, SHALL
+exclude the five magnitude bits from the colour check's Hamming distance, and
+SHALL judge the observed `magnitude` only against a public floor
+(`min_magnitude` for the quadrants, `glint_magnitude_floor` for the glints).
+
+Rationale: an emitted colour has a brightness; a reflected delta has a
+magnitude in units set by distance, albedo and exposure. Comparing them, or
+bit-mixing them into a Hamming distance, compares a constant 31 to a number
+that is structurally small, and produced `liveness = 0` on every real face in
+the first live runs ([[BUG-003-expected-fingerprint-magnitude-mismatch]]).
+The magnitude scale of the delta quantiser is prover-side calibration: the
+delta fingerprints are private, so binding the scale would add nothing to
+soundness. What the verifier controls is the floor.
+
+Trace: [[#TEST-153]] · [[#TEST-154]] · [[#CON-093]] Q4 · [[#CON-095]]
+
 ### CON-095: Liveness witness
 
 ```
@@ -517,7 +542,7 @@ Pre-conditions (recognised natively AND range-constrained in circuit):
   P5. convexity_scores[3], min_convexity                    each ≤ 0xFFFF
   P6. corneal_enabled                                       ∈ {0, 1}
   P7. glint_fingerprints[6], expected_glints[3]             each ≤ 0xFFFF
-  P8. glint_ratio_tolerance ≤ 15, glint_magnitude_tolerance ≤ 31
+  P8. glint_ratio_tolerance ≤ 15, glint_magnitude_floor ≤ 31
   P9. challenge_id                                          32 octets
 Post-conditions:
   Q1. result ∈ {0, 1}
@@ -780,6 +805,21 @@ Validates: [[#REQ-123]] (prohibited-action)
 - Construct a glint whose Hamming distance from the composite is 1 but whose
   `order` differs (red versus blue, see BUG-001). Under tolerances (15, 31) the
   circuit MUST output 0. A Hamming implementation would output 1.
+
+### TEST-153: Colour check compares direction only
+Validates: [[#REQ-125]]
+- *Positive*: quadrant deltas at magnitude 1 against legacy expected
+  fingerprints at magnitude 31 with identical direction, `color_threshold = 0`
+  → result 1. The same against magnitude-0 expected fingerprints → result 1.
+- *Negative-output*: one direction bit flipped → the colour check fails in
+  that round.
+- *Floor*: `min_magnitude = 2` against magnitude-1 deltas → the magnitude
+  check fails in round 0.
+
+### TEST-154: Glint magnitude is a floor
+Validates: [[#REQ-122]], [[#REQ-125]]
+- A glint with the composite's direction at magnitude 1 passes at
+  `glint_magnitude_floor = 1` and fails at 2, natively and in circuit.
 
 ### TEST-151: Threshold aliasing is unsatisfiable
 Validates: [[#REQ-124]] (prohibited-action)

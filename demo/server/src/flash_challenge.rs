@@ -374,71 +374,36 @@ fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
 //
 // This encoding must be identical in Rust and TypeScript.
 
-/// Maximum channel value that maps to magnitude=31.
-/// Values above this are clamped. 128 is chosen so that a "strong" single-channel
-/// response (half the 0-255 range) saturates the magnitude field.
-const MAGNITUDE_SCALE: u32 = 128;
+/// Magnitude scale for the delta quantiser: the channel delta that maps to
+/// `magnitude = 31`. Read from `SABLE_MAGNITUDE_SCALE`, default 128 (the core
+/// constant). A webcam behind auto-exposure reflects a screen flash as a 4–8
+/// unit delta, which the default maps to magnitude 0–1; see BUG-003. This is
+/// prover-side calibration, not a public parameter of the relation.
+pub fn magnitude_scale() -> u32 {
+    std::env::var("SABLE_MAGNITUDE_SCALE")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(sable_core::biometric::fingerprint::MAGNITUDE_SCALE)
+}
 
 /// Quantize an RGB delta vector `[dR, dG, dB]` to a 16-bit fingerprint.
 ///
-/// The fingerprint encodes the *direction* (channel ordering + ratios) and
-/// *magnitude* of the delta, suitable for Hamming distance comparison.
-///
+/// Delegates to the core encoder with the configured [`magnitude_scale`].
 /// Returns 0 if the delta has zero magnitude (no flash response).
 pub fn quantize_delta_fingerprint(delta: &[f64; 3]) -> u16 {
-    // Absolute values as integers (round to nearest for cross-platform stability)
-    let abs_channels: [u32; 3] = [
-        delta[0].abs().round() as u32,
-        delta[1].abs().round() as u32,
-        delta[2].abs().round() as u32,
-    ];
-
-    // Sort descending by value; on ties, prefer lower channel index (stable)
-    let mut indexed: [(u32, usize); 3] = [
-        (abs_channels[0], 0),
-        (abs_channels[1], 1),
-        (abs_channels[2], 2),
-    ];
-    indexed.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-
-    let max_val = indexed[0].0;
-    let mid_val = indexed[1].0;
-    let min_val = indexed[2].0;
-    let max_idx = indexed[0].1;
-    let mid_idx = indexed[1].1;
-
-    if max_val == 0 {
-        return 0; // No flash response
-    }
-
-    // Channel ordering: 6 permutations of (R=0, G=1, B=2) by dominance
-    let order: u16 = match (max_idx, mid_idx) {
-        (0, 1) => 0, // R >= G >= B
-        (0, 2) => 1, // R >= B >= G
-        (1, 0) => 2, // G >= R >= B
-        (1, 2) => 3, // G >= B >= R
-        (2, 0) => 4, // B >= R >= G
-        (2, 1) => 5, // B >= G >= R
-        _ => 0,       // unreachable with 3 distinct indices
-    };
-
-    // Ratios: mid/max and min/max, quantized to [0, 15]
-    let mid_ratio = ((mid_val * 15) / max_val).min(15) as u16;
-    let min_ratio = ((min_val * 15) / max_val).min(15) as u16;
-
-    // Magnitude: max channel scaled to [0, 31]
-    let magnitude = ((max_val * 31) / MAGNITUDE_SCALE).min(31) as u16;
-
-    // Pack: [order:3 | mid_ratio:4 | min_ratio:4 | magnitude:5]
-    (order << 13) | (mid_ratio << 9) | (min_ratio << 5) | magnitude
+    sable_core::biometric::fingerprint::quantize_delta_scaled(delta, magnitude_scale())
 }
 
-/// Quantize an expected flash color to the same fingerprint space as deltas.
+/// Quantize an expected flash color into the direction half of the
+/// fingerprint space.
 ///
-/// This allows Hamming distance comparison between a captured delta fingerprint
-/// and the expected color fingerprint inside a ZK circuit.
+/// The magnitude field is zero (BUG-003): an emitted colour has a brightness,
+/// a reflected delta has a magnitude in different units, and the circuit's
+/// colour check compares direction bits only. Magnitude is judged against
+/// `min_magnitude` on the observed side.
 pub fn quantize_expected_color(color: &RgbColor) -> u16 {
-    quantize_delta_fingerprint(&[color.r as f64, color.g as f64, color.b as f64])
+    sable_core::biometric::fingerprint::quantize_colour(&color.to_array())
 }
 
 /// Compute liveness fingerprints from captured frames for use in ZK circuit.
@@ -453,6 +418,18 @@ pub fn compute_liveness_fingerprints(
     flash_frames: &[PalmImage],
     pattern: &FlashPattern,
 ) -> ([u16; 12], [u16; 12]) {
+    let (delta_fps, expected_fps, _) = compute_liveness_evidence(baseline, flash_frames, pattern);
+    (delta_fps, expected_fps)
+}
+
+/// [`compute_liveness_fingerprints`] plus the raw mean RGB deltas per quadrant
+/// (`[r0_tl, r0_tr, r0_bl, r0_br, r1_tl, ...]`) that the fingerprints were
+/// quantised from, for calibration logging (BUG-003, EXP-003).
+pub fn compute_liveness_evidence(
+    baseline: &PalmImage,
+    flash_frames: &[PalmImage],
+    pattern: &FlashPattern,
+) -> ([u16; 12], [u16; 12], [[f64; 3]; 12]) {
     let w = baseline.width as usize;
     let h = baseline.height as usize;
     let x_margin = (w as f64 * FACE_MARGIN_FRACTION) as usize;
@@ -466,6 +443,7 @@ pub fn compute_liveness_fingerprints(
 
     let mut delta_fps = [0u16; 12];
     let mut expected_fps = [0u16; 12];
+    let mut raw_deltas = [[0.0f64; 3]; 12];
 
     for (round_idx, flash_frame) in flash_frames.iter().enumerate() {
         let round = &pattern.rounds[round_idx];
@@ -480,6 +458,10 @@ pub fn compute_liveness_fingerprints(
         let br_delta = compute_mean_delta(baseline, flash_frame, face_x_split, face_x_end, face_y_split, face_y_end);
 
         let base = round_idx * 4;
+        raw_deltas[base] = tl_delta;
+        raw_deltas[base + 1] = tr_delta;
+        raw_deltas[base + 2] = bl_delta;
+        raw_deltas[base + 3] = br_delta;
         delta_fps[base] = quantize_delta_fingerprint(&tl_delta);
         delta_fps[base + 1] = quantize_delta_fingerprint(&tr_delta);
         delta_fps[base + 2] = quantize_delta_fingerprint(&bl_delta);
@@ -490,7 +472,7 @@ pub fn compute_liveness_fingerprints(
         expected_fps[base + 3] = quantize_expected_color(&round.br_color);
     }
 
-    (delta_fps, expected_fps)
+    (delta_fps, expected_fps, raw_deltas)
 }
 
 // ---------------------------------------------------------------------------
@@ -1559,14 +1541,15 @@ mod tests {
         assert_eq!(fp_pos, fp_neg, "sign should not affect fingerprint");
     }
 
-    /// quantize_expected_color produces same result as quantize_delta_fingerprint
-    /// for the same values.
+    /// quantize_expected_color shares the direction bits of the delta encoder
+    /// and carries no magnitude (BUG-003).
     #[test]
-    fn expected_color_matches_delta() {
+    fn expected_color_matches_delta_direction_only() {
         let color = RgbColor::new(180, 90, 30);
         let fp_color = quantize_expected_color(&color);
         let fp_delta = quantize_delta_fingerprint(&[180.0, 90.0, 30.0]);
-        assert_eq!(fp_color, fp_delta, "expected_color should match delta for same values");
+        assert_eq!(fp_color & 0xFFE0, fp_delta & 0xFFE0, "direction bits should match");
+        assert_eq!(fp_color & 0x1F, 0, "expected colour carries no magnitude");
     }
 
     /// Different color directions produce different fingerprints.

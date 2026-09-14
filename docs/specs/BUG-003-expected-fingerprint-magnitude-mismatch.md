@@ -5,7 +5,7 @@
 | id | BUG-003 |
 | severity | High — the proven liveness bit is 0 for real faces, and the corneal check cannot be armed |
 | priority | P1 — blocks every threshold decision in [[EXP-003-presentation-attack-study]] |
-| status | open (diagnosed on live data; fix proposed, not implemented) |
+| status | fixed in core (REQ-125, TEST-153/154); demo outcome on real faces pending re-measurement |
 | found | 2026-09-14, first real-face run of the demo with OBS-085 and the corneal path wired |
 | root cause class | Unit mismatch across a comparison: absolute colour vs. reflected delta |
 
@@ -101,32 +101,40 @@ screen brightness and exposure, none of which the verifier knows. Comparing
 them, or bit-mixing them into a Hamming distance, compares a constant 31 to a
 number that is structurally small.
 
-## Resolution (proposed)
+## Resolution (implemented 2026-09-14 as SPEC-006 REQ-125)
 
-1. **Take magnitude out of the expected side.** `quantize_expected_color` and
-   `expected_composite` produce fingerprints with `magnitude = 0`, and the
-   in-circuit colour check masks the low five bits before the Hamming distance
-   (or, better, compares order and ratios field-wise as REQ-123 already
-   requires for the glint). Magnitude is then judged only against a floor
-   (`min_magnitude`, `glint_magnitude_floor`), which is what it always meant.
-2. **Rescale magnitude for the deployment.** `MAGNITUDE_SCALE` becomes a
-   per-challenge public parameter alongside the thresholds (ADR-010 applies:
-   no default enters the relation), so a webcam deployment can use a scale of
-   16 or 32 and a phone-in-hand deployment something else. Until EXP-003
-   measures the distribution, the demo should log the raw mean deltas.
-3. **Make ratio tolerance conditional on magnitude.** At magnitude ≤ 2 the
-   ratio fields carry no information; `agrees` (and the circuit's ordinal
-   comparison) should treat them as satisfied below a magnitude floor and
-   apply the tolerance only above it. Order stays strict.
-4. **Demo honesty (done in the commit after `95c13c6`).** The result and
+1. **Magnitude is out of the expected side.** `fingerprint::quantize_colour`
+   (and through it `quantize_expected_color` and `expected_composite`) returns
+   `magnitude = 0`; the in-circuit and native colour checks Hamming-compare
+   only the eleven direction bits; `matches`/`agrees` take a
+   `magnitude_floor` on the observed side; the witness field
+   `glint_magnitude_tolerance` is renamed `glint_magnitude_floor` with floor
+   semantics (same width, digest layout unchanged). Done.
+2. **Scale is prover-side.** `quantize_delta_scaled(delta, scale)` added; the
+   demo reads `SABLE_MAGNITUDE_SCALE` (default 128) and logs the raw mean
+   RGB delta per quadrant. The scale is *not* bound in the digest: the delta
+   fingerprints are private witnesses, so the verifier gains nothing from
+   binding a prover-side constant; it controls the floor instead. Done.
+3. **Ratio tolerance is an operator choice, not a circuit rule.** Rather than
+   a conditional gadget, the operator sets `glint_ratio_tolerance = 15`
+   (vacuous) while the glint is faint and tightens it once capture improves.
+   The colour check's `color_threshold` plays the same role for the
+   quadrants. Not implemented as a circuit rule; left to EXP-003.
+4. **Demo honesty (done in `3f8f08d`).** The result and
    verification screens display the proof's own liveness bit next to the
    server's floating-point check, and say when they disagree.
 
-Regression tests to add: a fixture with observed magnitude 1 and expected
-magnitude 31 with identical order and ratios must pass the colour check; a
-glint with matching order and magnitude 1 against an expected composite must
-be accepted by `agrees` with a finite magnitude tolerance once magnitude is
-removed from the expected side.
+Regression tests: SPEC-006 TEST-153 (`test_153_colour_check_compares_direction_only`)
+and TEST-154 (`test_154_glint_magnitude_is_a_floor_on_the_observed_side`) in
+`liveness.rs`, plus `structured_match_treats_magnitude_as_a_floor` and
+`expected_colour_has_zero_magnitude` in `fingerprint.rs` and
+`faint_glint_agrees_at_finite_magnitude_floor` in `corneal.rs`.
+
+**Caveat.** The first live runs also show the ratio fields disagreeing by more
+than `color_threshold = 5` direction bits at magnitude 1–2, so the fix is
+necessary but may not by itself flip the demo's liveness bit on a webcam. The
+demo now exposes `SABLE_LIVENESS_THRESHOLDS` and `SABLE_MAGNITUDE_SCALE` so
+that can be measured without a rebuild.
 
 ## Related
 
