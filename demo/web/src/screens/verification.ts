@@ -163,12 +163,12 @@ export function renderVerificationScreen(
               </div>
               <div class="timing-label">Distance Check</div>
             </div>
-            <div class="timing-item">
+            ${result.details.temporal_check_passed != null ? `<div class="timing-item">
               <div class="timing-value" style="color: ${result.details.temporal_check_passed ? 'var(--accent-success)' : 'var(--accent-error)'};">
                 ${result.details.temporal_check_passed ? '\u2713' : '\u2717'}
               </div>
               <div class="timing-label">Temporal Check</div>
-            </div>
+            </div>` : ''}
             <div class="timing-item">
               <div class="timing-value" style="color: ${result.details.quality_check_passed ? 'var(--accent-success)' : 'var(--accent-error)'};">
                 ${result.details.quality_check_passed ? '\u2713' : '\u2717'}

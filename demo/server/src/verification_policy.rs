@@ -37,7 +37,7 @@ impl PendingVerification {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sable_core::zk::halo2::{Halo2Fr, AUTH_CIRCUIT_V1};
+    use sable_core::zk::halo2::{Halo2Fr, AUTH_CIRCUIT_V2};
 
     #[test]
     fn deadline_survives_proving_delay_and_wall_clock_rollback() {
@@ -48,7 +48,7 @@ mod tests {
                 threshold: 200,
                 challenge_digest: Halo2Fr::from(23),
                 required_liveness: true,
-                circuit_id: AUTH_CIRCUIT_V1.into(),
+                circuit_id: AUTH_CIRCUIT_V2.into(),
                 expires_at: 130,
             },
             issued,

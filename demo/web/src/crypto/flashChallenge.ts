@@ -19,6 +19,11 @@ const HKDF_SALT = 'sable-flash-challenge-v1';
 const HKDF_INFO = 'flash-colors';
 const HKDF_OUTPUT_LEN = 42;
 
+const TEMPORAL_HKDF_SALT = 'sable-rolling-shutter-v1';
+const TEMPORAL_HKDF_INFO = 'temporal-symbols';
+const TEMPORAL_HKDF_OUTPUT_LEN = 4080;
+export const TEMPORAL_SYMBOL_COUNT = 12;
+
 /** Maximum red channel value when green + blue are below the low threshold. */
 const RED_CAP = 204;
 
@@ -126,6 +131,78 @@ export async function deriveFlashPattern(
   }
 
   return rounds;
+}
+
+/**
+ * Derive the 12-symbol rolling-shutter waveform from the same joint nonce.
+ * Symbols are 0=red, 1=green, 2=blue, and 3=white. The mapping and rejection
+ * sampling are byte-for-byte compatible with the Rust core implementation.
+ */
+export async function deriveRollingShutterSymbols(
+  cNonce: Uint8Array,
+  sNonce: Uint8Array
+): Promise<number[]> {
+  if (cNonce.length !== 32 || sNonce.length !== 32) {
+    throw new Error('rolling-shutter nonces must each contain 32 bytes');
+  }
+  const ikm = new Uint8Array(64);
+  ikm.set(cNonce, 0);
+  ikm.set(sNonce, 32);
+  const okm = await hkdfSha256(
+    new TextEncoder().encode(TEMPORAL_HKDF_SALT),
+    ikm,
+    new TextEncoder().encode(TEMPORAL_HKDF_INFO),
+    TEMPORAL_HKDF_OUTPUT_LEN
+  );
+
+  let cursor = 0;
+  while (cursor < okm.length) {
+    const candidate = new Array<number>(TEMPORAL_SYMBOL_COUNT);
+    candidate[0] = okm[cursor++] % 4;
+    let complete = true;
+    for (let i = 1; i < TEMPORAL_SYMBOL_COUNT; i++) {
+      let rank = 0;
+      for (;;) {
+        if (cursor >= okm.length) {
+          complete = false;
+          break;
+        }
+        const byte = okm[cursor++];
+        if (byte < 255) {
+          rank = byte % 3;
+          break;
+        }
+      }
+      if (!complete) break;
+      const previous = candidate[i - 1];
+      candidate[i] = rank >= previous ? rank + 1 : rank;
+    }
+    if (complete && isValidRollingShutterSequence(candidate)) return candidate;
+  }
+  throw new Error('HKDF expansion contained no valid rolling-shutter waveform');
+}
+
+export function isValidRollingShutterSequence(symbols: readonly number[]): boolean {
+  if (symbols.length !== TEMPORAL_SYMBOL_COUNT) return false;
+  for (let i = 0; i < symbols.length; i++) {
+    if (!Number.isInteger(symbols[i]) || symbols[i] < 0 || symbols[i] > 3) return false;
+    if (symbols[i] === symbols[(i + 1) % symbols.length]) return false;
+  }
+  for (let shift = 1; shift < symbols.length; shift++) {
+    if (symbols.every((symbol, i) => symbol === symbols[(i + shift) % symbols.length])) {
+      return false;
+    }
+  }
+  const windows = new Set<number>();
+  for (let start = 0; start < symbols.length; start++) {
+    let packed = 0;
+    for (let offset = 0; offset < 4; offset++) {
+      packed |= symbols[(start + offset) % symbols.length] << (2 * offset);
+    }
+    if (windows.has(packed)) return false;
+    windows.add(packed);
+  }
+  return true;
 }
 
 /**

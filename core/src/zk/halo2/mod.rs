@@ -143,7 +143,7 @@ pub use hamming::{HammingDistanceCircuit, hamming_distance, hamming_similarity, 
 pub use hello::HelloCircuit;
 pub use poseidon::{PoseidonCircuit, poseidon_hash_pair, poseidon_commit_bytes_value};
 pub use proof::{FaceVerificationProver, FaceVerificationVerifier, Proof, ProofSetup};
-pub use policy::{ExpectedPolicy, AUTH_CIRCUIT_V1, decode_instances};
+pub use policy::{ExpectedPolicy, AUTH_CIRCUIT_V1, AUTH_CIRCUIT_V2, decode_instances};
 pub use quantizer::{FeatureQuantizer, QuantizedEmbedding, FACE_EMBEDDING_DIM};
 pub use thermometer::{ThermometerHammingCircuit, encode as thermometer_encode, prescale_tanh as thermometer_prescale_tanh, level_to_byte, byte_to_level, is_valid_thermometer_byte, LEVELS as THERMOMETER_LEVELS};
 pub use threshold::{ThresholdConfig, VerificationResult, precomputed};

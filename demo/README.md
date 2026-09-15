@@ -101,6 +101,23 @@ cargo run --release --features halo2-proofs
 The result screen shows which checks were live for each proof and, when the
 in-circuit bit is 0, which check failed in which round.
 
+### Rolling-shutter temporal extension (SPEC-008)
+
+The core library derives a 12-symbol red/green/blue/white waveform from the same
+client and server nonces and constrains one cyclic phase across three four-band
+frames. Frame starts must be exactly four display ticks apart. Applications may
+enable this relation only after a verifier-owned platform capture validator has
+bound protected camera evidence to the same challenge and frame hashes.
+
+The web server has no protected camera channel. Setting
+`SABLE_ROLLING_SHUTTER_OBSERVE=true` lets `/api/auth/prove` accept an optional
+decoded `rolling_shutter` object and return `rolling_shutter_observation`
+diagnostics when it is present.
+The report is explicitly `observe-only`; it keeps `enabled_in_circuit` and
+`capture_validated` false. Its match result does not change authentication. The
+proof request schema has no field through which a client can claim capture
+validation.
+
 Every value above is a demo guess; none is validated (SPEC-006 ADR-010, BUG-003).
 The server logs the raw mean RGB delta per quadrant on each prove request so
 the scale can be calibrated from real captures.

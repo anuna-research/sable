@@ -7,8 +7,10 @@ use super::{Halo2Fr, Proof};
 use crate::{Result, SableError};
 use ff::PrimeField;
 
-/// Identifier of the thermometer matcher and liveness circuit with five instances.
+/// Identifier of the retired pre-temporal thermometer/liveness circuit.
 pub const AUTH_CIRCUIT_V1: &str = "sable/thermometer-liveness/1";
+/// Identifier of the thermometer/liveness circuit with the SPEC-008 temporal limb.
+pub const AUTH_CIRCUIT_V2: &str = "sable/thermometer-liveness/2";
 
 /// Trusted expectations required when accepting an authentication proof.
 #[derive(Clone, Debug)]
@@ -33,7 +35,7 @@ impl ExpectedPolicy {
     /// `now` is the verifier's trusted clock. This checks the complete field
     /// elements, not truncated integers or duplicated display metadata.
     pub fn validate(&self, proof: &Proof, now: u64) -> Result<()> {
-        if self.circuit_id != AUTH_CIRCUIT_V1
+        if self.circuit_id != AUTH_CIRCUIT_V2
             || !self.required_liveness
             || now >= self.expires_at
             || self.threshold > 4096
@@ -88,13 +90,24 @@ mod tests {
     fn real_proof_requires_registered_policy_and_valid_transcript() {
         use crate::zk::halo2::{FaceVerificationProver, FaceVerificationVerifier, LivenessWitness, challenge_digest, poseidon_commit_bytes_value};
         let enrolled = vec![0; 512];
-        let witness = LivenessWitness::dummy_pass();
+        let mut witness = LivenessWitness::dummy_pass();
+        let temporal = crate::biometric::rolling_shutter::derive_temporal_symbols(
+            &[0x11; 32],
+            &[0xA5; 32],
+        )
+        .unwrap();
+        witness.temporal_expected_symbols = temporal;
+        witness.temporal_observed_symbols = temporal;
+        witness.temporal_max_symbol_errors =
+            crate::biometric::rolling_shutter::maximum_unambiguous_errors(&temporal);
+        witness.temporal_enabled = true;
+        witness.temporal_capture_validated = true;
         let policy = ExpectedPolicy {
             registered_template: poseidon_commit_bytes_value(&enrolled),
             threshold: 200,
             challenge_digest: challenge_digest(&witness),
             required_liveness: true,
-            circuit_id: AUTH_CIRCUIT_V1.into(),
+            circuit_id: AUTH_CIRCUIT_V2.into(),
             expires_at: 100,
         };
         let mut prover = FaceVerificationProver::new();
@@ -116,7 +129,7 @@ mod tests {
             threshold: 2048,
             challenge_digest: Halo2Fr::from(23),
             required_liveness: true,
-            circuit_id: AUTH_CIRCUIT_V1.into(),
+            circuit_id: AUTH_CIRCUIT_V2.into(),
             expires_at: 100,
         };
         let proof = Proof {
@@ -154,7 +167,7 @@ mod tests {
         policy.required_liveness = true;
         policy.circuit_id = "other".into();
         assert!(policy.validate(&proof, 99).is_err());
-        policy.circuit_id = AUTH_CIRCUIT_V1.into();
+        policy.circuit_id = AUTH_CIRCUIT_V2.into();
         proof.proof_bytes.resize(10 * 1024 + 1, 0);
         assert!(policy.validate(&proof, 99).is_err());
     }

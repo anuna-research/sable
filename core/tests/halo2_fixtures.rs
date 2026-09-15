@@ -5,11 +5,11 @@ use sable_core::{Result, SableError};
 use sable_core::zk::halo2::{FaceVerificationProver, LivenessWitness, Proof};
 
 pub fn fixture_policy(threshold: u64, witness: &LivenessWitness) -> sable_core::zk::halo2::ExpectedPolicy {
-    use sable_core::zk::halo2::{ExpectedPolicy, AUTH_CIRCUIT_V1, challenge_digest, poseidon_commit_bytes_value};
+    use sable_core::zk::halo2::{ExpectedPolicy, AUTH_CIRCUIT_V2, challenge_digest, poseidon_commit_bytes_value};
     ExpectedPolicy {
         registered_template: poseidon_commit_bytes_value(&vec![0; 512]),
         threshold, challenge_digest: challenge_digest(witness), required_liveness: true,
-        circuit_id: AUTH_CIRCUIT_V1.into(), expires_at: 1000,
+        circuit_id: AUTH_CIRCUIT_V2.into(), expires_at: 1000,
     }
 }
 

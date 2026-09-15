@@ -50,6 +50,24 @@ export interface ProveRequest {
   c_nonce?: string;           // hex-encoded client nonce for spatial flash verification
   flash_frames?: string[];    // baseline + 3 round JPEG data URLs
   eye_crops?: string[][];     // [baseline, r0, r1, r2] × [left, right] PNG data URLs
+  rolling_shutter?: RollingShutterObservation;
+}
+
+export interface RollingShutterObservation {
+  observed_symbols: number[]; // exactly 12 values in 0..=3
+  initial_phase: number;      // 0..=11
+  frame_tick_deltas: [number, number];
+}
+
+export interface RollingShutterObservationReport {
+  mode: 'observe-only';
+  enabled_in_circuit: false;
+  capture_validated: false;
+  relation_matched: boolean;
+  phase_matched: boolean;
+  timing_matched: boolean;
+  symbol_mismatches: number;
+  maximum_symbol_errors: number;
 }
 
 export interface PhotometricRound {
@@ -123,6 +141,7 @@ export interface ProveResponse {
   corneal_rounds?: CornealRound[];
   liveness_parameters?: LivenessParameters;
   liveness_failing_check?: LivenessFailingCheck;
+  rolling_shutter_observation?: RollingShutterObservationReport;
   timings: ProveTimings;
   what_was_proven: string[];
   what_stayed_private: string[];
@@ -138,7 +157,7 @@ export interface VerifyRequest {
 export interface VerificationDetails {
   commitment_valid: boolean;
   distance_check_passed: boolean;
-  temporal_check_passed: boolean;
+  temporal_check_passed?: boolean | null;
   quality_check_passed: boolean;
   liveness_check_passed: boolean | null;
   /** Whether liveness was verified inside the ZK proof (from public inputs). */

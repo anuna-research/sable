@@ -11,6 +11,10 @@ use crate::verification_policy::PendingVerification;
 // Note: PalmProcessor is available for production use with proper biometric sensors
 // For webcam demo, we use image-based feature extraction instead
 use sable_core::biometric::screen_flash::{ScreenFlashExtractor, ScreenFlashThresholds};
+use sable_core::biometric::rolling_shutter::{
+    derive_temporal_symbols, maximum_unambiguous_errors, TemporalObservation,
+    TEMPORAL_SYMBOLS,
+};
 use sable_core::biometric::corneal;
 use sable_core::biometric::fingerprint::{self, Fields};
 use sable_core::biometric::photometric::{self, PatchGrid};
@@ -241,6 +245,7 @@ pub async fn auth_challenge(
 // ============================================================================
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProveRequest {
     pub challenge_id: String,
     /// Obsolete simulation field. Any supplied value is rejected.
@@ -260,6 +265,18 @@ pub struct ProveRequest {
     /// `[baseline, round1, round2, round3]`, each `[left_eye, right_eye]` as
     /// base64 PNG or JPEG data URLs. All eight crops must share one size.
     pub eye_crops: Option<Vec<Vec<String>>>,
+    /// Decoded rolling-shutter row bands supplied by a capture integration.
+    /// This evidence is observe-only in the demo and cannot authorize the
+    /// circuit's protected-capture gate.
+    pub rolling_shutter: Option<RollingShutterObservationRequest>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RollingShutterObservationRequest {
+    pub observed_symbols: [u8; TEMPORAL_SYMBOLS],
+    pub initial_phase: u8,
+    pub frame_tick_deltas: [u16; 2],
 }
 
 /// Per-round region match score for spatial color verification.
@@ -312,6 +329,10 @@ pub struct ProveResponse {
     /// The first sub-check the native pre-check failed, if any (OBS-085).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liveness_failing_check: Option<LivenessFailureResponse>,
+    /// Observe-only rolling-shutter relation diagnostics. This is never camera
+    /// attestation and does not affect authentication in the demo profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rolling_shutter_observation: Option<RollingShutterObservationResponse>,
     pub timings: ProveTimings,
     pub what_was_proven: Vec<String>,
     pub what_stayed_private: Vec<String>,
@@ -382,6 +403,18 @@ pub struct LivenessFailureResponse {
     pub round: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RollingShutterObservationResponse {
+    pub mode: &'static str,
+    pub enabled_in_circuit: bool,
+    pub capture_validated: bool,
+    pub relation_matched: bool,
+    pub phase_matched: bool,
+    pub timing_matched: bool,
+    pub symbol_mismatches: u8,
+    pub maximum_symbol_errors: u8,
+}
+
 /// Geometry floors from `SABLE_GEOMETRY_FLOORS="<min_coverage>,<min_convexity>"`.
 ///
 /// Coverage is a patch count out of 16 (4×4 grid, ≤ 64); convexity is Q15 over
@@ -427,6 +460,12 @@ fn liveness_thresholds_from_env() -> (u8, u8, u8) {
     }
 }
 
+fn rolling_shutter_observe_enabled() -> bool {
+    std::env::var("SABLE_ROLLING_SHUTTER_OBSERVE")
+        .map(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Serialize)]
 pub struct ProveTimings {
     pub feature_scan_ms: f64,
@@ -444,6 +483,7 @@ pub async fn auth_prove(
     require_capture_input(&req).map_err(bad_liveness_input)?;
     let corneal_tolerances = corneal_tolerances_from_env();
     require_corneal_evidence(&req, corneal_tolerances.is_some()).map_err(bad_liveness_input)?;
+    let rolling_shutter_observe = rolling_shutter_observe_enabled();
 
     // Get and validate challenge
     let challenge = state.remove_challenge(&principal, &req.challenge_id).ok_or_else(|| {
@@ -538,6 +578,7 @@ pub async fn auth_prove(
     let mut corneal_rounds: Option<Vec<CornealRoundResponse>> = None;
     let mut liveness_parameters: Option<LivenessParameters> = None;
     let mut liveness_failing_check: Option<LivenessFailureResponse> = None;
+    let mut rolling_shutter_observation: Option<RollingShutterObservationResponse> = None;
     let mut liveness_witness: Option<LivenessWitness> = None;
 
     if let (Some(c_nonce_hex), Some(frames_b64)) = (&req.c_nonce, &req.flash_frames) {
@@ -565,6 +606,75 @@ pub async fn auth_prove(
 
         let mut c_nonce_32 = [0u8; 32];
         c_nonce_32.copy_from_slice(&c_nonce_bytes);
+
+        // SPEC-008: both sides derive the same temporal waveform from the joint
+        // nonce. The demo accepts decoded bands only in explicit observe mode;
+        // it has no protected mobile capture validator and cannot arm rejection.
+        let temporal_expected_symbols =
+            derive_temporal_symbols(&c_nonce_32, &challenge.nonce).map_err(|error| {
+                bad_liveness_input(format!("Rolling-shutter derivation failed: {error}"))
+            })?;
+        let temporal_max_symbol_errors =
+            maximum_unambiguous_errors(&temporal_expected_symbols);
+        let temporal_request = if rolling_shutter_observe {
+            req.rolling_shutter
+        } else {
+            None
+        };
+        let temporal_recognised = temporal_request
+            .map(|observation| TemporalObservation {
+                symbols: observation.observed_symbols,
+                initial_phase: observation.initial_phase,
+                frame_tick_deltas: observation.frame_tick_deltas,
+            }
+            .recognise()
+            .is_ok())
+            .unwrap_or(false);
+        let recognised_request = temporal_request.filter(|_| temporal_recognised);
+        let temporal_observed_symbols = recognised_request
+            .map(|observation| observation.observed_symbols)
+            .unwrap_or(temporal_expected_symbols);
+        let temporal_initial_phase = recognised_request
+            .map(|observation| observation.initial_phase)
+            .unwrap_or(0);
+        let temporal_frame_tick_deltas = recognised_request
+            .map(|observation| observation.frame_tick_deltas)
+            .unwrap_or([4, 4]);
+        if let Some(observation) = temporal_request {
+            let phase_distance = temporal_recognised.then(|| {
+                observation.initial_phase.min(
+                    TEMPORAL_SYMBOLS as u8 - observation.initial_phase,
+                )
+            });
+            let phase_matched = phase_distance.map(|distance| distance <= 1).unwrap_or(false);
+            let timing_matched = temporal_recognised && observation.frame_tick_deltas == [4, 4];
+            let symbol_mismatches = if temporal_recognised {
+                observation
+                    .observed_symbols
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, symbol)| {
+                        **symbol
+                            != temporal_expected_symbols
+                                [(observation.initial_phase as usize + *index) % TEMPORAL_SYMBOLS]
+                    })
+                    .count() as u8
+            } else {
+                TEMPORAL_SYMBOLS as u8
+            };
+            rolling_shutter_observation = Some(RollingShutterObservationResponse {
+                mode: "observe-only",
+                enabled_in_circuit: false,
+                capture_validated: false,
+                relation_matched: phase_matched
+                    && timing_matched
+                    && symbol_mismatches <= temporal_max_symbol_errors,
+                phase_matched,
+                timing_matched,
+                symbol_mismatches,
+                maximum_symbol_errors: temporal_max_symbol_errors,
+            });
+        }
 
         // b. Verify H(c_nonce) matches challenge.client_commitment (if present)
         if let Some(commitment_hex) = &challenge.client_commitment {
@@ -805,6 +915,16 @@ pub async fn auth_prove(
             glint_magnitude_floor,
             glint_fingerprints,
             expected_glints,
+            temporal_observed_symbols,
+            temporal_expected_symbols,
+            temporal_initial_phase,
+            temporal_expected_phase: 0,
+            temporal_phase_tolerance: 1,
+            temporal_frame_tick_deltas,
+            temporal_frame_tick_tolerance: 0,
+            temporal_max_symbol_errors,
+            temporal_enabled: false,
+            temporal_capture_validated: false,
             ..LivenessWitness::default()
         };
 
@@ -871,7 +991,7 @@ pub async fn auth_prove(
         threshold,
         challenge_digest: compute_challenge_digest(liveness_witness.as_ref().ok_or_else(|| bad_liveness_input("Missing witness".into()))?),
         required_liveness: true,
-        circuit_id: sable_core::zk::halo2::AUTH_CIRCUIT_V1.into(),
+        circuit_id: sable_core::zk::halo2::AUTH_CIRCUIT_V2.into(),
         expires_at: now.saturating_add(30).saturating_sub(challenge.created_at.elapsed().as_secs()),
     }, challenge.created_at).map_err(bad_liveness_input)?;
 
@@ -952,6 +1072,7 @@ pub async fn auth_prove(
         corneal_rounds,
         liveness_parameters: liveness_parameters.clone(),
         liveness_failing_check,
+        rolling_shutter_observation,
         timings: ProveTimings {
             feature_scan_ms: scan_time.as_secs_f64() * 1000.0,
             distance_calc_ms: distance_time.as_secs_f64() * 1000.0,
@@ -1031,7 +1152,7 @@ pub struct VerifyResponse {
 pub struct VerificationDetails {
     pub commitment_valid: bool,
     pub distance_check_passed: bool,
-    pub temporal_check_passed: bool,
+    pub temporal_check_passed: Option<bool>,
     pub quality_check_passed: bool,
     pub liveness_check_passed: Option<bool>,
     /// Whether liveness was verified inside the ZK proof (from public_inputs[2]).
@@ -1112,7 +1233,7 @@ pub async fn verify(
                 details: VerificationDetails {
                     commitment_valid: true,
                     distance_check_passed: is_match,
-                    temporal_check_passed: true,
+                    temporal_check_passed: None,
                     quality_check_passed: true,
                     liveness_check_passed: liveness_check,
                     liveness_proved_in_zk: proof.liveness_passed,
@@ -1127,7 +1248,7 @@ pub async fn verify(
                 details: VerificationDetails {
                     commitment_valid: false,
                     distance_check_passed: false,
-                    temporal_check_passed: true,
+                    temporal_check_passed: None,
                     quality_check_passed: true,
                     liveness_check_passed: liveness_check,
                     liveness_proved_in_zk: false,
@@ -1484,12 +1605,90 @@ mod capture_input_security_tests {
             c_nonce: Some("01".repeat(32)),
             flash_frames: Some(vec!["encoded frame".into(); 4]),
             eye_crops: None,
+            rolling_shutter: None,
         }
+    }
+
+    #[test]
+    fn test_169_untrusted_request_cannot_claim_capture_validation() {
+        let request = serde_json::from_str::<ProveRequest>(
+            r#"{
+                "challenge_id":"challenge",
+                "capture_validated":true
+            }"#,
+        );
+        assert!(request.is_err());
+        let nested_claim = serde_json::from_str::<ProveRequest>(
+            r#"{
+                "challenge_id":"challenge",
+                "rolling_shutter":{
+                    "observed_symbols":[2,1,3,0,3,2,1,3,1,2,1,0],
+                    "initial_phase":0,
+                    "frame_tick_deltas":[4,4],
+                    "capture_validated":true
+                }
+            }"#,
+        );
+        assert!(nested_claim.is_err());
+
+        let mut request = capture();
+        request.rolling_shutter = Some(RollingShutterObservationRequest {
+            observed_symbols: [2, 1, 3, 0, 3, 2, 1, 3, 1, 2, 1, 0],
+            initial_phase: 0,
+            frame_tick_deltas: [4, 4],
+        });
+        let observation = request.rolling_shutter.unwrap();
+        assert!(TemporalObservation {
+            symbols: observation.observed_symbols,
+            initial_phase: observation.initial_phase,
+            frame_tick_deltas: observation.frame_tick_deltas,
+        }
+        .recognise()
+        .is_ok());
+
+        let report = RollingShutterObservationResponse {
+            mode: "observe-only",
+            enabled_in_circuit: false,
+            capture_validated: false,
+            relation_matched: true,
+            phase_matched: true,
+            timing_matched: true,
+            symbol_mismatches: 0,
+            maximum_symbol_errors: 1,
+        };
+        let encoded = serde_json::to_string(&report).unwrap();
+        assert!(encoded.contains("observe-only"));
+        assert!(!encoded.contains("attest"));
+    }
+
+    #[test]
+    fn rolling_shutter_json_grammar_rejects_malformed_objects() {
+        let wrap = |body: &str| {
+            serde_json::from_str::<ProveRequest>(&format!(
+                r#"{{"challenge_id":"challenge","rolling_shutter":{body}}}"#
+            ))
+        };
+        assert!(wrap(
+            r#"{"observed_symbols":[0,1],"initial_phase":0,"frame_tick_deltas":[4,4]}"#
+        )
+        .is_err());
+        assert!(wrap(
+            r#"{"observed_symbols":[2,1,3,0,3,2,1,3,1,2,1,0],"initial_phase":0,"initial_phase":1,"frame_tick_deltas":[4,4]}"#
+        )
+        .is_err());
+        assert!(wrap(
+            r#"{"observed_symbols":[2,1,3,0,3,2,1,3,1,2,1,256],"initial_phase":0,"frame_tick_deltas":[4,4]}"#
+        )
+        .is_err());
+        assert!(wrap(
+            r#"{"observed_symbols":[2,1,3,0,3,2,1,3,1,2,1,0],"initial_phase":0}"#
+        )
+        .is_err());
     }
 
     #[tokio::test]
     async fn authentication_routes_reject_omissions_and_policy_replay() {
-        use sable_core::zk::halo2::{ExpectedPolicy, AUTH_CIRCUIT_V1};
+        use sable_core::zk::halo2::{ExpectedPolicy, AUTH_CIRCUIT_V2};
         let state = AppState::new();
         let principal = Principal("alice".into());
         let missing = EnrollRequest { user_id: "known-user".into(), face_embedding: None };
@@ -1504,7 +1703,7 @@ mod capture_input_security_tests {
             threshold: 200,
             challenge_digest: Halo2Fr::from(23),
             required_liveness: true,
-            circuit_id: AUTH_CIRCUIT_V1.into(),
+            circuit_id: AUTH_CIRCUIT_V2.into(),
             expires_at: now + 30,
         };
         let pending = || PendingVerification::new(policy.clone(), Instant::now()).unwrap();

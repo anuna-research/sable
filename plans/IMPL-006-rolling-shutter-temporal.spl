@@ -1,0 +1,33 @@
+;; IMPL-006 — executable projection of SPEC-008
+(given (task waveform))
+(given (task-description waveform "Implement shared no-repeat temporal waveform derivation"))
+(given (task-acceptance waveform "TEST-160 cross-platform vectors and adjacency pass"))
+(given (no-deps waveform))
+(normally r-ready-waveform (and (task waveform) (no-deps waveform)) (ready waveform))
+(meta r-ready-waveform (source "SPEC-008-rolling-shutter-temporal-challenge#REQ-133"))
+
+(given (task circuit))
+(given (task-description circuit "Constrain ordered symbols, one phase, timing progression, error budget, and digest"))
+(given (task-acceptance circuit "TEST-161 through TEST-166 pass with Halo2 MockProver"))
+(normally r-ready-circuit (and (task circuit) (completed waveform)) (ready circuit))
+(meta r-ready-circuit (source "SPEC-008-rolling-shutter-temporal-challenge#REQ-134"))
+
+(given (task demo))
+(given (task-description demo "Recognise temporal JSON and wire explicit policy into proof generation"))
+(given (task-acceptance demo "TEST-167 and TEST-169 prove disabled compatibility, capture authority, and fail-closed behaviour"))
+(normally r-ready-demo (and (task demo) (completed circuit)) (ready demo))
+(meta r-ready-demo (source "SPEC-008-rolling-shutter-temporal-challenge#REQ-139"))
+
+(given (task docs))
+(given (task-description docs "Document implemented scope, mobile provenance boundary, and rollout control"))
+(given (task-acceptance docs "TEST-168 remains depth evidence and documentation makes no camera-attestation claim"))
+(normally r-ready-docs (and (task docs) (completed demo)) (ready docs))
+(meta r-ready-docs (source "SPEC-008-rolling-shutter-temporal-challenge#REQ-140"))
+
+(given (completed waveform))
+(given (completed circuit))
+(given (completed demo))
+(given (completed docs))
+
+(normally r-complete-impl (and (completed waveform) (completed circuit) (completed demo) (completed docs)) (completed impl-006))
+(meta r-complete-impl (source "SPEC-008-rolling-shutter-temporal-challenge#TEST-169"))

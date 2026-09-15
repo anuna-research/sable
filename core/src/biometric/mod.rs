@@ -77,6 +77,8 @@ pub mod fingerprint;
 /// Corneal glint liveness (SPEC-006)
 pub mod corneal;
 
+/// Rolling-shutter temporal challenge derivation and evidence types (SPEC-008).
+pub mod rolling_shutter;
 
 use crate::types::BiometricFeature;
 use crate::error::{Result, SableError};

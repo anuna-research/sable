@@ -20,6 +20,9 @@
 //!    fingerprint agrees with the round's expected composite by *field
 //!    semantics* — categorical `order` equal, ordinals within tolerance. Never
 //!    Hamming (REQ-123, BUG-001).
+//! 7. **Temporal relation** (SPEC-008, when `temporal_enabled`): twelve private
+//!    row-band symbols match one public cyclic waveform rotation, with exact
+//!    four-tick frame progression and a bounded symbol-error budget.
 //!
 //! Checks 4–6 are switched on by their public thresholds. A threshold of zero
 //! (or `corneal_enabled = 0`) is a check that does not run, and because the
@@ -35,9 +38,10 @@
 //! limb0 = Σ expected_fp[i] · 2^(16 i)                                    192 bits
 //! limb1 = color_t ‖ spatial_t ‖ min_mag ‖ min_coverage ‖ corneal_enabled ‖
 //!         ratio_tol ‖ mag_floor ‖ min_convexity ‖ expected_glint[0..3]    120 bits
-//! limb2 = SHA-256(c_nonce ‖ s_nonce)[0..16]                               128 bits
-//! limb3 = SHA-256(c_nonce ‖ s_nonce)[16..32]                              128 bits
-//! digest = Poseidon(limb0, limb1, limb2, limb3)
+//! limb2 = expected temporal symbols ‖ temporal policy                       39 bits
+//! limb3 = SHA-256(c_nonce ‖ s_nonce)[0..16]                               128 bits
+//! limb4 = SHA-256(c_nonce ‖ s_nonce)[16..32]                              128 bits
+//! digest = Poseidon(limb0, limb1, limb2, limb3, limb4)
 //! ```
 //!
 //! Packing several fields into one limb is sound only because every field is
@@ -71,6 +75,7 @@ use halo2_base::QuantumCell;
 use sha2::{Digest, Sha256};
 
 use crate::biometric::fingerprint;
+use crate::biometric::rolling_shutter::{FRAME_DELTAS, TEMPORAL_SYMBOLS};
 use crate::error::{Result, SableError};
 
 // ---------------------------------------------------------------------------
@@ -115,6 +120,10 @@ const COVERAGE_BITS: usize = 7;
 const RATIO_TOL_BITS: usize = 4;
 const MAG_TOL_BITS: usize = 5;
 const CONVEXITY_BITS: usize = 16;
+const TEMPORAL_SYMBOL_BITS: usize = 2;
+const TEMPORAL_PHASE_BITS: usize = 4;
+const TEMPORAL_ERROR_BITS: usize = 4;
+const TEMPORAL_TICK_BITS: usize = 16;
 
 /// Bit offsets inside digest limb 1 (CON-094).
 const L1_COLOR_T: usize = 0;
@@ -127,16 +136,23 @@ const L1_MAG_TOL: usize = 48;
 const L1_MIN_CONVEXITY: usize = 56;
 const L1_EXPECTED_GLINT: [usize; NUM_ROUNDS] = [72, 88, 104];
 
+/// Bit offsets inside the temporal digest limb (SPEC-008 REQ-138).
+const LT_EXPECTED_SYMBOL: [usize; TEMPORAL_SYMBOLS] = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22];
+const LT_ENABLED: usize = 24;
+const LT_EXPECTED_PHASE: usize = 25;
+const LT_PHASE_TOLERANCE: usize = 29;
+const LT_MAX_ERRORS: usize = 33;
+const LT_CAPTURE_VALIDATED: usize = 37;
+const LT_FRAME_TOLERANCE: usize = 38;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 /// Private + public witness data for the liveness ZK circuit (CON-095).
 ///
-/// `Default` is the *unset* witness: passing 0.1.0 fingerprints, every 0.2.0
-/// threshold at zero and the corneal check disabled. It is what the demo
-/// server uses until the extractors are wired in and the presentation-attack
-/// study fixes the constants.
+/// `Default` is the *unset* witness: passing legacy fingerprints, geometric
+/// thresholds at zero, and corneal and temporal checks disabled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LivenessWitness {
     /// 12 delta fingerprints (private): `[r0_tl, r0_tr, r0_bl, r0_br, r1_tl, ...]`.
@@ -170,6 +186,27 @@ pub struct LivenessWitness {
     pub glint_fingerprints: [u16; NUM_GLINTS],
     /// Expected area-weighted composite fingerprint per round (public).
     pub expected_glints: [u16; NUM_ROUNDS],
+
+    /// Ordered row-band symbols decoded from three frames (private).
+    pub temporal_observed_symbols: [u8; TEMPORAL_SYMBOLS],
+    /// No-repeat challenge waveform derived from the joint nonce (public).
+    pub temporal_expected_symbols: [u8; TEMPORAL_SYMBOLS],
+    /// Initial cyclic rotation used for every observed symbol (private).
+    pub temporal_initial_phase: u8,
+    /// Verifier-issued expected initial rotation (public).
+    pub temporal_expected_phase: u8,
+    /// Allowed absolute phase residual (public).
+    pub temporal_phase_tolerance: u8,
+    /// Capture-start deltas between adjacent frames, in profile ticks (private).
+    pub temporal_frame_tick_deltas: [u16; FRAME_DELTAS],
+    /// Allowed absolute residual for each frame tick delta (public).
+    pub temporal_frame_tick_tolerance: u16,
+    /// Maximum accepted temporal symbol mismatches (public).
+    pub temporal_max_symbol_errors: u8,
+    /// Whether the temporal relation contributes to the liveness result (public).
+    pub temporal_enabled: bool,
+    /// Verifier-owned decision that the evidence came from a protected capture path (public).
+    pub temporal_capture_validated: bool,
 
     /// `SHA-256(c_nonce ‖ s_nonce)` (public). REQ-119.
     pub challenge_id: [u8; 32],
@@ -210,6 +247,16 @@ impl LivenessWitness {
             glint_magnitude_floor: 0,
             glint_fingerprints: [0; NUM_GLINTS],
             expected_glints: [0; NUM_ROUNDS],
+            temporal_observed_symbols: [2, 1, 3, 0, 3, 2, 1, 3, 1, 2, 1, 0],
+            temporal_expected_symbols: [2, 1, 3, 0, 3, 2, 1, 3, 1, 2, 1, 0],
+            temporal_initial_phase: 0,
+            temporal_expected_phase: 0,
+            temporal_phase_tolerance: 0,
+            temporal_frame_tick_deltas: [4; FRAME_DELTAS],
+            temporal_frame_tick_tolerance: 0,
+            temporal_max_symbol_errors: 0,
+            temporal_enabled: false,
+            temporal_capture_validated: false,
             challenge_id: [0; 32],
         }
     }
@@ -245,6 +292,55 @@ impl LivenessWitness {
                 self.glint_magnitude_floor
             )));
         }
+        for (i, &symbol) in self.temporal_observed_symbols.iter().enumerate() {
+            if symbol > 3 {
+                return Err(SableError::InvalidInput(format!(
+                    "temporal_observed_symbols[{i}] = {symbol} exceeds 3"
+                )));
+            }
+        }
+        if !crate::biometric::rolling_shutter::valid_temporal_sequence(
+            &self.temporal_expected_symbols,
+        ) {
+            return Err(SableError::InvalidInput(
+                "temporal_expected_symbols does not satisfy the waveform grammar".into(),
+            ));
+        }
+        for (name, phase) in [
+            ("temporal_initial_phase", self.temporal_initial_phase),
+            ("temporal_expected_phase", self.temporal_expected_phase),
+        ] {
+            if phase >= TEMPORAL_SYMBOLS as u8 {
+                return Err(SableError::InvalidInput(format!(
+                    "{name} = {phase} exceeds {}",
+                    TEMPORAL_SYMBOLS - 1
+                )));
+            }
+        }
+        if self.temporal_phase_tolerance > 1 {
+            return Err(SableError::InvalidInput(
+                "temporal_phase_tolerance exceeds 1".into(),
+            ));
+        }
+        if self.temporal_frame_tick_tolerance != 0 {
+            return Err(SableError::InvalidInput(
+                "temporal_frame_tick_tolerance must be zero in profile 0.1.0".into(),
+            ));
+        }
+        let max_errors = crate::biometric::rolling_shutter::maximum_unambiguous_errors(
+            &self.temporal_expected_symbols,
+        );
+        if self.temporal_max_symbol_errors > max_errors {
+            return Err(SableError::InvalidInput(format!(
+                "temporal_max_symbol_errors = {} exceeds unambiguous maximum {max_errors}",
+                self.temporal_max_symbol_errors,
+            )));
+        }
+        if self.temporal_enabled && !self.temporal_capture_validated {
+            return Err(SableError::InvalidInput(
+                "temporal_enabled requires verifier-validated capture".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -269,6 +365,16 @@ impl LivenessWitness {
             mag_floor: self.glint_magnitude_floor as u64,
             glints: self.glint_fingerprints.map(u64::from),
             expected_glints: self.expected_glints.map(u64::from),
+            temporal_observed: self.temporal_observed_symbols.map(u64::from),
+            temporal_expected: self.temporal_expected_symbols.map(u64::from),
+            temporal_initial_phase: self.temporal_initial_phase as u64,
+            temporal_expected_phase: self.temporal_expected_phase as u64,
+            temporal_phase_tolerance: self.temporal_phase_tolerance as u64,
+            temporal_frame_deltas: self.temporal_frame_tick_deltas.map(u64::from),
+            temporal_frame_tolerance: self.temporal_frame_tick_tolerance as u64,
+            temporal_max_errors: self.temporal_max_symbol_errors as u64,
+            temporal_enabled: self.temporal_enabled as u64,
+            temporal_capture_validated: self.temporal_capture_validated as u64,
             challenge_lo: u128::from_le_bytes(lo),
             challenge_hi: u128::from_le_bytes(hi),
         }
@@ -296,6 +402,16 @@ pub(crate) struct LivenessFieldValues {
     pub mag_floor: u64,
     pub glints: [u64; NUM_GLINTS],
     pub expected_glints: [u64; NUM_ROUNDS],
+    pub temporal_observed: [u64; TEMPORAL_SYMBOLS],
+    pub temporal_expected: [u64; TEMPORAL_SYMBOLS],
+    pub temporal_initial_phase: u64,
+    pub temporal_expected_phase: u64,
+    pub temporal_phase_tolerance: u64,
+    pub temporal_frame_deltas: [u64; FRAME_DELTAS],
+    pub temporal_frame_tolerance: u64,
+    pub temporal_max_errors: u64,
+    pub temporal_enabled: u64,
+    pub temporal_capture_validated: u64,
     pub challenge_lo: u128,
     pub challenge_hi: u128,
 }
@@ -315,6 +431,14 @@ pub enum LivenessCheck {
     Convexity,
     /// Corneal glint agreement (REQ-122).
     Corneal,
+    /// Temporal enforcement was requested without verifier-validated capture.
+    TemporalCapture,
+    /// Initial temporal phase is outside verifier tolerance.
+    TemporalPhase,
+    /// Inter-frame timing progression is outside verifier tolerance.
+    TemporalTiming,
+    /// Too many row-band symbols disagree with the one selected rotation.
+    TemporalSymbols,
 }
 
 /// The first failing check and the round it failed in.
@@ -358,7 +482,11 @@ pub fn challenge_digest(witness: &LivenessWitness) -> Fr {
 
     // Natively there is nothing to constrain; load plain witnesses.
     let cells = PublicCells {
-        expected: v.expected.iter().map(|&x| ctx.load_witness(Fr::from(x))).collect(),
+        expected: v
+            .expected
+            .iter()
+            .map(|&x| ctx.load_witness(Fr::from(x)))
+            .collect(),
         color_threshold: ctx.load_witness(Fr::from(v.color_threshold)),
         spatial_threshold: ctx.load_witness(Fr::from(v.spatial_threshold)),
         min_magnitude: ctx.load_witness(Fr::from(v.min_magnitude)),
@@ -368,6 +496,13 @@ pub fn challenge_digest(witness: &LivenessWitness) -> Fr {
         mag_floor: ctx.load_witness(Fr::from(v.mag_floor)),
         min_convexity: ctx.load_witness(Fr::from(v.min_convexity)),
         expected_glints: v.expected_glints.map(|x| ctx.load_witness(Fr::from(x))),
+        temporal_expected: v.temporal_expected.map(|x| ctx.load_witness(Fr::from(x))),
+        temporal_enabled: ctx.load_witness(Fr::from(v.temporal_enabled)),
+        temporal_expected_phase: ctx.load_witness(Fr::from(v.temporal_expected_phase)),
+        temporal_phase_tolerance: ctx.load_witness(Fr::from(v.temporal_phase_tolerance)),
+        temporal_frame_tolerance: ctx.load_witness(Fr::from(v.temporal_frame_tolerance)),
+        temporal_max_errors: ctx.load_witness(Fr::from(v.temporal_max_errors)),
+        temporal_capture_validated: ctx.load_witness(Fr::from(v.temporal_capture_validated)),
         challenge_lo: ctx.load_witness(fr_from_u128(v.challenge_lo)),
         challenge_hi: ctx.load_witness(fr_from_u128(v.challenge_hi)),
     };
@@ -386,11 +521,18 @@ struct PublicCells {
     mag_floor: AssignedValue<Fr>,
     min_convexity: AssignedValue<Fr>,
     expected_glints: [AssignedValue<Fr>; NUM_ROUNDS],
+    temporal_expected: [AssignedValue<Fr>; TEMPORAL_SYMBOLS],
+    temporal_enabled: AssignedValue<Fr>,
+    temporal_expected_phase: AssignedValue<Fr>,
+    temporal_phase_tolerance: AssignedValue<Fr>,
+    temporal_frame_tolerance: AssignedValue<Fr>,
+    temporal_max_errors: AssignedValue<Fr>,
+    temporal_capture_validated: AssignedValue<Fr>,
     challenge_lo: AssignedValue<Fr>,
     challenge_hi: AssignedValue<Fr>,
 }
 
-/// CON-094 Q1: four limbs, one Poseidon hash.
+/// CON-094 / SPEC-008: five limbs, one Poseidon hash.
 fn digest_gadget(ctx: &mut Context<Fr>, gate: &GateChip<Fr>, p: &PublicCells) -> AssignedValue<Fr> {
     // limb0: the twelve expected fingerprints at 16-bit offsets.
     let fp_coeffs: Vec<QuantumCell<Fr>> = (0..NUM_FINGERPRINTS)
@@ -419,7 +561,32 @@ fn digest_gadget(ctx: &mut Context<Fr>, gate: &GateChip<Fr>, p: &PublicCells) ->
         .collect();
     let limb1 = gate.inner_product(ctx, cells, coeffs);
 
-    super::poseidon::poseidon_hash_cells(ctx, gate, &[limb0, limb1, p.challenge_lo, p.challenge_hi])
+    let temporal_fields: Vec<(AssignedValue<Fr>, usize)> = p
+        .temporal_expected
+        .iter()
+        .copied()
+        .zip(LT_EXPECTED_SYMBOL)
+        .chain([
+            (p.temporal_enabled, LT_ENABLED),
+            (p.temporal_expected_phase, LT_EXPECTED_PHASE),
+            (p.temporal_phase_tolerance, LT_PHASE_TOLERANCE),
+            (p.temporal_max_errors, LT_MAX_ERRORS),
+            (p.temporal_capture_validated, LT_CAPTURE_VALIDATED),
+            (p.temporal_frame_tolerance, LT_FRAME_TOLERANCE),
+        ])
+        .collect();
+    let temporal_cells = temporal_fields.iter().map(|(cell, _)| *cell);
+    let temporal_coeffs = temporal_fields
+        .iter()
+        .map(|(_, offset)| QuantumCell::Constant(pow2_fr(*offset)))
+        .collect::<Vec<_>>();
+    let limb2 = gate.inner_product(ctx, temporal_cells, temporal_coeffs);
+
+    super::poseidon::poseidon_hash_cells(
+        ctx,
+        gate,
+        &[limb0, limb1, limb2, p.challenge_lo, p.challenge_hi],
+    )
 }
 
 /// Liveness check circuit.
@@ -453,6 +620,41 @@ impl LivenessCheckCircuit {
     /// from the check family and round alone.
     pub fn first_failing_check(&self) -> Option<LivenessFailure> {
         let w = &self.witness;
+        if w.temporal_observed_symbols.iter().any(|symbol| *symbol > 3)
+            || !crate::biometric::rolling_shutter::valid_temporal_sequence(
+                &w.temporal_expected_symbols,
+            )
+            || w.temporal_max_symbol_errors
+                > crate::biometric::rolling_shutter::maximum_unambiguous_errors(
+                    &w.temporal_expected_symbols,
+                )
+        {
+            return Some(LivenessFailure {
+                check: LivenessCheck::TemporalSymbols,
+                round: 0,
+            });
+        }
+        if w.temporal_initial_phase >= TEMPORAL_SYMBOLS as u8
+            || w.temporal_expected_phase >= TEMPORAL_SYMBOLS as u8
+            || w.temporal_phase_tolerance > 1
+        {
+            return Some(LivenessFailure {
+                check: LivenessCheck::TemporalPhase,
+                round: 0,
+            });
+        }
+        if w.temporal_frame_tick_tolerance != 0 {
+            return Some(LivenessFailure {
+                check: LivenessCheck::TemporalTiming,
+                round: 0,
+            });
+        }
+        if w.temporal_enabled && !w.temporal_capture_validated {
+            return Some(LivenessFailure {
+                check: LivenessCheck::TemporalCapture,
+                round: 0,
+            });
+        }
         for r in 0..NUM_ROUNDS {
             let base = r * 4;
             let idx = [base, base + 1, base + 2, base + 3];
@@ -465,30 +667,47 @@ impl LivenessCheckCircuit {
                     fingerprint::direction(w.expected_fingerprints[i]),
                 ) > w.color_threshold as u32
                 {
-                    return Some(LivenessFailure { check: LivenessCheck::Colour, round: r });
+                    return Some(LivenessFailure {
+                        check: LivenessCheck::Colour,
+                        round: r,
+                    });
                 }
             }
             // Spatial diff: HD >= spatial_threshold for 4 adjacent pairs.
             for (a, b) in [(0, 1), (0, 2), (1, 3), (2, 3)] {
-                if hamming_u16(w.delta_fingerprints[base + a], w.delta_fingerprints[base + b])
-                    < w.spatial_threshold as u32
+                if hamming_u16(
+                    w.delta_fingerprints[base + a],
+                    w.delta_fingerprints[base + b],
+                ) < w.spatial_threshold as u32
                 {
-                    return Some(LivenessFailure { check: LivenessCheck::Spatial, round: r });
+                    return Some(LivenessFailure {
+                        check: LivenessCheck::Spatial,
+                        round: r,
+                    });
                 }
             }
             // Magnitude: low 5 bits >= min_magnitude for all 4 quadrants.
             for &i in &idx {
                 if (w.delta_fingerprints[i] & 0x1F) < w.min_magnitude as u16 {
-                    return Some(LivenessFailure { check: LivenessCheck::Magnitude, round: r });
+                    return Some(LivenessFailure {
+                        check: LivenessCheck::Magnitude,
+                        round: r,
+                    });
                 }
             }
             // REQ-120: coverage floor.
             if w.responding_patches[r] < w.min_coverage {
-                return Some(LivenessFailure { check: LivenessCheck::Coverage, round: r });
+                return Some(LivenessFailure {
+                    check: LivenessCheck::Coverage,
+                    round: r,
+                });
             }
             // REQ-121: convexity floor.
             if w.convexity_scores[r] < w.min_convexity {
-                return Some(LivenessFailure { check: LivenessCheck::Convexity, round: r });
+                return Some(LivenessFailure {
+                    check: LivenessCheck::Convexity,
+                    round: r,
+                });
             }
             // REQ-122: corneal agreement, field-wise (never Hamming, REQ-123).
             if w.corneal_enabled {
@@ -500,9 +719,46 @@ impl LivenessCheckCircuit {
                         w.glint_ratio_tolerance,
                         w.glint_magnitude_floor,
                     ) {
-                        return Some(LivenessFailure { check: LivenessCheck::Corneal, round: r });
+                        return Some(LivenessFailure {
+                            check: LivenessCheck::Corneal,
+                            round: r,
+                        });
                     }
                 }
+            }
+        }
+        if w.temporal_enabled {
+            let phase_difference = w.temporal_initial_phase.abs_diff(w.temporal_expected_phase);
+            let circular_difference =
+                phase_difference.min(TEMPORAL_SYMBOLS as u8 - phase_difference);
+            if circular_difference > w.temporal_phase_tolerance {
+                return Some(LivenessFailure {
+                    check: LivenessCheck::TemporalPhase,
+                    round: 0,
+                });
+            }
+            for (frame, &observed) in w.temporal_frame_tick_deltas.iter().enumerate() {
+                if observed.abs_diff(4) > w.temporal_frame_tick_tolerance {
+                    return Some(LivenessFailure {
+                        check: LivenessCheck::TemporalTiming,
+                        round: frame + 1,
+                    });
+                }
+            }
+            let phase = w.temporal_initial_phase as usize;
+            let mismatches = w
+                .temporal_observed_symbols
+                .iter()
+                .enumerate()
+                .filter(|(i, symbol)| {
+                    **symbol != w.temporal_expected_symbols[(phase + *i) % TEMPORAL_SYMBOLS]
+                })
+                .count();
+            if mismatches > w.temporal_max_symbol_errors as usize {
+                return Some(LivenessFailure {
+                    check: LivenessCheck::TemporalSymbols,
+                    round: 0,
+                });
             }
         }
         None
@@ -564,6 +820,80 @@ impl LivenessCheckCircuit {
         let mag_floor = load_ranged(ctx, &gate, v.mag_floor, MAG_TOL_BITS);
         let min_convexity = load_ranged(ctx, &gate, v.min_convexity, CONVEXITY_BITS);
 
+        // ---- SPEC-008 public temporal policy, recognised before use ----
+        let temporal_enabled = ctx.load_witness(Fr::from(v.temporal_enabled));
+        gate.assert_bit(ctx, temporal_enabled);
+        let temporal_capture_validated = ctx.load_witness(Fr::from(v.temporal_capture_validated));
+        gate.assert_bit(ctx, temporal_capture_validated);
+        let capture_gate = compare_le(ctx, &gate, temporal_enabled, temporal_capture_validated, 1);
+        ctx.constrain_equal(&capture_gate, &one);
+        let temporal_not_enabled = gate.sub(ctx, one, temporal_enabled);
+        let temporal_expected_phase =
+            load_ranged(ctx, &gate, v.temporal_expected_phase, TEMPORAL_PHASE_BITS);
+        let temporal_phase_tolerance = ctx.load_witness(Fr::from(v.temporal_phase_tolerance));
+        gate.assert_bit(ctx, temporal_phase_tolerance);
+        let temporal_max_errors =
+            load_ranged(ctx, &gate, v.temporal_max_errors, TEMPORAL_ERROR_BITS);
+        let temporal_frame_tolerance = ctx.load_witness(Fr::from(v.temporal_frame_tolerance));
+        gate.assert_bit(ctx, temporal_frame_tolerance);
+        ctx.constrain_equal(&temporal_frame_tolerance, &zero);
+        let max_phase = ctx.load_constant(Fr::from((TEMPORAL_SYMBOLS - 1) as u64));
+        let valid_expected_phase = compare_le(
+            ctx,
+            &gate,
+            temporal_expected_phase,
+            max_phase,
+            TEMPORAL_PHASE_BITS,
+        );
+        ctx.constrain_equal(&valid_expected_phase, &one);
+
+        let temporal_expected = v
+            .temporal_expected
+            .map(|symbol| load_ranged(ctx, &gate, symbol, TEMPORAL_SYMBOL_BITS));
+        for i in 0..TEMPORAL_SYMBOLS {
+            let equal = gate.is_equal(
+                ctx,
+                temporal_expected[i],
+                temporal_expected[(i + 1) % TEMPORAL_SYMBOLS],
+            );
+            ctx.constrain_equal(&equal, &zero);
+        }
+
+        // Every cyclic four-symbol frame window must be unique.
+        for left in 0..TEMPORAL_SYMBOLS {
+            for right in left + 1..TEMPORAL_SYMBOLS {
+                let mut windows_equal = one;
+                for offset in 0..4 {
+                    let same = gate.is_equal(
+                        ctx,
+                        temporal_expected[(left + offset) % TEMPORAL_SYMBOLS],
+                        temporal_expected[(right + offset) % TEMPORAL_SYMBOLS],
+                    );
+                    windows_equal = gate.mul(ctx, windows_equal, same);
+                }
+                ctx.constrain_equal(&windows_equal, &zero);
+            }
+        }
+
+        // Distinct rotations must have disjoint accepted Hamming balls: 2t < d.
+        let two_errors = gate.add(ctx, temporal_max_errors, temporal_max_errors);
+        let required_distance = gate.add(ctx, two_errors, one);
+        for shift in 1..TEMPORAL_SYMBOLS {
+            let mismatches = (0..TEMPORAL_SYMBOLS)
+                .map(|i| {
+                    let equal = gate.is_equal(
+                        ctx,
+                        temporal_expected[i],
+                        temporal_expected[(i + shift) % TEMPORAL_SYMBOLS],
+                    );
+                    gate.sub(ctx, one, equal)
+                })
+                .collect::<Vec<_>>();
+            let distance = gate.sum(ctx, mismatches);
+            let disjoint = compare_le(ctx, &gate, required_distance, distance, 5);
+            ctx.constrain_equal(&disjoint, &one);
+        }
+
         let mut expected_witnesses: Vec<AssignedValue<Fr>> = Vec::with_capacity(NUM_FINGERPRINTS);
         let mut expected_glint_cells: Vec<AssignedValue<Fr>> = Vec::with_capacity(NUM_ROUNDS);
         let mut expected_glint_bits: Vec<Vec<AssignedValue<Fr>>> = Vec::with_capacity(NUM_ROUNDS);
@@ -583,7 +913,8 @@ impl LivenessCheckCircuit {
 
             for q in 0..4 {
                 let idx = base + q;
-                let (_delta, delta_bits) = load_with_bits(ctx, &gate, v.delta[idx], FINGERPRINT_BITS);
+                let (_delta, delta_bits) =
+                    load_with_bits(ctx, &gate, v.delta[idx], FINGERPRINT_BITS);
                 let (expected, expected_bits) =
                     load_with_bits(ctx, &gate, v.expected[idx], FINGERPRINT_BITS);
                 expected_witnesses.push(expected);
@@ -637,8 +968,10 @@ impl LivenessCheckCircuit {
                 let (_g, g_bits) =
                     load_with_bits(ctx, &gate, v.glints[r * NUM_EYES + eye], FINGERPRINT_BITS);
                 let g_order = bits_to_value(ctx, &gate, &g_bits[ORDER_LO..ORDER_LO + ORDER_BITS]);
-                let g_mid = bits_to_value(ctx, &gate, &g_bits[MID_RATIO_LO..MID_RATIO_LO + RATIO_BITS]);
-                let g_min = bits_to_value(ctx, &gate, &g_bits[MIN_RATIO_LO..MIN_RATIO_LO + RATIO_BITS]);
+                let g_mid =
+                    bits_to_value(ctx, &gate, &g_bits[MID_RATIO_LO..MID_RATIO_LO + RATIO_BITS]);
+                let g_min =
+                    bits_to_value(ctx, &gate, &g_bits[MIN_RATIO_LO..MIN_RATIO_LO + RATIO_BITS]);
                 let g_mag = bits_to_value(ctx, &gate, &g_bits[..MAGNITUDE_BITS]);
 
                 let order_ok = gate.is_equal(ctx, g_order, e_order);
@@ -656,6 +989,73 @@ impl LivenessCheckCircuit {
                 result = gate.mul(ctx, result, gated);
             }
         }
+
+        // ---- SPEC-008: one ordered rotation across the complete burst ----
+        let temporal_phase = load_ranged(ctx, &gate, v.temporal_initial_phase, TEMPORAL_PHASE_BITS);
+        let valid_phase = compare_le(ctx, &gate, temporal_phase, max_phase, TEMPORAL_PHASE_BITS);
+        ctx.constrain_equal(&valid_phase, &one);
+
+        let phase_ok = within_cyclic_tolerance_12(
+            ctx,
+            &gate,
+            temporal_phase,
+            temporal_expected_phase,
+            temporal_phase_tolerance,
+        );
+        let gated_phase_ok = gate.mul_add(ctx, temporal_enabled, phase_ok, temporal_not_enabled);
+        result = gate.mul(ctx, result, gated_phase_ok);
+
+        for i in 0..FRAME_DELTAS {
+            let observed = load_ranged(ctx, &gate, v.temporal_frame_deltas[i], TEMPORAL_TICK_BITS);
+            let expected = ctx.load_constant(Fr::from(4u64));
+            let timing_ok = within_tolerance(
+                ctx,
+                &gate,
+                observed,
+                expected,
+                temporal_frame_tolerance,
+                TEMPORAL_TICK_BITS,
+            );
+            let gated_timing_ok =
+                gate.mul_add(ctx, temporal_enabled, timing_ok, temporal_not_enabled);
+            result = gate.mul(ctx, result, gated_timing_ok);
+        }
+
+        let selectors: Vec<AssignedValue<Fr>> = (0..TEMPORAL_SYMBOLS)
+            .map(|phase| {
+                let constant = ctx.load_constant(Fr::from(phase as u64));
+                gate.is_equal(ctx, temporal_phase, constant)
+            })
+            .collect();
+        let selector_sum = gate.sum(ctx, selectors.iter().copied());
+        ctx.constrain_equal(&selector_sum, &one);
+
+        let mut mismatch_cells = Vec::with_capacity(TEMPORAL_SYMBOLS);
+        for i in 0..TEMPORAL_SYMBOLS {
+            let observed = load_ranged(ctx, &gate, v.temporal_observed[i], TEMPORAL_SYMBOL_BITS);
+            let mut selected = ctx.load_constant(Fr::from(0u64));
+            for phase in 0..TEMPORAL_SYMBOLS {
+                let term = gate.mul(
+                    ctx,
+                    selectors[phase],
+                    temporal_expected[(phase + i) % TEMPORAL_SYMBOLS],
+                );
+                selected = gate.add(ctx, selected, term);
+            }
+            let equal = gate.is_equal(ctx, observed, selected);
+            mismatch_cells.push(gate.sub(ctx, one, equal));
+        }
+        let mismatch_count = gate.sum(ctx, mismatch_cells);
+        let symbols_ok = compare_le(
+            ctx,
+            &gate,
+            mismatch_count,
+            temporal_max_errors,
+            TEMPORAL_ERROR_BITS,
+        );
+        let gated_symbols_ok =
+            gate.mul_add(ctx, temporal_enabled, symbols_ok, temporal_not_enabled);
+        result = gate.mul(ctx, result, gated_symbols_ok);
 
         // Constrain result to be boolean.
         let result_minus_one = gate.sub(ctx, result, one);
@@ -678,6 +1078,13 @@ impl LivenessCheckCircuit {
                 expected_glint_cells[1],
                 expected_glint_cells[2],
             ],
+            temporal_expected,
+            temporal_enabled,
+            temporal_expected_phase,
+            temporal_phase_tolerance,
+            temporal_frame_tolerance,
+            temporal_max_errors,
+            temporal_capture_validated,
             challenge_lo: ctx.load_witness(fr_from_u128(v.challenge_lo)),
             challenge_hi: ctx.load_witness(fr_from_u128(v.challenge_hi)),
         };
@@ -735,7 +1142,12 @@ fn pow2_fr(n: usize) -> Fr {
 }
 
 /// Load a witness and constrain it to `bits` bits (REQ-124). Returns the cell.
-fn load_ranged(ctx: &mut Context<Fr>, gate: &GateChip<Fr>, value: u64, bits: usize) -> AssignedValue<Fr> {
+fn load_ranged(
+    ctx: &mut Context<Fr>,
+    gate: &GateChip<Fr>,
+    value: u64,
+    bits: usize,
+) -> AssignedValue<Fr> {
     let (cell, _) = load_with_bits(ctx, gate, value, bits);
     cell
 }
@@ -776,7 +1188,11 @@ fn decompose_bits(
 }
 
 /// Σ bits[i] · 2^i over a slice of boolean cells.
-fn bits_to_value(ctx: &mut Context<Fr>, gate: &GateChip<Fr>, bits: &[AssignedValue<Fr>]) -> AssignedValue<Fr> {
+fn bits_to_value(
+    ctx: &mut Context<Fr>,
+    gate: &GateChip<Fr>,
+    bits: &[AssignedValue<Fr>],
+) -> AssignedValue<Fr> {
     let coeffs: Vec<QuantumCell<Fr>> = (0..bits.len())
         .map(|i| QuantumCell::Constant(pow2_fr(i)))
         .collect();
@@ -804,7 +1220,11 @@ fn xor_bits(
 }
 
 /// Sum of bit values (popcount).
-fn popcount(ctx: &mut Context<Fr>, gate: &GateChip<Fr>, bits: &[AssignedValue<Fr>]) -> AssignedValue<Fr> {
+fn popcount(
+    ctx: &mut Context<Fr>,
+    gate: &GateChip<Fr>,
+    bits: &[AssignedValue<Fr>],
+) -> AssignedValue<Fr> {
     let mut sum = ctx.load_constant(Fr::from(0u64));
     for &bit in bits {
         sum = gate.add(ctx, sum, bit);
@@ -869,6 +1289,36 @@ fn within_tolerance(
     gate.mul(ctx, lo_ok, hi_ok)
 }
 
+/// Prove the circular distance between phases in `Z/12Z` is at most `tol`.
+///
+/// The three comparisons cover the direct distance and each wrap direction:
+/// `|a-b|`, `|(a+12)-b|`, and `|a-(b+12)|`. Inputs are separately constrained
+/// to 0..=11 and `tol` to one bit by the caller.
+fn within_cyclic_tolerance_12(
+    ctx: &mut Context<Fr>,
+    gate: &GateChip<Fr>,
+    a: AssignedValue<Fr>,
+    b: AssignedValue<Fr>,
+    tol: AssignedValue<Fr>,
+) -> AssignedValue<Fr> {
+    let twelve = ctx.load_constant(Fr::from(TEMPORAL_SYMBOLS as u64));
+    let a_wrapped = gate.add(ctx, a, twelve);
+    let b_wrapped = gate.add(ctx, b, twelve);
+    let direct = within_tolerance(ctx, gate, a, b, tol, 5);
+    let wrap_a = within_tolerance(ctx, gate, a_wrapped, b, tol, 5);
+    let wrap_b = within_tolerance(ctx, gate, a, b_wrapped, tol, 5);
+
+    // Boolean OR without introducing unconstrained selector witnesses.
+    let direct_or_a = {
+        let sum = gate.add(ctx, direct, wrap_a);
+        let both = gate.mul(ctx, direct, wrap_a);
+        gate.sub(ctx, sum, both)
+    };
+    let sum = gate.add(ctx, direct_or_a, wrap_b);
+    let both = gate.mul(ctx, direct_or_a, wrap_b);
+    gate.sub(ctx, sum, both)
+}
+
 /// CPU-side Hamming distance between two u16 values.
 fn hamming_u16(a: u16, b: u16) -> u32 {
     (a ^ b).count_ones()
@@ -930,6 +1380,20 @@ mod tests {
         Ok(*digest.value())
     }
 
+    fn mock_verify_values_with_digest(
+        v: &LivenessFieldValues,
+        public_digest: Fr,
+    ) -> std::result::Result<(), String> {
+        let mut builder =
+            BaseCircuitBuilder::new(false).use_params(LivenessCheckCircuit::circuit_params());
+        let (result, digest) = LivenessCheckCircuit::build_from_values(&mut builder, v);
+        builder.assigned_instances[0].push(result);
+        builder.assigned_instances[0].push(digest);
+        let prover = MockProver::run(K, &builder, vec![vec![*result.value(), public_digest]])
+            .map_err(|e| format!("{e:?}"))?;
+        prover.verify().map_err(|e| format!("{e:?}"))
+    }
+
     // -----------------------------------------------------------------
     // 0.1.0 behaviour, unchanged
     // -----------------------------------------------------------------
@@ -938,7 +1402,10 @@ mod tests {
     fn test_liveness_circuit_pass() {
         let circuit = LivenessCheckCircuit::new(passing_witness());
         assert!(circuit.should_pass(), "CPU-side check should pass");
-        assert!(circuit.test_circuit().expect("satisfiable"), "circuit should output 1");
+        assert!(
+            circuit.test_circuit().expect("satisfiable"),
+            "circuit should output 1"
+        );
     }
 
     #[test]
@@ -958,8 +1425,14 @@ mod tests {
     #[test]
     fn test_liveness_wrong_color() {
         let w = legacy(
-            [0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014],
-            [0xA014, 0x0014, 0xC014, 0x6014, 0xA014, 0x0014, 0xC014, 0x6014, 0xA014, 0x0014, 0xC014, 0x6014],
+            [
+                0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014,
+                0x6014, 0xC014,
+            ],
+            [
+                0xA014, 0x0014, 0xC014, 0x6014, 0xA014, 0x0014, 0xC014, 0x6014, 0xA014, 0x0014,
+                0xC014, 0x6014,
+            ],
             1,
             1,
             5,
@@ -994,7 +1467,8 @@ mod tests {
         // Same order pattern as the passing witness (every adjacent pair HD = 2)
         // so colour and spatial pass and only magnitude (1 < 5) trips.
         let fps = [
-            0x0001, 0xA001, 0x6001, 0xC001, 0x0001, 0xA001, 0x6001, 0xC001, 0x0001, 0xA001, 0x6001, 0xC001,
+            0x0001, 0xA001, 0x6001, 0xC001, 0x0001, 0xA001, 0x6001, 0xC001, 0x0001, 0xA001, 0x6001,
+            0xC001,
         ];
         let circuit = LivenessCheckCircuit::new(legacy(fps, fps, 3, 2, 5));
         assert_eq!(
@@ -1013,8 +1487,8 @@ mod tests {
                 0x0014, 0x0014, 0x0014, 0x0014, // round 2 all same
             ],
             [
-                0x0014, 0xA014, 0x6014, 0xC014, 0x6014, 0xC014, 0x0014, 0xA014, 0x0014, 0x0014, 0x0014,
-                0x0014,
+                0x0014, 0xA014, 0x6014, 0xC014, 0x6014, 0xC014, 0x0014, 0xA014, 0x0014, 0x0014,
+                0x0014, 0x0014,
             ],
             3,
             2,
@@ -1023,7 +1497,10 @@ mod tests {
         let circuit = LivenessCheckCircuit::new(w);
         assert_eq!(
             circuit.first_failing_check(),
-            Some(LivenessFailure { check: LivenessCheck::Spatial, round: 2 })
+            Some(LivenessFailure {
+                check: LivenessCheck::Spatial,
+                round: 2
+            })
         );
         assert!(!circuit.test_circuit().expect("satisfiable"));
     }
@@ -1032,8 +1509,14 @@ mod tests {
     fn test_liveness_color_threshold_boundary() {
         let w = legacy(
             // One mid_ratio bit differs per quadrant: direction HD = 1.
-            [0x0214, 0xA214, 0x6214, 0xC214, 0x0214, 0xA214, 0x6214, 0xC214, 0x0214, 0xA214, 0x6214, 0xC214],
-            [0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014],
+            [
+                0x0214, 0xA214, 0x6214, 0xC214, 0x0214, 0xA214, 0x6214, 0xC214, 0x0214, 0xA214,
+                0x6214, 0xC214,
+            ],
+            [
+                0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014,
+                0x6014, 0xC014,
+            ],
             1,
             2,
             5,
@@ -1047,8 +1530,14 @@ mod tests {
     fn test_liveness_color_threshold_just_over() {
         let w = legacy(
             // Two mid_ratio bits differ in TL: direction HD = 2 > 1.
-            [0x0614, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014],
-            [0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014],
+            [
+                0x0614, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014,
+                0x6014, 0xC014,
+            ],
+            [
+                0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014, 0x6014, 0xC014, 0x0014, 0xA014,
+                0x6014, 0xC014,
+            ],
             1,
             2,
             5,
@@ -1070,13 +1559,16 @@ mod tests {
             2,
             5,
         ));
-        assert!(circuit.test_circuit().expect("a threshold of 200 must be satisfiable"));
+        assert!(circuit
+            .test_circuit()
+            .expect("a threshold of 200 must be satisfiable"));
     }
 
     #[test]
     fn test_liveness_spatial_threshold_boundary() {
         let fps = [
-            0x0014, 0x2014, 0x4014, 0x6014, 0x0014, 0x2014, 0x4014, 0x6014, 0x0014, 0x2014, 0x4014, 0x6014,
+            0x0014, 0x2014, 0x4014, 0x6014, 0x0014, 0x2014, 0x4014, 0x6014, 0x0014, 0x2014, 0x4014,
+            0x6014,
         ];
         let circuit = LivenessCheckCircuit::new(legacy(fps, fps, 3, 1, 5));
         assert!(circuit.should_pass());
@@ -1086,7 +1578,8 @@ mod tests {
     #[test]
     fn test_liveness_magnitude_boundary() {
         let fps = [
-            0x0005, 0xA005, 0x6005, 0xC005, 0x0005, 0xA005, 0x6005, 0xC005, 0x0005, 0xA005, 0x6005, 0xC005,
+            0x0005, 0xA005, 0x6005, 0xC005, 0x0005, 0xA005, 0x6005, 0xC005, 0x0005, 0xA005, 0x6005,
+            0xC005,
         ];
         let circuit = LivenessCheckCircuit::new(legacy(fps, fps, 3, 2, 5));
         assert!(circuit.should_pass());
@@ -1096,7 +1589,8 @@ mod tests {
     #[test]
     fn test_liveness_magnitude_just_under() {
         let fps = [
-            0x0004, 0xA004, 0x6004, 0xC004, 0x0004, 0xA004, 0x6004, 0xC004, 0x0004, 0xA004, 0x6004, 0xC004,
+            0x0004, 0xA004, 0x6004, 0xC004, 0x0004, 0xA004, 0x6004, 0xC004, 0x0004, 0xA004, 0x6004,
+            0xC004,
         ];
         let circuit = LivenessCheckCircuit::new(legacy(fps, fps, 3, 2, 5));
         assert!(!circuit.should_pass());
@@ -1113,7 +1607,8 @@ mod tests {
     #[test]
     fn test_liveness_max_fingerprints() {
         let fps = [
-            0xFFFF, 0x0000, 0x5555, 0xAAAA, 0xFFFF, 0x0000, 0x5555, 0xAAAA, 0xFFFF, 0x0000, 0x5555, 0xAAAA,
+            0xFFFF, 0x0000, 0x5555, 0xAAAA, 0xFFFF, 0x0000, 0x5555, 0xAAAA, 0xFFFF, 0x0000, 0x5555,
+            0xAAAA,
         ];
         let circuit = LivenessCheckCircuit::new(legacy(fps, fps, 3, 2, 0));
         assert!(circuit.should_pass());
@@ -1165,7 +1660,11 @@ mod tests {
         for (i, (w, expected)) in cases.iter().enumerate() {
             let c = LivenessCheckCircuit::new(w.clone());
             assert_eq!(c.should_pass(), *expected, "case {i}: native");
-            assert_eq!(c.test_circuit().expect("satisfiable"), *expected, "case {i}: circuit");
+            assert_eq!(
+                c.test_circuit().expect("satisfiable"),
+                *expected,
+                "case {i}: circuit"
+            );
         }
     }
 
@@ -1184,7 +1683,11 @@ mod tests {
         let mut builder =
             BaseCircuitBuilder::new(false).use_params(LivenessCheckCircuit::circuit_params());
         let (_result, digest) = circuit.build_circuit(&mut builder);
-        assert_eq!(*digest.value(), native1, "in-circuit digest must equal native digest");
+        assert_eq!(
+            *digest.value(),
+            native1,
+            "in-circuit digest must equal native digest"
+        );
     }
 
     #[test]
@@ -1228,7 +1731,10 @@ mod tests {
         for (name, w) in &variants {
             let d = challenge_digest(w);
             assert_ne!(d, d0, "{name} must change the digest");
-            assert!(!seen.contains(&d), "{name} collided with an earlier variant");
+            assert!(
+                !seen.contains(&d),
+                "{name} collided with an earlier variant"
+            );
             seen.push(d);
         }
     }
@@ -1275,7 +1781,10 @@ mod tests {
         assert_ne!(challenge_digest(&hi), d0, "high limb must be bound");
 
         // A different server nonce yields a different identifier.
-        assert_ne!(challenge_identifier(&c, &s), challenge_identifier(&c, &[10u8; 32]));
+        assert_ne!(
+            challenge_identifier(&c, &s),
+            challenge_identifier(&c, &[10u8; 32])
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1289,21 +1798,33 @@ mod tests {
         w.responding_patches = [10, 10, 10];
         let c = LivenessCheckCircuit::new(w.clone());
         assert!(c.should_pass());
-        assert!(c.test_circuit().expect("satisfiable"), "exactly at the floor passes");
+        assert!(
+            c.test_circuit().expect("satisfiable"),
+            "exactly at the floor passes"
+        );
 
         w.responding_patches[1] = 9;
         let c = LivenessCheckCircuit::new(w.clone());
         assert_eq!(
             c.first_failing_check(),
-            Some(LivenessFailure { check: LivenessCheck::Coverage, round: 1 })
+            Some(LivenessFailure {
+                check: LivenessCheck::Coverage,
+                round: 1
+            })
         );
-        assert!(!c.test_circuit().expect("satisfiable"), "one below the floor fails");
+        assert!(
+            !c.test_circuit().expect("satisfiable"),
+            "one below the floor fails"
+        );
 
         // Vacuous at zero.
         w.min_coverage = 0;
         w.responding_patches = [0, 0, 0];
         let c = LivenessCheckCircuit::new(w);
-        assert!(c.test_circuit().expect("satisfiable"), "min_coverage = 0 disables the check");
+        assert!(
+            c.test_circuit().expect("satisfiable"),
+            "min_coverage = 0 disables the check"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1317,20 +1838,32 @@ mod tests {
         w.convexity_scores = [1243, 1243, 1243];
         let c = LivenessCheckCircuit::new(w.clone());
         assert!(c.should_pass());
-        assert!(c.test_circuit().expect("satisfiable"), "exactly at the floor passes");
+        assert!(
+            c.test_circuit().expect("satisfiable"),
+            "exactly at the floor passes"
+        );
 
         w.convexity_scores[2] = 1242;
         let c = LivenessCheckCircuit::new(w.clone());
         assert_eq!(
             c.first_failing_check(),
-            Some(LivenessFailure { check: LivenessCheck::Convexity, round: 2 })
+            Some(LivenessFailure {
+                check: LivenessCheck::Convexity,
+                round: 2
+            })
         );
-        assert!(!c.test_circuit().expect("satisfiable"), "one below the floor fails");
+        assert!(
+            !c.test_circuit().expect("satisfiable"),
+            "one below the floor fails"
+        );
 
         w.min_convexity = 0;
         w.convexity_scores = [0, 0, 0];
         let c = LivenessCheckCircuit::new(w);
-        assert!(c.test_circuit().expect("satisfiable"), "min_convexity = 0 disables the check");
+        assert!(
+            c.test_circuit().expect("satisfiable"),
+            "min_convexity = 0 disables the check"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1366,7 +1899,10 @@ mod tests {
         let c = LivenessCheckCircuit::new(w);
         assert_eq!(
             c.first_failing_check(),
-            Some(LivenessFailure { check: LivenessCheck::Corneal, round: 1 })
+            Some(LivenessFailure {
+                check: LivenessCheck::Corneal,
+                round: 1
+            })
         );
         assert!(
             !c.test_circuit().expect("satisfiable"),
@@ -1387,16 +1923,25 @@ mod tests {
         w.glint_magnitude_floor = 17;
         let c = LivenessCheckCircuit::new(w.clone());
         assert!(c.should_pass());
-        assert!(c.test_circuit().expect("satisfiable"), "difference == tolerance and magnitude == floor pass");
+        assert!(
+            c.test_circuit().expect("satisfiable"),
+            "difference == tolerance and magnitude == floor pass"
+        );
 
         w.glint_ratio_tolerance = 1;
         let c = LivenessCheckCircuit::new(w.clone());
-        assert!(!c.test_circuit().expect("satisfiable"), "ratio difference > tolerance fails");
+        assert!(
+            !c.test_circuit().expect("satisfiable"),
+            "ratio difference > tolerance fails"
+        );
 
         w.glint_ratio_tolerance = 2;
         w.glint_magnitude_floor = 18;
         let c = LivenessCheckCircuit::new(w);
-        assert!(!c.test_circuit().expect("satisfiable"), "magnitude below floor fails");
+        assert!(
+            !c.test_circuit().expect("satisfiable"),
+            "magnitude below floor fails"
+        );
     }
 
     #[test]
@@ -1467,7 +2012,10 @@ mod tests {
         let c = LivenessCheckCircuit::new(legacy(wrong, expected, 0, 2, 0));
         assert_eq!(
             c.first_failing_check(),
-            Some(LivenessFailure { check: LivenessCheck::Colour, round: 2 })
+            Some(LivenessFailure {
+                check: LivenessCheck::Colour,
+                round: 2
+            })
         );
         assert!(!c.test_circuit().expect("satisfiable"));
 
@@ -1475,7 +2023,10 @@ mod tests {
         let c = LivenessCheckCircuit::new(legacy(delta, expected, 0, 2, 2));
         assert_eq!(
             c.first_failing_check(),
-            Some(LivenessFailure { check: LivenessCheck::Magnitude, round: 0 })
+            Some(LivenessFailure {
+                check: LivenessCheck::Magnitude,
+                round: 0
+            })
         );
         assert!(!c.test_circuit().expect("satisfiable"));
     }
@@ -1496,15 +2047,24 @@ mod tests {
         w.glint_magnitude_floor = 1;
         let c = LivenessCheckCircuit::new(w.clone());
         assert!(c.should_pass());
-        assert!(c.test_circuit().expect("satisfiable"), "magnitude 1 at floor 1 passes");
+        assert!(
+            c.test_circuit().expect("satisfiable"),
+            "magnitude 1 at floor 1 passes"
+        );
 
         w.glint_magnitude_floor = 2;
         let c = LivenessCheckCircuit::new(w);
         assert_eq!(
             c.first_failing_check(),
-            Some(LivenessFailure { check: LivenessCheck::Corneal, round: 0 })
+            Some(LivenessFailure {
+                check: LivenessCheck::Corneal,
+                round: 0
+            })
         );
-        assert!(!c.test_circuit().expect("satisfiable"), "magnitude 1 at floor 2 fails");
+        assert!(
+            !c.test_circuit().expect("satisfiable"),
+            "magnitude 1 at floor 2 fails"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1541,19 +2101,203 @@ mod tests {
             Err(_) => {} // rejected: the range constraint holds
             Ok(d) => panic!(
                 "aliased thresholds must be unsatisfiable; got a digest that {} the honest one",
-                if d == honest_digest { "equals" } else { "differs from" }
+                if d == honest_digest {
+                    "equals"
+                } else {
+                    "differs from"
+                }
             ),
         }
 
         // The same for a coverage count above the grammar bound.
         let mut wide = honest.clone();
         wide.responding[0] = 65;
-        assert!(mock_verify_values(&wide).is_err(), "coverage above 64 must be unsatisfiable");
+        assert!(
+            mock_verify_values(&wide).is_err(),
+            "coverage above 64 must be unsatisfiable"
+        );
 
         // And for a tolerance above its declared width.
         let mut tol = honest;
         tol.ratio_tol = 16;
-        assert!(mock_verify_values(&tol).is_err(), "ratio tolerance above 15 must be unsatisfiable");
+        assert!(
+            mock_verify_values(&tol).is_err(),
+            "ratio tolerance above 15 must be unsatisfiable"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // SPEC-008 rolling-shutter temporal relation
+    // -----------------------------------------------------------------
+
+    fn temporal_witness(phase: u8) -> LivenessWitness {
+        let expected = crate::biometric::rolling_shutter::derive_temporal_symbols(
+            &[0x11; 32],
+            &[0xA5; 32],
+        )
+        .unwrap();
+        let observed = std::array::from_fn(|i| {
+            expected[(phase as usize + i) % TEMPORAL_SYMBOLS]
+        });
+        LivenessWitness {
+            temporal_observed_symbols: observed,
+            temporal_expected_symbols: expected,
+            temporal_initial_phase: phase,
+            temporal_expected_phase: phase,
+            temporal_frame_tick_deltas: [4, 4],
+            temporal_frame_tick_tolerance: 0,
+            temporal_max_symbol_errors:
+                crate::biometric::rolling_shutter::maximum_unambiguous_errors(&expected),
+            temporal_enabled: true,
+            temporal_capture_validated: true,
+            ..passing_witness()
+        }
+    }
+
+    #[test]
+    fn test_162_one_ordered_rotation_passes_including_wrap() {
+        let mut witness = temporal_witness(11);
+        witness.temporal_expected_phase = 0;
+        witness.temporal_phase_tolerance = 1;
+        let circuit = LivenessCheckCircuit::new(witness);
+        assert!(circuit.should_pass());
+        assert!(circuit.test_circuit().expect("satisfiable"));
+    }
+
+    #[test]
+    fn test_163_per_frame_realignments_fail_at_zero_errors() {
+        let mut witness = temporal_witness(0);
+        witness.temporal_max_symbol_errors = 0;
+        for frame in 0..3 {
+            for offset in 0..4 {
+                witness.temporal_observed_symbols[frame * 4 + offset] =
+                    witness.temporal_expected_symbols[(frame + offset) % TEMPORAL_SYMBOLS];
+            }
+        }
+        let circuit = LivenessCheckCircuit::new(witness);
+        assert_eq!(
+            circuit.first_failing_check().map(|f| f.check),
+            Some(LivenessCheck::TemporalSymbols)
+        );
+        assert!(!circuit.test_circuit().expect("satisfiable failure result"));
+    }
+
+    #[test]
+    fn test_164_frame_progression_is_exact_in_profile_v1() {
+        assert!(LivenessCheckCircuit::new(temporal_witness(0))
+            .test_circuit()
+            .expect("exact timing"));
+
+        for delta in [3, 5] {
+            let mut witness = temporal_witness(0);
+            witness.temporal_frame_tick_deltas[0] = delta;
+            let circuit = LivenessCheckCircuit::new(witness);
+            assert_eq!(
+                circuit.first_failing_check().map(|f| f.check),
+                Some(LivenessCheck::TemporalTiming)
+            );
+            assert!(!circuit.test_circuit().expect("satisfiable failure result"));
+        }
+
+        let mut invalid_policy = temporal_witness(0);
+        invalid_policy.temporal_frame_tick_tolerance = 1;
+        assert!(invalid_policy.recognise().is_err());
+        assert!(mock_verify_values(&invalid_policy.field_values()).is_err());
+    }
+
+    #[test]
+    fn test_165_symbol_error_budget_and_rotation_distance() {
+        let mut witness = temporal_witness(0);
+        let budget = witness.temporal_max_symbol_errors;
+        assert!(budget > 0, "fixed vector must permit a non-zero error budget");
+        for i in 0..budget as usize {
+            witness.temporal_observed_symbols[i] =
+                (witness.temporal_observed_symbols[i] + 1) % 4;
+        }
+        assert!(LivenessCheckCircuit::new(witness.clone()).should_pass());
+        assert!(LivenessCheckCircuit::new(witness.clone())
+            .test_circuit()
+            .expect("at-budget witness"));
+
+        witness.temporal_observed_symbols[budget as usize] =
+            (witness.temporal_observed_symbols[budget as usize] + 1) % 4;
+        assert!(!LivenessCheckCircuit::new(witness)
+            .test_circuit()
+            .expect("over-budget witness"));
+
+        let mut invalid_budget = temporal_witness(0);
+        invalid_budget.temporal_max_symbol_errors += 1;
+        assert!(!LivenessCheckCircuit::new(invalid_budget.clone()).should_pass());
+        assert!(invalid_budget.recognise().is_err());
+        assert!(mock_verify_values(&invalid_budget.field_values()).is_err());
+
+        let mut invalid_waveform = temporal_witness(0);
+        invalid_waveform.temporal_expected_symbols = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+        assert!(!LivenessCheckCircuit::new(invalid_waveform.clone()).should_pass());
+        assert!(invalid_waveform.recognise().is_err());
+        assert!(mock_verify_values(&invalid_waveform.field_values()).is_err());
+    }
+
+    #[test]
+    fn test_166_temporal_public_fields_are_digest_bound() {
+        let witness = temporal_witness(0);
+        let original = challenge_digest(&witness);
+
+        let mut mutations = Vec::new();
+        let mut changed = witness.clone();
+        changed.temporal_expected_symbols =
+            crate::biometric::rolling_shutter::derive_temporal_symbols(&[7; 32], &[9; 32])
+                .unwrap();
+        mutations.push(changed);
+        let mut changed = witness.clone();
+        changed.temporal_expected_phase = 1;
+        mutations.push(changed);
+        let mut changed = witness.clone();
+        changed.temporal_phase_tolerance = 1;
+        mutations.push(changed);
+        let mut changed = witness.clone();
+        changed.temporal_frame_tick_tolerance = 1;
+        mutations.push(changed);
+        let mut changed = witness.clone();
+        changed.temporal_max_symbol_errors = 0;
+        mutations.push(changed);
+        let mut changed = witness.clone();
+        changed.temporal_enabled = false;
+        mutations.push(changed);
+        let mut changed = witness.clone();
+        changed.temporal_capture_validated = false;
+        mutations.push(changed);
+        assert!(mutations.iter().all(|changed| challenge_digest(changed) != original));
+
+        let mut private = witness.clone();
+        private.temporal_observed_symbols.rotate_left(1);
+        private.temporal_initial_phase = 1;
+        private.temporal_frame_tick_deltas = [8, 9];
+        assert_eq!(challenge_digest(&private), original);
+
+        let mut changed = witness.field_values();
+        changed.temporal_expected_phase = 1;
+        assert!(mock_verify_values_with_digest(&changed, original).is_err());
+    }
+
+    #[test]
+    fn test_167_enable_and_capture_authority_gate() {
+        let legacy = passing_witness();
+        assert!(!legacy.temporal_enabled);
+        assert!(LivenessCheckCircuit::new(legacy)
+            .test_circuit()
+            .expect("disabled temporal relation"));
+
+        let mut unvalidated = temporal_witness(0);
+        unvalidated.temporal_capture_validated = false;
+        assert_eq!(
+            LivenessCheckCircuit::new(unvalidated.clone())
+                .first_failing_check()
+                .map(|failure| failure.check),
+            Some(LivenessCheck::TemporalCapture)
+        );
+        assert!(unvalidated.recognise().is_err());
+        assert!(mock_verify_values(&unvalidated.field_values()).is_err());
     }
 
     // -----------------------------------------------------------------
@@ -1580,7 +2324,11 @@ mod tests {
         builder.assigned_instances[0].push(digest);
         let result_value = *result.value();
         let digest_value = *digest.value();
-        assert_eq!(digest_value, challenge_digest(&witness), "in-circuit digest must match native");
+        assert_eq!(
+            digest_value,
+            challenge_digest(&witness),
+            "in-circuit digest must match native"
+        );
 
         let vk = keygen_vk(&params, &builder).expect("vk");
         let pk = keygen_pk(&params, vk.clone(), &builder).expect("pk");
