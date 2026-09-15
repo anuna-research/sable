@@ -1,4 +1,5 @@
 [package]
+publish = false # Security release hold; see docs/security/REMEDIATION-2026-09-14.md.
 name = "sable-core"
 version.workspace = true
 edition.workspace = true
@@ -10,9 +11,10 @@ description = "SABLE: Secure Attested Biometric Library for Edge - Core cryptogr
 [features]
 default = ["std"]
 std = []
-zk = ["ark-relations", "ark-groth16", "ark-snark"]
+# Withdrawn features deliberately fail compilation; see SBL-RT-004.
+zk = []
 halo2 = ["dep:halo2-base", "dep:halo2-ecc", "dep:halo2curves", "dep:snark-verifier-sdk"]
-mobile = ["bincode", "serde_json", "zk"]
+mobile = ["bincode", "serde_json"]
 # REQ-022: SIMD/NEON optimizations for 2x performance improvement
 simd = []
 neon = ["simd"]
@@ -27,13 +29,10 @@ ff = { workspace = true }
 ark-ff = { workspace = true }
 ark-ec = { workspace = true }
 ark-std = { workspace = true }
-ark-relations = { workspace = true, optional = true }
-ark-groth16 = { workspace = true, optional = true }
-ark-snark = { workspace = true, optional = true }
 ark-sponge = { workspace = true }
 ark-bls12-381 = { workspace = true }
 
-# Halo2 ecosystem (transparent setup ZK proofs)
+# Halo2 ecosystem (KZG backend; local research setup, not a transparent setup)
 halo2-base = { workspace = true, optional = true }
 halo2-ecc = { workspace = true, optional = true }
 halo2curves = { workspace = true, optional = true }
@@ -48,6 +47,7 @@ zeroize = { workspace = true }
 subtle = { workspace = true }
 x25519-dalek = { workspace = true }
 chacha20poly1305 = { workspace = true }
+ed25519-dalek = { version = "2.2", features = ["zeroize"] }
 
 # Serialization and error handling
 serde = { workspace = true }
@@ -59,6 +59,12 @@ thiserror = { workspace = true }
 heapless = { workspace = true }
 
 [dev-dependencies]
+webpki = { package = "rustls-webpki", version = "0.103", features = ["ring"] }
+rustls-pki-types = "1"
+rcgen = "0.14"
+x509-parser = "0.18"
+snow = { version = "0.10", default-features = false, features = ["default-resolver", "use-chacha20poly1305", "use-sha2", "use-curve25519", "use-getrandom", "risky-raw-split"] }
+hkdf = { workspace = true }
 criterion = { workspace = true }
 proptest = { workspace = true }
 hex-literal = "0.4"

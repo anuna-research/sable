@@ -1,5 +1,7 @@
 // Android Gradle build configuration for SABLE JNI library
 
+throw new GradleException("SABLE mobile packages are withdrawn (SBL-RT-004/008); no AAR may be built from this implementation.")
+
 android {
     compileSdkVersion 34
     buildToolsVersion "34.0.0"

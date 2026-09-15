@@ -2,6 +2,8 @@
 
 cmake_minimum_required(VERSION 3.18.1)
 
+message(FATAL_ERROR "SABLE mobile packages are withdrawn (SBL-RT-004/008).")
+
 project(sable_android)
 
 # Set C++ standard

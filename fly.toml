@@ -21,8 +21,8 @@ primary_region = "sjc"
 
   [http_service.concurrency]
     type = "requests"
-    soft_limit = 200
-    hard_limit = 250
+    soft_limit = 1
+    hard_limit = 4
 
 [[http_service.checks]]
   grace_period = "30s"

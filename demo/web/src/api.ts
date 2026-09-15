@@ -1,4 +1,17 @@
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
+let credential: string | null = null;
+
+/** Keep the operator-issued credential only in this page's memory. */
+export function setCredential(value: string): void {
+  if (!/^[0-9a-f]{64}$/.test(value)) throw new Error('Enter the 64-character credential issued by the demo operator.');
+  const url = new URL(API_BASE, window.location.href);
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) {
+    throw new Error('Credentials require HTTPS or a loopback development server.');
+  }
+  credential = value;
+}
+
+export function clearCredential(): void { credential = null; }
 
 export interface EnrollRequest {
   user_id: string;
@@ -15,7 +28,6 @@ export interface EnrollTimings {
 export interface EnrollResponse {
   session_id: string;
   commitment_hex: string;
-  feature_preview: number[];
   quality_score: number;
   timings: EnrollTimings;
 }
@@ -167,53 +179,6 @@ export interface HealthResponse {
   version: string;
 }
 
-// Fuzzy commitment types
-export interface FuzzyEnrollRequest {
-  user_id: string;
-  face_embedding?: number[];
-  error_threshold?: number;
-}
-
-export interface FuzzyEnrollTimings {
-  feature_generation_ms: number;
-  fuzzy_commitment_ms: number;
-  total_ms: number;
-}
-
-export interface FuzzyEnrollResponse {
-  session_id: string;
-  commitment_hex: string;
-  helper_data_hex: string;
-  quality_score: number;
-  timings: FuzzyEnrollTimings;
-}
-
-export interface FuzzyVerifyRequest {
-  session_id?: string;
-  helper_data_hex?: string;
-  face_embedding?: number[];
-}
-
-export interface FuzzyVerifyResponse {
-  matched: boolean;
-  commitment_hex?: string;
-  timing_ms: number;
-}
-
-export interface FuzzyCheckUniqueRequest {
-  face_embedding: number[];
-  existing_enrollments: string[];
-  error_threshold?: number;
-}
-
-export interface FuzzyCheckUniqueResponse {
-  is_unique: boolean;
-  matched_index?: number;
-  matched_commitment_hex?: string;
-  timing_ms: number;
-  checked_count: number;
-}
-
 class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -225,11 +190,14 @@ async function request<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
+  if (endpoint !== '/health' && !credential) throw new Error('A demo operator credential is required.');
   const response = await fetch(`${API_BASE}${endpoint}`, {
     ...options,
+    redirect: 'error',
     headers: {
       'Content-Type': 'application/json',
       ...options.headers,
+      ...(endpoint !== '/health' ? { Authorization: `Bearer ${credential}` } : {}),
     },
   });
 
@@ -281,24 +249,5 @@ export const api = {
     });
   },
 
-  fuzzyEnroll(data: FuzzyEnrollRequest): Promise<FuzzyEnrollResponse> {
-    return request('/fuzzy/enroll', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-  },
 
-  fuzzyVerify(data: FuzzyVerifyRequest): Promise<FuzzyVerifyResponse> {
-    return request('/fuzzy/verify', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-  },
-
-  fuzzyCheckUnique(data: FuzzyCheckUniqueRequest): Promise<FuzzyCheckUniqueResponse> {
-    return request('/fuzzy/check-unique', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-  },
 };

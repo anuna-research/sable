@@ -244,25 +244,29 @@ impl FaceVerificationProver {
     /// whose Hamming distance equals `distance`, then proves over them. The
     /// distance is still *computed in-circuit*, so it cannot be forged -- this
     /// is a test/back-compat shim over [`prove_with_embeddings`].
-    pub fn prove(&mut self, distance: u64, threshold: u64) -> Result<Proof> {
+    #[cfg(test)]
+    fn prove(&mut self, distance: u64, threshold: u64) -> Result<Proof> {
         self.prove_with_liveness(distance, threshold, None)
     }
 
     /// Like [`prove`](Self::prove), optionally including liveness. Synthesizes
     /// embeddings with the given Hamming `distance` and delegates to
     /// [`prove_with_embeddings`](Self::prove_with_embeddings).
-    pub fn prove_with_liveness(
+    #[cfg(test)]
+    fn prove_with_liveness(
         &mut self,
         distance: u64,
         threshold: u64,
         liveness: Option<LivenessWitness>,
     ) -> Result<Proof> {
         let (a, b) = embeddings_with_distance(self.embedding_dim, distance)?;
-        self.prove_with_embeddings(&a, &b, threshold, liveness)
+        self.prove_with_embeddings(&a, &b, threshold, Some(liveness.unwrap_or_else(LivenessWitness::dummy_pass)))
     }
 
     /// Generate a proof that `embedding_a` and `embedding_b` are within
-    /// `threshold` Hamming distance, optionally including liveness.
+    /// `threshold` Hamming distance. A liveness witness is mandatory; `None`
+    /// returns an error before key generation. The witness does not by itself
+    /// authenticate a camera or establish physical capture.
     ///
     /// The distance is computed IN-CIRCUIT from the two byte vectors, closing
     /// the trusted-distance soundness gap (a prover can no longer supply an
@@ -285,10 +289,10 @@ impl FaceVerificationProver {
             )));
         }
 
+        let liveness_witness = liveness.ok_or_else(|| SableError::InvalidInput("A liveness witness is required".into()))?;
+
         // Ensure we have a proving key
         let _ = self.ensure_proving_key()?;
-
-        let liveness_witness = liveness.unwrap_or_else(LivenessWitness::dummy_pass);
 
         // Build the combined circuit, computing the match distance in-circuit.
         let mut builder =
@@ -378,21 +382,26 @@ pub struct FaceVerificationVerifier<'a> {
 }
 
 impl<'a> FaceVerificationVerifier<'a> {
+    /// Verify an authentication proof against independently registered policy.
+    /// The caller supplies a trusted clock and consumes the challenge exactly once.
+    /// `now` is a snapshot: callers must recheck the challenge deadline after this
+    /// potentially expensive call before granting privileges. A monotonic deadline
+    /// must also be retained by the caller if wall-clock rollback is in scope.
+    pub fn verify_expected(&self, proof: &Proof, policy: &super::ExpectedPolicy, now: u64) -> Result<bool> {
+        policy.validate(proof, now)?;
+        self.verify(proof)
+    }
+
     /// Create a verifier from a prover (shares the same setup).
     pub fn from_prover(prover: &'a mut FaceVerificationProver) -> Result<Self> {
+        if prover.embedding_dim != DEFAULT_EMBEDDING_DIM || !prover.enforce_thermometer {
+            return Err(SableError::InvalidInput("Authentication requires the 512-byte thermometer circuit".into()));
+        }
         let vk = prover.verification_key()?;
         Ok(Self {
             params: prover.setup.params(),
             verification_key: vk,
         })
-    }
-
-    /// Create a verifier with explicit params and verification key.
-    pub fn new(params: &'a ParamsKZG<Bn256>, verification_key: VerifyingKey<G1Affine>) -> Self {
-        Self {
-            params,
-            verification_key,
-        }
     }
 
     /// Verify a proof.
@@ -404,7 +413,7 @@ impl<'a> FaceVerificationVerifier<'a> {
     /// * `Ok(true)` if verification passes and result is true (match)
     /// * `Ok(false)` if verification passes but result is false (no match)
     /// * `Err` if verification fails
-    pub fn verify(&self, proof: &Proof) -> Result<bool> {
+    fn verify(&self, proof: &Proof) -> Result<bool> {
         // Create transcript for verification
         let mut transcript =
             Blake2bRead::<_, G1Affine, Challenge255<_>>::init(&proof.proof_bytes[..]);
@@ -430,7 +439,8 @@ impl<'a> FaceVerificationVerifier<'a> {
     }
 
     /// Verify a proof and return the threshold used.
-    pub fn verify_with_threshold(&self, proof: &Proof) -> Result<(bool, u64)> {
+    #[cfg(test)]
+    fn verify_with_threshold(&self, proof: &Proof) -> Result<(bool, u64)> {
         let result = self.verify(proof)?;
 
         // Extract threshold (second public input)
@@ -441,7 +451,8 @@ impl<'a> FaceVerificationVerifier<'a> {
     }
 
     /// Verify a proof and return full details including liveness.
-    pub fn verify_full(&self, proof: &Proof) -> Result<VerificationDetails> {
+    #[cfg(test)]
+    fn verify_full(&self, proof: &Proof) -> Result<VerificationDetails> {
         let face_match = self.verify(proof)?;
 
         let threshold_bytes = proof.public_inputs[1].to_bytes();
@@ -482,7 +493,8 @@ impl<'a> FaceVerificationVerifier<'a> {
     /// valid proof that binds a *different* template than the registered one
     /// returns `Ok(false)` (authentication must fail): this is what stops a prover
     /// from matching against a template other than the one on file.
-    pub fn verify_bound(&self, proof: &Proof, registered_commitment: Fr) -> Result<bool> {
+    #[cfg(test)]
+    fn verify_bound(&self, proof: &Proof, registered_commitment: Fr) -> Result<bool> {
         let face_match = self.verify(proof)?;
         let commitment = proof.public_inputs.get(4).copied().unwrap_or(Fr::from(0u64));
         if commitment != registered_commitment {
@@ -494,6 +506,7 @@ impl<'a> FaceVerificationVerifier<'a> {
 
 /// Full verification result including face match and liveness status.
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub struct VerificationDetails {
     /// Whether face verification passed (distance <= threshold).
     pub face_match: bool,
@@ -516,6 +529,7 @@ pub struct VerificationDetails {
 /// exercise the in-circuit matcher from a scalar distance. `embedding_a` is all
 /// zeros; `embedding_b` has exactly `distance` bits set (whole 0xFF bytes plus a
 /// partial byte for the remainder).
+#[cfg(test)]
 fn embeddings_with_distance(dim: usize, distance: u64) -> Result<(Vec<u8>, Vec<u8>)> {
     let max = (dim as u64) * 8;
     if distance > max {
@@ -1110,7 +1124,7 @@ mod tests {
         // Prove a match against the enrolled template (live == enrolled -> distance 0).
         let mut prover = FaceVerificationProver::new();
         let proof = prover
-            .prove_with_embeddings(&enrolled, &enrolled, 2048, None)
+            .prove_with_embeddings(&enrolled, &enrolled, 2048, Some(LivenessWitness::dummy_pass()))
             .expect("proof should generate");
 
         // The proof's commitment must equal the natively-registered value: the

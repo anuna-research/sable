@@ -6,7 +6,12 @@
 use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
 
 #[cfg(feature = "halo2")]
+#[path = "../tests/halo2_fixtures.rs"]
+mod halo2_fixtures;
+
+#[cfg(feature = "halo2")]
 mod halo2_benches {
+    use super::halo2_fixtures::{SyntheticFixture, default_policy};
     use super::*;
     use sable_core::zk::halo2::{HelloCircuit, FaceVerificationProver, FaceVerificationVerifier};
 
@@ -87,10 +92,11 @@ mod halo2_benches {
         let mut prover = FaceVerificationProver::new();
         let proof = prover.prove(100, 200).expect("Proof generation should succeed");
         let verifier = FaceVerificationVerifier::from_prover(&mut prover).expect("Verifier creation should succeed");
+        let policy = default_policy(200);
 
         group.bench_function("verify", |b| {
             b.iter(|| {
-                verifier.verify(&proof).expect("Verification should succeed")
+                verifier.verify_expected(&proof, &policy, 0).expect("Verification should succeed")
             });
         });
 

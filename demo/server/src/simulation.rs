@@ -2,6 +2,7 @@ use sable_core::FEATURE_VECTOR_SIZE;
 
 /// Simulates biometric feature extraction from a palm scan.
 /// In production, this would come from actual biometric sensors.
+#[cfg(test)]
 pub fn generate_simulated_features(seed: u64) -> [f32; FEATURE_VECTOR_SIZE] {
     let mut features = [0.0f32; FEATURE_VECTOR_SIZE];
 
@@ -23,6 +24,7 @@ pub fn generate_simulated_features(seed: u64) -> [f32; FEATURE_VECTOR_SIZE] {
 
 /// Simulates a "live" biometric scan that's similar but not identical to enrolled features.
 /// Adds realistic noise to simulate sensor variance.
+#[cfg(test)]
 pub fn generate_similar_features(base_features: &[f32; FEATURE_VECTOR_SIZE], noise_level: f32) -> [f32; FEATURE_VECTOR_SIZE] {
     let mut features = *base_features;
 
@@ -45,6 +47,7 @@ pub fn generate_similar_features(base_features: &[f32; FEATURE_VECTOR_SIZE], noi
 
 /// Generates completely different features (for a different "user")
 #[allow(dead_code)]
+#[cfg(test)]
 pub fn generate_different_features(original_seed: u64) -> [f32; FEATURE_VECTOR_SIZE] {
     // Use a completely different seed
     generate_simulated_features(original_seed.wrapping_add(0xDEADBEEF12345678))
@@ -58,19 +61,6 @@ pub fn calculate_distance(a: &[f32; FEATURE_VECTOR_SIZE], b: &[f32; FEATURE_VECT
         .sum();
 
     (sum_sq / FEATURE_VECTOR_SIZE as f32).sqrt()
-}
-
-/// Quality score simulation (0.0 to 1.0)
-pub fn calculate_quality_score(features: &[f32; FEATURE_VECTOR_SIZE]) -> f32 {
-    // Simulate quality based on variance - real systems would analyze image clarity, etc.
-    let mean: f32 = features.iter().sum::<f32>() / FEATURE_VECTOR_SIZE as f32;
-    let variance: f32 = features.iter()
-        .map(|x| (x - mean).powi(2))
-        .sum::<f32>() / FEATURE_VECTOR_SIZE as f32;
-
-    // Higher variance = more distinctive features = higher quality
-    // Clamp to [0.7, 1.0] for demo purposes
-    (0.7 + variance.sqrt() * 0.1).min(1.0)
 }
 
 #[cfg(test)]

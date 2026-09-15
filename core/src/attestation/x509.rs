@@ -115,17 +115,11 @@ impl SigningKey {
 
     /// Get the public verifying key
     pub fn verifying_key(&self) -> VerifyingKey {
-        // Simple derivation: hash the secret key to get the public key
-        // In production, use proper Ed25519 key derivation
-        let mut hasher = Sha256::new();
-        hasher.update(&self.secret);
-        hasher.update(b"SABLE-VERIFYING-KEY");
-        let hash = hasher.finalize();
-
-        let mut public = [0u8; 32];
-        public.copy_from_slice(&hash[..32]);
-
-        VerifyingKey { public }
+        VerifyingKey {
+            public: ed25519_dalek::SigningKey::from_bytes(&self.secret)
+                .verifying_key()
+                .to_bytes(),
+        }
     }
 
     /// Sign a message
@@ -136,24 +130,10 @@ impl SigningKey {
     /// # Returns
     /// A 64-byte signature
     pub fn sign(&self, message: &[u8]) -> [u8; 64] {
-        // Simplified signature: HMAC-like construction
-        // In production, use proper Ed25519 signing
-        let mut hasher = Sha256::new();
-        hasher.update(&self.secret);
-        hasher.update(message);
-        let h1 = hasher.finalize();
-
-        let mut hasher2 = Sha256::new();
-        hasher2.update(&h1);
-        hasher2.update(&self.secret);
-        hasher2.update(b"SABLE-SIGNATURE");
-        let h2 = hasher2.finalize();
-
-        let mut signature = [0u8; 64];
-        signature[..32].copy_from_slice(&h1);
-        signature[32..].copy_from_slice(&h2);
-
-        signature
+        use ed25519_dalek::Signer;
+        ed25519_dalek::SigningKey::from_bytes(&self.secret)
+            .sign(message)
+            .to_bytes()
     }
 }
 
@@ -194,38 +174,11 @@ impl VerifyingKey {
     /// # Returns
     /// `true` if the signature is valid
     pub fn verify(&self, message: &[u8], signature: &[u8; 64]) -> bool {
-        // Reconstruct the expected signature
-        // This must match the signing algorithm in SigningKey::sign
-
-        // We need to verify using a challenge-response approach
-        // that doesn't require the secret key
-        let mut hasher = Sha256::new();
-        hasher.update(&signature[..32]);  // First hash from signature
-        hasher.update(b"SABLE-VERIFY");
-        hasher.update(&self.public);
-        hasher.update(message);
-        let _verification_hash = hasher.finalize();
-
-        // Verify the second part of the signature relates to the first
-        // by checking internal consistency
-        let mut check_hasher = Sha256::new();
-        check_hasher.update(&signature[..32]);
-        check_hasher.update(&signature[32..]);
-        check_hasher.update(b"SABLE-SIGNATURE-CHECK");
-        let check = check_hasher.finalize();
-
-        // Simple verification: check that signature parts are internally consistent
-        // and relate to the message
-        let mut msg_hasher = Sha256::new();
-        msg_hasher.update(message);
-        msg_hasher.update(&signature[..32]);
-        let msg_check = msg_hasher.finalize();
-
-        // Verify minimum entropy in signature
-        signature.iter().any(|&b| b != 0) &&
-            signature[..32] != signature[32..] &&
-            check[0] ^ check[31] != 0 &&
-            msg_check[0] != 0
+        let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(&self.public) else {
+            return false;
+        };
+        key.verify_strict(message, &ed25519_dalek::Signature::from_bytes(signature))
+            .is_ok()
     }
 }
 
@@ -941,6 +894,55 @@ mod tests {
             *byte = (i as u8).wrapping_mul(7).wrapping_add(42);
         }
         commitment
+    }
+
+    #[test]
+    fn ed25519_rfc8032_vector_and_negative_cases() {
+        use hex_literal::hex;
+        let key = SigningKey::from_bytes(&hex!(
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+        ));
+        assert_eq!(key.verifying_key().to_bytes(), hex!(
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+        ));
+        let signature = hex!(
+            "e5564300c360ac729086e2cc806e828a
+             84877f1eb8e5d974d873e06522490155
+             5fb8821590a33bacc61e39701cf9b46b
+             d25bf5f0595bbe24655141438e7a100b"
+        );
+        assert_eq!(key.sign(b""), signature);
+        assert!(key.verifying_key().verify(b"", &signature));
+        assert!(!key.verifying_key().verify(b"modified", &signature));
+        assert!(!SigningKey::from_bytes(&[7; 32]).verifying_key().verify(b"", &signature));
+        for candidate in 0u8..=255 {
+            let forged = std::array::from_fn(|i| candidate.wrapping_add(i as u8));
+            assert!(!key.verifying_key().verify(b"", &forged));
+        }
+        assert!(!VerifyingKey::from_bytes(&[0; 32]).verify(b"", &[0; 64]));
+    }
+
+    #[test]
+    fn modified_certificate_fields_and_forged_signatures_fail() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let cert = SableCertificate::new("subject", &sample_commitment(), &key).unwrap();
+        assert!(cert.verify(&key.verifying_key()).unwrap());
+        let mut changed = cert.clone();
+        changed.subject.push('x');
+        assert!(!changed.verify(&key.verifying_key()).unwrap());
+        let mut changed = cert.clone();
+        changed.not_after += 1;
+        assert!(!changed.verify(&key.verifying_key()).unwrap());
+        let mut bytes = cert.to_der();
+        let offset = bytes.len() - 64;
+        for candidate in 0u8..=255 {
+            for (i, byte) in bytes[offset..].iter_mut().enumerate() {
+                *byte = candidate.wrapping_add(i as u8);
+            }
+            let forged = SableCertificate::from_der(&bytes).unwrap();
+            assert!(!forged.verify(&key.verifying_key()).unwrap());
+            assert!(!forged.verify(&SigningKey::from_bytes(&[9; 32]).verifying_key()).unwrap());
+        }
     }
 
     #[test]

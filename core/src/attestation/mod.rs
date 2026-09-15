@@ -59,6 +59,11 @@ pub mod chain;
 pub mod truststore;
 pub mod x509;
 
+// Real certificate-validation replacement under test. This whole parent module
+// remains test-only until identity binding and trust lifecycle are complete.
+mod validated_x509;
+pub(crate) mod peer_binding;
+
 pub use chain::{
     ChainBuilder, ChainValidator, Crl, CrlEntry, OcspResponse, OcspStatus,
     RevocationReason, ValidationResult, certificate_fingerprint,

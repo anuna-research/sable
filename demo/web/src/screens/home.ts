@@ -1,22 +1,24 @@
+import { setCredential } from '../api';
+
 export function renderHomeScreen(_onStart: () => void): string {
   return `
     <div class="header">
       <h1>SABLE Demo</h1>
-      <p class="subtitle">Privacy-Preserving Biometric Authentication with Zero-Knowledge Proofs</p>
+      <p class="subtitle">Experimental ZK Matching with Centralized Biometric Processing</p>
     </div>
 
     <div class="card highlight">
       <h2>What is SABLE?</h2>
       <p>
-        SABLE (Secure Attested Biometric Library for Edge) enables biometric authentication
-        without exposing your actual biometric data. Using advanced cryptographic techniques,
-        you can prove you're the right person without revealing <em>anything</em> about your
-        biometric features.
+        This research demo uploads embeddings, captured frames and eye crops to the
+        server. The server generates proofs of matching and liveness relations.
+        Those proofs do not authenticate a camera or establish physical capture.
+        Enrollment records expire after 15 minutes. On-device proving is not implemented.
       </p>
     </div>
 
     <div class="card">
-      <h3>System Architecture</h3>
+      <h3>Intended Architecture (Not the Current Demo)</h3>
       <div class="arch-diagram">
         <div class="arch-gov-row">
           <div class="arch-node gov optional">
@@ -222,7 +224,7 @@ export function renderHomeScreen(_onStart: () => void): string {
 
     <div class="card">
       <h3>Liveness Detection</h3>
-      <p>SABLE makes it significantly harder to spoof authentication with a photo, video, or screen replay by using a challenge&ndash;response color-flash protocol. It is not foolproof &mdash; sophisticated 3D masks or real-time video manipulation may still defeat it &mdash; but it raises the bar well beyond static presentation attacks. The liveness result is proved inside the ZK circuit so the verifier never sees your reflectance data.</p>
+      <p>SABLE makes it significantly harder to spoof authentication with a photo, video, or screen replay by using a challenge&ndash;response color-flash protocol. It is not foolproof &mdash; sophisticated 3D masks or real-time video manipulation may still defeat it &mdash; but it raises the bar well beyond static presentation attacks. The circuit checks supplied reflectance values; the demo server receives the underlying images.</p>
 
       <div class="liveness-steps">
         <div class="liveness-step">
@@ -250,134 +252,21 @@ export function renderHomeScreen(_onStart: () => void): string {
           <div class="liveness-step-num">4</div>
           <div class="liveness-step-body">
             <div class="liveness-step-title">ZK proof of liveness</div>
-            <div class="liveness-step-detail">Quantised reflectance fingerprints enter the Halo2 circuit alongside the face match. The challenge nonces and every liveness threshold are bound into a Poseidon digest the verifier recomputes, so the proof answers this challenge only. The verifier learns a single <strong>liveness bit</strong> plus that digest &mdash; no raw reflectance data is ever exposed. The result screen shows that bit separately from the server's own check.</div>
+            <div class="liveness-step-detail">Quantised reflectance fingerprints enter the Halo2 circuit alongside the face match. The challenge nonces and every liveness threshold are bound into a Poseidon digest the verifier recomputes, so the proof answers this challenge only. The verifier learns a single <strong>liveness bit</strong> plus that digest &mdash; the proof itself omits raw reflectance data, but the server receives and processes it. The result screen shows that bit separately from the server's own check.</div>
           </div>
         </div>
       </div>
 
       <div class="privacy-note">
-        &#x1F6E1;&#xFE0F; Defeats static photos and simple replays. Not a substitute for depth sensors or infrared &mdash; but the ZK proof means the verifier never sees raw reflectance data.
+        Software-only camera checks are experimental presentation-attack risk reduction. A malicious prover can fabricate the witness; physical capture is not cryptographically established.
       </div>
     </div>
 
     <div class="card">
-      <h3>Anonymous Biometric Set Membership</h3>
-      <p>
-        Fuzzy commitments enable a powerful extension: prove you are <em>one of</em> N enrolled
-        people without revealing <em>which one</em>. A Merkle tree of commitments lets a ZK
-        proof demonstrate set membership anonymously.
-      </p>
-
-      <div class="arch-diagram">
-        <!-- Top: Issuer maintains the tree -->
-        <div class="arch-gov-row">
-          <div class="arch-node gov">
-            <div class="arch-node-icon">&#x1F3DB;&#xFE0F;</div>
-            <div class="arch-node-title">Issuer</div>
-            <div class="arch-node-items">
-              <span>Enroll citizens</span>
-              <span>Maintain Poseidon Merkle tree</span>
-              <span>Publish root (32 bytes)</span>
-              <span>Deduplicate via check-unique</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="arch-vert-arrow">
-          <div class="arch-vert-line"></div>
-          <div class="arch-vert-label">Merkle root + helper data</div>
-          <div class="arch-vert-tip"></div>
-        </div>
-
-        <!-- Bottom: Citizen proves, Verifier checks -->
-        <div class="arch-flow">
-          <div class="arch-node user">
-            <div class="arch-node-icon">&#x1F464;</div>
-            <div class="arch-node-title">Citizen</div>
-            <div class="arch-node-items">
-              <span>Capture face + liveness</span>
-              <span>FuzzyRep(w&prime;, h) &rarr; C</span>
-              <span>Stores helper data locally</span>
-            </div>
-          </div>
-
-          <div class="arch-arrow">
-            <div class="arch-arrow-line"></div>
-          </div>
-
-          <div class="arch-node engine">
-            <div class="arch-node-icon">&#x1F510;</div>
-            <div class="arch-node-title">ZK Circuit</div>
-            <div class="arch-node-items">
-              <span>Fuzzy commitment in ZK</span>
-              <span>Merkle path (27 hashes)</span>
-              <span>Liveness in ZK</span>
-              <span>Nullifier derivation</span>
-            </div>
-          </div>
-
-          <div class="arch-arrow">
-            <div class="arch-arrow-line"></div>
-          </div>
-
-          <div class="arch-node verifier">
-            <div class="arch-node-icon">&#x2705;</div>
-            <div class="arch-node-title">Verifier</div>
-            <div class="arch-node-items">
-              <span>Checks ~2KB proof in ~2ms</span>
-              <span>Sees only: root, nullifier</span>
-              <span>Cannot link sessions</span>
-              <span>Cannot identify citizen</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Proof contents breakdown -->
-      <h3 style="margin-top: 1.5rem;">Single ZK Proof Covers</h3>
-      <div class="timing-grid">
-        <div class="timing-item">
-          <div class="timing-value" style="font-size: 0.9rem;">Fuzzy Rep</div>
-          <div class="timing-label">Face matches an enrollment</div>
-        </div>
-        <div class="timing-item">
-          <div class="timing-value" style="font-size: 0.9rem;">Merkle</div>
-          <div class="timing-label">Enrollment is in the set</div>
-        </div>
-        <div class="timing-item">
-          <div class="timing-value" style="font-size: 0.9rem;">Liveness</div>
-          <div class="timing-label">Real face, not a photo</div>
-        </div>
-        <div class="timing-item">
-          <div class="timing-value" style="font-size: 0.9rem;">Nullifier</div>
-          <div class="timing-label">No double-use, unlinkable</div>
-        </div>
-      </div>
-
-      <!-- Scale numbers -->
-      <h3 style="margin-top: 1.5rem;">Scales to 100M+ Users</h3>
-      <div class="timing-grid">
-        <div class="timing-item">
-          <div class="timing-value">27</div>
-          <div class="timing-label">Merkle tree depth</div>
-        </div>
-        <div class="timing-item">
-          <div class="timing-value">~2 KB</div>
-          <div class="timing-label">Proof size (constant)</div>
-        </div>
-        <div class="timing-item">
-          <div class="timing-value">~500ms</div>
-          <div class="timing-label">Proof generation</div>
-        </div>
-        <div class="timing-item">
-          <div class="timing-value">~2ms</div>
-          <div class="timing-label">Verification (constant)</div>
-        </div>
-      </div>
-
-      <div class="privacy-note">
-        &#x1F6E1;&#xFE0F; The verifier learns only that the prover is <em>some</em> enrolled member &mdash; not which one. Biometrics, helper data, commitment, and tree position all stay private.
-      </div>
+      <h3>Deduplication unavailable</h3>
+      <p>Deterministic biometric commitments and anonymous set membership are
+      unavailable. Public helper data can enable offline biometric guessing and
+      matching records across services.</p>
     </div>
 
     <div class="card">
@@ -403,6 +292,10 @@ export function renderHomeScreen(_onStart: () => void): string {
     </div>
 
     <div style="text-align: center; margin-top: 2rem;">
+      <label for="demo-credential">Operator-issued demo credential</label>
+      <input id="demo-credential" type="password" autocomplete="off" spellcheck="false" maxlength="64" />
+      <p>The credential stays in this page's memory. Reloading or restarting clears it.</p>
+      <p id="credential-error" role="alert"></p>
       <button class="btn btn-primary" id="start-demo" style="padding: 1rem 2rem; font-size: 1.125rem;">
         Start Interactive Demo
       </button>
@@ -411,5 +304,15 @@ export function renderHomeScreen(_onStart: () => void): string {
 }
 
 export function attachHomeHandlers(onStart: () => void): void {
-  document.getElementById('start-demo')?.addEventListener('click', onStart);
+  document.getElementById('start-demo')?.addEventListener('click', () => {
+    const input = document.getElementById('demo-credential') as HTMLInputElement | null;
+    try {
+      setCredential(input?.value.trim() || '');
+      if (input) input.value = '';
+      onStart();
+    } catch (error) {
+      const message = document.getElementById('credential-error');
+      if (message) message.textContent = error instanceof Error ? error.message : 'Invalid credential';
+    }
+  });
 }

@@ -1,8 +1,31 @@
 //! # SABLE - Secure Attested Biometric Library for Edge
 //!
-//! SABLE provides privacy-preserving biometric verification using zero-knowledge proofs.
-//! It enables authentication where biometric data never leaves the user's device while
-//! still providing cryptographic proof of identity.
+//! # Withdrawn APIs
+//!
+//! The legacy Groth16 circuit and mobile FFI are unavailable under every build
+//! configuration (SBL-RT-004/008). Historical descriptions below are not support
+//! claims. Reintroduction requires reviewed curve gadgets and adversarial tests.
+//!
+//! ```compile_fail
+//! use sable_core::crypto::groth16::SableGroth16;
+//! ```
+//!
+//! ```compile_fail
+//! use sable_core::mobile::MobileSable;
+//! ```
+//!
+//! Legacy certificate, chain and trust-store APIs are also quarantined pending
+//! real X.509 and authenticated revocation validation (SBL-RT-001).
+//!
+//! ```compile_fail
+//! use sable_core::attestation::ChainValidator;
+//! ```
+//!
+//! SABLE researches biometric relations using zero-knowledge proofs. The browser
+//! demo sends embeddings and images to a server for processing and proving; it
+//! does not provide on-device-only privacy or authenticated physical capture.
+//! A valid circuit relation is not a government identity or presence credential.
+//! Security remediation is incomplete; this library is not production approved.
 //!
 //! ## Quick Start
 //!
@@ -86,6 +109,9 @@
 #![deny(missing_docs, unsafe_code)]
 #![warn(clippy::all, clippy::pedantic)]
 
+// Keep legacy-format regression tests, but never export the custom certificate
+// format, unsigned revocation objects or trust store in a distributable library.
+#[cfg(test)]
 pub mod attestation;
 pub mod crypto;
 pub mod error;
@@ -93,8 +119,14 @@ pub mod p2p;
 pub mod types;
 pub mod zk;
 
-#[cfg(feature = "mobile")]
-pub mod mobile;
+// Exercise the withdrawn C wrapper with a rejecting backend; no mobile/FFI
+// symbol is exported by normal library builds.
+#[cfg(test)]
+#[path = "mobile/ffi_test_harness.rs"]
+mod ffi_test_harness;
+
+#[cfg(any(feature = "zk", feature = "mobile"))]
+compile_error!("The legacy Groth16 and mobile APIs are withdrawn (SBL-RT-004/008). Use the reviewed replacement only after its release gates are met.");
 /// Biometric processing module for palm vein and print feature extraction.
 ///
 /// This module provides:
@@ -102,13 +134,6 @@ pub mod mobile;
 /// - Multi-modal fusion (vein + print)
 /// - Constant-time distance calculations for secure biometric matching (REQ-004)
 pub mod biometric;
-
-// FFI requires unsafe operations, so we conditionally allow it
-#[cfg(feature = "mobile")]
-mod mobile_ffi {
-    #![allow(unsafe_code)]
-    pub use crate::mobile::ffi::*;
-}
 
 // Re-export commonly used types
 pub use error::{Result, SableError};

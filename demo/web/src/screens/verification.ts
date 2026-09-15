@@ -122,8 +122,8 @@ export function renderVerificationScreen(
   const extraProven: string[] = [];
   const extraPrivate: string[] = [];
   if (proof?.liveness_proved_in_zk) {
-    extraProven.push('Face reflects spatially structured light consistent with 3D geometry (in circuit)');
-    extraPrivate.push('Per-region facial reflectance signals (proven without revealing)');
+    extraProven.push('Supplied reflectance values satisfy the circuit; this does not authenticate a camera or prove physical capture');
+    extraPrivate.push('Reflectance values are hidden by the proof, but processed by the demo server');
   } else if (proof?.color_challenge_passed != null) {
     extraProven.push('Server-side spatial reflectance check only; the proof\'s liveness bit is 0');
     extraPrivate.push('Per-region reflectance signals');
@@ -133,8 +133,9 @@ export function renderVerificationScreen(
     <div class="card">
       <h2>Step 3: Verification</h2>
       <p>
-        The verifier checks the zero-knowledge proof. If valid, they learn only that
-        authentication succeeded - nothing about your actual biometric data.
+        The server checks the proof against its challenge and enrollment policy.
+        This same server already received the biometric inputs to generate the proof.
+        A passing circuit does not establish physical capture or identity.
       </p>
 
       ${!result ? `
@@ -225,7 +226,7 @@ export function renderVerificationScreen(
       </div>
 
       <div class="card">
-        <h3>What Stayed Private (Hidden)</h3>
+        <h3>Proof Witness Privacy (Not Server Privacy)</h3>
         <ul class="proof-list">
           ${[...proof.what_stayed_private, ...extraPrivate].map(item => `
             <li class="private">

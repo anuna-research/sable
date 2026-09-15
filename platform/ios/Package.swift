@@ -3,6 +3,8 @@
 
 import PackageDescription
 
+fatalError("SABLE mobile packages are withdrawn (SBL-RT-004/008); no Swift package may be built from this implementation.")
+
 let package = Package(
     name: "SABLE",
     platforms: [

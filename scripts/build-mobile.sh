@@ -4,6 +4,9 @@
 
 set -e
 
+echo "SABLE mobile packages are withdrawn (SBL-RT-004/008). See docs/security/REMEDIATION-2026-09-14.md." >&2
+exit 1
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'

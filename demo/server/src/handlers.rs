@@ -3,8 +3,11 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
     Json,
+    Extension,
 };
 use serde::{Deserialize, Serialize};
+use crate::auth::Principal;
+use crate::verification_policy::PendingVerification;
 // Note: PalmProcessor is available for production use with proper biometric sensors
 // For webcam demo, we use image-based feature extraction instead
 use sable_core::biometric::screen_flash::{ScreenFlashExtractor, ScreenFlashThresholds};
@@ -27,10 +30,6 @@ use sable_core::zk::halo2::{
     challenge_digest as compute_challenge_digest,
 };
 
-use crate::simulation::{
-    calculate_distance, calculate_quality_score, generate_similar_features,
-    generate_simulated_features,
-};
 use crate::flash_challenge::{
     compute_liveness_evidence, crop_face_region, derive_flash_pattern, verify_client_commitment,
     verify_spatial_flash,
@@ -46,7 +45,8 @@ const FEATURE_VECTOR_SIZE: usize = 512;
 
 #[derive(Debug, Deserialize)]
 pub struct EnrollRequest {
-    /// User identifier (for demo purposes)
+    /// Display identifier only; the authenticated principal owns the enrollment.
+    #[allow(dead_code)]
     pub user_id: String,
     /// Face embedding from Human library (1024-dimensional)
     pub face_embedding: Option<Vec<f64>>,
@@ -56,7 +56,6 @@ pub struct EnrollRequest {
 pub struct EnrollResponse {
     pub session_id: String,
     pub commitment_hex: String,
-    pub feature_preview: Vec<f32>,
     pub quality_score: f32,
     pub timings: EnrollTimings,
 }
@@ -70,22 +69,19 @@ pub struct EnrollTimings {
 }
 
 pub async fn enroll(
+    Extension(principal): Extension<Principal>,
     State(state): State<AppState>,
     Json(req): Json<EnrollRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let total_start = Instant::now();
 
-    // Generate biometric features - either from face embedding or simulated
+    // Enrollment requires captured input; identifiers cannot synthesize a template.
     let feature_start = Instant::now();
     let (features, quality_score) = if let Some(embedding) = &req.face_embedding {
         // Convert 1024-dim face embedding to 512 ZK-compatible features
         convert_face_embedding_to_features(embedding)?
     } else {
-        // Fallback to simulation for backwards compatibility
-        let seed = hash_string_to_u64(&req.user_id);
-        let features = generate_simulated_features(seed);
-        let quality = calculate_quality_score(&features);
-        (features, quality)
+        return Err(bad_liveness_input("face_embedding is required for enrollment".into()));
     };
     let feature_time = feature_start.elapsed();
 
@@ -131,9 +127,6 @@ pub async fn enroll(
     let session_id = uuid::Uuid::new_v4().to_string();
     let commitment_bytes = commitment.to_bytes();
 
-    // Extract salt bytes from opening (for demo purposes - normally kept secret)
-    let salt_bytes = scalar_to_bytes(&opening.randomness);
-
     // Create the matcher template for Halo2 ZK proofs using the THERMOMETER
     // (ordinal) encoding: byte-Hamming distance then equals L1 distance between
     // quantization levels, recovering the accuracy that binary Hamming discards.
@@ -148,24 +141,17 @@ pub async fn enroll(
 
     let session = EnrollmentSession {
         session_id: session_id.clone(),
-        enrollment_mode: crate::state::EnrollmentMode::Pedersen,
-        commitment,
         commitment_bytes,
-        features,
-        face_embedding: req.face_embedding.clone(),
+        face_embedding: req.face_embedding.ok_or_else(|| bad_liveness_input("face_embedding is required".into()))?,
         quantized_embedding,
         template_commitment,
-        salt_bytes,
         created_at: Instant::now(),
-        fuzzy_helper_data: None,
-        fuzzy_commitment_hash: None,
     };
-    state.store_session(session);
+    state.store_session(&principal, session).map_err(storage_unavailable)?;
 
     Ok(Json(EnrollResponse {
         session_id,
         commitment_hex: hex::encode(commitment_bytes),
-        feature_preview: features[..10].to_vec(), // First 10 features for visualization
         quality_score,
         timings: EnrollTimings {
             feature_generation_ms: feature_time.as_secs_f64() * 1000.0,
@@ -197,11 +183,14 @@ pub struct ChallengeResponse {
 }
 
 pub async fn auth_challenge(
+    Extension(principal): Extension<Principal>,
     State(state): State<AppState>,
     Json(req): Json<ChallengeRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    require_nonce_hex(req.client_commitment.as_deref(), "client_commitment")
+        .map_err(bad_liveness_input)?;
     // Verify session exists
-    let session = state.get_session(&req.session_id).ok_or_else(|| {
+    let session = state.get_session(&principal, &req.session_id).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -238,7 +227,7 @@ pub async fn auth_challenge(
         created_at: Instant::now(),
     };
 
-    state.store_challenge(challenge);
+    state.store_challenge(&principal, challenge).map_err(storage_unavailable)?;
 
     Ok(Json(ChallengeResponse {
         challenge_id,
@@ -254,7 +243,7 @@ pub async fn auth_challenge(
 #[derive(Debug, Deserialize)]
 pub struct ProveRequest {
     pub challenge_id: String,
-    /// Noise level for simulated "live" scan (0.0 to 1.0) - used only if no embedding
+    /// Obsolete simulation field. Any supplied value is rejected.
     pub noise_level: Option<f32>,
     /// Face embedding from Human library (1024-dimensional) for live scan
     pub face_embedding: Option<Vec<f64>>,
@@ -447,15 +436,17 @@ pub struct ProveTimings {
 }
 
 pub async fn auth_prove(
+    Extension(principal): Extension<Principal>,
     State(state): State<AppState>,
     Json(req): Json<ProveRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let total_start = Instant::now();
+    require_capture_input(&req).map_err(bad_liveness_input)?;
     let corneal_tolerances = corneal_tolerances_from_env();
     require_corneal_evidence(&req, corneal_tolerances.is_some()).map_err(bad_liveness_input)?;
 
     // Get and validate challenge
-    let challenge = state.remove_challenge(&req.challenge_id).ok_or_else(|| {
+    let challenge = state.remove_challenge(&principal, &req.challenge_id).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -464,10 +455,13 @@ pub async fn auth_prove(
         )
     })?;
 
+    require_nonce_hex(challenge.client_commitment.as_deref(), "client_commitment")
+        .map_err(bad_liveness_input)?;
+
     // Check challenge hasn't expired (30 second window)
-    if challenge.created_at.elapsed().as_secs() > 30 {
+    if challenge.created_at.elapsed() >= std::time::Duration::from_secs(30) {
         // Clear any pending liveness tied to this challenge.
-        let _ = state.take_liveness_result(&challenge.challenge_id);
+        let _ = state.take_liveness_result(&principal, &challenge.challenge_id);
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -477,7 +471,7 @@ pub async fn auth_prove(
     }
 
     // Get enrollment session
-    let session = state.get_session(&challenge.session_id).ok_or_else(|| {
+    let session = state.get_session(&principal, &challenge.session_id).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -486,58 +480,26 @@ pub async fn auth_prove(
         )
     })?;
 
-    // Extract features from live face scan or simulate
+    // Only caller-supplied capture input may produce a proof.
     let scan_start = Instant::now();
-    let (live_features, quality_score, live_embedding) = if let Some(embedding) = &req.face_embedding {
-        // Convert 1024-dim face embedding to 512 ZK-compatible features
-        let (features, quality) = convert_face_embedding_to_features(embedding)?;
-        (features, quality, Some(embedding.clone()))
-    } else {
-        // Fallback to simulation
-        let noise_level = req.noise_level.unwrap_or(0.05);
-        let features = generate_similar_features(&session.features, noise_level);
-        let quality = calculate_quality_score(&features);
-        (features, quality, None)
-    };
+    let live_embedding = req.face_embedding.as_ref()
+        .ok_or_else(|| bad_liveness_input("face_embedding is required".into()))?;
+    let (live_features, quality_score) = convert_face_embedding_to_features(live_embedding)?;
     let scan_time = scan_start.elapsed();
 
-    // Calculate distance using cosine similarity on original embeddings (if available)
-    // This is much more accurate than Euclidean distance on converted features
+    // Both embeddings are mandatory; there is no simulated-distance fallback.
     let distance_start = Instant::now();
-    let distance = match (&session.face_embedding, &live_embedding) {
-        (Some(enrolled), Some(live)) => {
-            // Cosine distance = 1 - cosine_similarity
-            let cosine_sim = cosine_similarity(enrolled, live);
-            let dist = 1.0 - cosine_sim;
-            tracing::info!(
-                "Face comparison: cosine_similarity={:.4}, distance={:.4}",
-                cosine_sim, dist
-            );
-            dist as f32
-        }
-        _ => {
-            // Fallback to Euclidean distance on 512-dim features (for simulated data)
-            calculate_distance(&session.features, &live_features)
-        }
-    };
+    let distance = (1.0 - cosine_similarity(&session.face_embedding, live_embedding)) as f32;
     let distance_time = distance_start.elapsed();
 
     // Check if face matches (similarity threshold)
     // Distance < 0.5 means similarity > 50% (match)
     const MATCH_THRESHOLD: f32 = 0.5;
     if distance >= MATCH_THRESHOLD {
-        let similarity = (1.0 - distance) * 100.0;
-        tracing::warn!(
-            "Face match FAILED: similarity={:.1}% (threshold: 50%)",
-            similarity
-        );
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(ErrorResponse {
-                error: format!(
-                    "Face does not match enrolled template. Similarity: {:.1}% (required: >50%)",
-                    similarity
-                ),
+                error: "Face does not match enrolled template".into(),
             }),
         ));
     }
@@ -560,14 +522,10 @@ pub async fn auth_prove(
     let threshold_config = ThresholdConfig::new(session.quantized_embedding.len(), 0.5);
     let threshold = threshold_config.max_hamming_distance();
 
-    tracing::info!(
-        "Halo2 ZK: Hamming distance={}, threshold={}, will_pass={}",
-        hamming_dist, threshold, hamming_dist <= threshold
-    );
 
     // Consume challenge-bound liveness result (single-use).
     let mut liveness_passed = state
-        .take_liveness_result(&challenge.challenge_id)
+        .take_liveness_result(&principal, &challenge.challenge_id)
         .map(|r| r.passed);
 
     // ========================================================================
@@ -643,7 +601,6 @@ pub async fn auth_prove(
                 ));
             }
 
-            tracing::info!("Client commitment verified successfully");
         }
 
         // c. Recompute pattern = derive_flash_pattern(&c_nonce_32, &challenge.nonce)
@@ -695,41 +652,11 @@ pub async fn auth_prove(
                 )
             })?;
 
-        for score in &spatial_result.region_scores {
-            tracing::info!(
-                "Spatial round {}: tl={:.4}, tr={:.4}, bl={:.4}, br={:.4}, spatial_diff={:.4}",
-                score.round, score.tl_score, score.tr_score, score.bl_score, score.br_score, score.spatial_diff_score,
-            );
-        }
-        tracing::info!(
-            "Spatial color verification: passed={}, overall_spatial_score={:.4}, rounds={}",
-            spatial_result.passed,
-            spatial_result.overall_spatial_score,
-            spatial_result.region_scores.len(),
-        );
 
         // g. Compute delta fingerprints for ZK liveness proof
-        let (delta_fps, expected_fps, raw_deltas) =
+        let (delta_fps, expected_fps, _raw_deltas) =
             compute_liveness_evidence(&baseline, &flash_frames_decoded, &pattern);
 
-        tracing::info!(
-            "Liveness fingerprints: delta={:?}, expected={:?}",
-            delta_fps, expected_fps
-        );
-        // BUG-003 / EXP-003: the raw mean RGB deltas the fingerprints came from,
-        // so the magnitude scale can be calibrated from real captures.
-        for r in 0..3 {
-            let q = |i: usize| {
-                let d = raw_deltas[r * 4 + i];
-                format!("[{:.1},{:.1},{:.1}]", d[0], d[1], d[2])
-            };
-            tracing::info!(
-                round = r,
-                tl = %q(0), tr = %q(1), bl = %q(2), br = %q(3),
-                magnitude_scale = crate::flash_challenge::magnitude_scale(),
-                "raw quadrant deltas"
-            );
-        }
         let (color_threshold, spatial_threshold, min_magnitude) = liveness_thresholds_from_env();
 
         // g2. Photometric convexity evidence per round (SPEC-006 REQ-111..113,
@@ -763,22 +690,15 @@ pub async fn auth_prove(
                     // A 4×4 grid has 16 patches; the witness field admits ≤ 64.
                     responding_patches[r] = pr.responding_patches.min(64) as u8;
                     convexity_scores[r] = pr.convexity_score;
-                    tracing::info!(
-                        round = r,
-                        responding_patches = pr.responding_patches,
-                        convexity_score = pr.convexity_score,
-                        "photometric round"
-                    );
                     photometric_report.push(PhotometricRoundResponse {
                         round: r,
                         responding_patches: responding_patches[r],
                         convexity_score: pr.convexity_score,
                     });
                 }
-                Err(e) => {
+                Err(_e) => {
                     // Observational only while the floors are zero: leave the
                     // round at zero rather than failing the request.
-                    tracing::warn!(round = r, error = %e, "photometric extraction failed");
                 }
             }
         }
@@ -833,14 +753,6 @@ pub async fn auth_prove(
                         corneal::agrees(observed[1], expected, ratio, mag),
                     ]
                 });
-                tracing::info!(
-                    round = r,
-                    left = ?fingerprint::unpack(observed[0]),
-                    right = ?fingerprint::unpack(observed[1]),
-                    expected = ?fingerprint::unpack(expected),
-                    agrees = ?agrees,
-                    "corneal round"
-                );
                 report.push(CornealRoundResponse {
                     round: r,
                     left_glint: observed[0].into(),
@@ -898,14 +810,8 @@ pub async fn auth_prove(
 
         // OBS-085: which check family the native pre-check fails, without values.
         match LivenessCheckCircuit::new(witness.clone()).first_failing_check() {
-            None => tracing::info!(obs = "OBS-085", outcome = "pass", "liveness pre-check"),
+            None => (),
             Some(f) => {
-                tracing::warn!(
-                    obs = "OBS-085",
-                    check = ?f.check,
-                    round = f.round,
-                    "liveness pre-check failed"
-                );
                 liveness_failing_check = Some(LivenessFailureResponse {
                     check: format!("{:?}", f.check),
                     round: f.round,
@@ -922,10 +828,7 @@ pub async fn auth_prove(
             return Err((
                 StatusCode::UNAUTHORIZED,
                 Json(ErrorResponse {
-                    error: format!(
-                        "Spatial color challenge failed: overall_spatial_score={:.4}",
-                        spatial_result.overall_spatial_score,
-                    ),
+                    error: "Spatial color challenge failed".into(),
                 }),
             ));
         }
@@ -956,12 +859,27 @@ pub async fn auth_prove(
     }
 
     // ========================================================================
-    // Generate Halo2 ZK Proof (face match + optional liveness)
+    // Generate Halo2 ZK Proof (face match + mandatory liveness)
     // ========================================================================
     let proof_start = Instant::now();
+    if liveness_witness.is_none() || color_challenge_passed != Some(true) {
+        return Err(bad_liveness_input("A validated liveness transcript is required".into()));
+    }
+    let now = unix_seconds().map_err(bad_liveness_input)?;
+    let policy = PendingVerification::new(sable_core::zk::halo2::ExpectedPolicy {
+        registered_template: session.template_commitment,
+        threshold,
+        challenge_digest: compute_challenge_digest(liveness_witness.as_ref().ok_or_else(|| bad_liveness_input("Missing witness".into()))?),
+        required_liveness: true,
+        circuit_id: sable_core::zk::halo2::AUTH_CIRCUIT_V1.into(),
+        expires_at: now.saturating_add(30).saturating_sub(challenge.created_at.elapsed().as_secs()),
+    }, challenge.created_at).map_err(bad_liveness_input)?;
 
     let (proof_bytes, halo2_result, liveness_proved_in_zk, proof_challenge_digest, proof_commitment) = {
         let mut prover = state.halo2_prover.write();
+        if !policy.is_current(unix_seconds().map_err(bad_liveness_input)?, Instant::now()) {
+            return Err(bad_liveness_input("Verification policy expired".into()));
+        }
         // Distance is computed IN-CIRCUIT from the two embeddings (the prover no
         // longer trusts a precomputed scalar). `hamming_dist` is retained only
         // for logging and the response; the proof's public result is authoritative.
@@ -977,9 +895,6 @@ pub async fn auth_prove(
                 // enrolled bytes), but enforcing it makes the soundness property
                 // explicit and would catch any template/keys mismatch.
                 let template_bound = proof.commitment == session.template_commitment;
-                if !template_bound {
-                    tracing::warn!("Halo2 proof commitment does not match registered template");
-                }
                 let result = template_bound && hamming_dist <= threshold;
                 let liveness_zk = proof.liveness_passed;
                 (proof.proof_bytes, result, liveness_zk, proof.challenge_digest, proof.commitment)
@@ -997,42 +912,26 @@ pub async fn auth_prove(
 
     let proof_time = proof_start.elapsed();
 
-    tracing::info!(
-        "Halo2 proof generated: face_match={}, liveness_in_zk={}, challenge_digest_bound=true, time={:.2}ms, size={}B",
-        halo2_result, liveness_proved_in_zk,
-        proof_time.as_secs_f64() * 1000.0, proof_bytes.len()
-    );
 
     // If Halo2 says no match, return error
     if !halo2_result {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(ErrorResponse {
-                error: format!(
-                    "ZK proof: Face does not match. Hamming distance {} > threshold {}",
-                    hamming_dist, threshold
-                ),
+                error: "Face does not match enrolled template".into(),
             }),
         ));
     }
 
-    // Public inputs from the proof
-    let (digest_hex, template_commitment_hex) = {
+    state.store_verification_policy(&principal, challenge.challenge_id.clone(), policy, unix_seconds().map_err(bad_liveness_input)?)
+        .map_err(bad_liveness_input)?;
+
+    // Canonical wire encoding matches the circuit's five public instances.
+    let public_inputs = {
         use ff::PrimeField;
-        (
-            hex::encode(proof_challenge_digest.to_repr()),
-            hex::encode(proof_commitment.to_repr()),
-        )
+        [Halo2Fr::from(1), Halo2Fr::from(threshold), Halo2Fr::from(u64::from(liveness_proved_in_zk)), proof_challenge_digest, proof_commitment]
+            .iter().map(|value| hex::encode(value.to_repr())).collect()
     };
-    let public_inputs = vec![
-        hex::encode(session.commitment_bytes),
-        hex::encode(challenge.nonce),
-        format!("{:016x}", threshold), // Threshold used
-        format!("{}", if halo2_result { "1" } else { "0" }), // Result: 1=match, 0=no match
-        format!("{}", if liveness_proved_in_zk { "1" } else { "0" }), // Liveness result
-        digest_hex, // Challenge digest (Fr field element, for verification)
-        template_commitment_hex, // Poseidon commitment to enrolled template (Fr, index 6)
-    ];
 
     let total_time = total_start.elapsed();
 
@@ -1091,14 +990,14 @@ pub async fn auth_prove(
             let mut private = vec![
                 "The live embedding and the enrolled template (512 quantised bytes each)".to_string(),
                 "The exact Hamming distance (only that it is within the threshold)".to_string(),
-                "Any identifying information about the biometric pattern".to_string(),
+                "These are private inputs to the proof, but the demo server receives and processes them".to_string(),
             ];
             if color_challenge_passed.is_some() {
                 private.push("The twelve reflected-colour fingerprints (one per screen quadrant per round)".to_string());
                 private.push("Per-round patch coverage, convexity scores and corneal glint fingerprints (private witnesses)".to_string());
             }
             if liveness_passed.is_some() {
-                private.push("The captured frames never leave the prover; only derived fingerprints enter the witness".to_string());
+                private.push("Captured frames and eye crops are uploaded to the demo server; they are not on-device private".to_string());
             }
             private
         },
@@ -1140,12 +1039,16 @@ pub struct VerificationDetails {
 }
 
 pub async fn verify(
+    Extension(principal): Extension<Principal>,
     State(state): State<AppState>,
     Json(req): Json<VerifyRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let start = Instant::now();
 
     // Validate and decode proof
+    if req.public_inputs_hex.len() != 5 || req.proof_hex.len() > 20 * 1024 {
+        return Err(bad_liveness_input("Invalid proof or public input count".into()));
+    }
     let proof_bytes = hex::decode(&req.proof_hex).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -1155,104 +1058,54 @@ pub async fn verify(
         )
     })?;
 
-    // Parse public inputs to reconstruct the Proof struct
-    // Public inputs format: [commitment, nonce, threshold, result]
-    let threshold = if req.public_inputs_hex.len() >= 3 {
-        u64::from_str_radix(req.public_inputs_hex[2].trim_start_matches("0x"), 16).unwrap_or(2048)
-    } else {
-        2048 // Default threshold for 512 bytes at 50%
-    };
-
-    let result_val = if req.public_inputs_hex.len() >= 4 {
-        req.public_inputs_hex[3].parse::<u64>().unwrap_or(1)
-    } else {
-        1
-    };
-
-    // Parse liveness result from public inputs (third field, if present)
-    let liveness_val = if req.public_inputs_hex.len() >= 5 {
-        req.public_inputs_hex[4].parse::<u64>().unwrap_or(1)
-    } else {
-        1 // backwards compatible: old proofs default to liveness pass
-    };
-
-    // Parse challenge digest from public inputs (index 5), or fall back to dummy.
-    // In production, the verifier would independently compute this from HKDF parameters.
-    let digest_val = if req.public_inputs_hex.len() >= 6 {
-        let digest_bytes = hex::decode(&req.public_inputs_hex[5]).unwrap_or_default();
-        if digest_bytes.len() == 32 {
-            use ff::PrimeField;
-            let mut repr = <Halo2Fr as PrimeField>::Repr::default();
-            repr.as_mut().copy_from_slice(&digest_bytes);
-            Halo2Fr::from_repr(repr).unwrap_or_else(|| compute_challenge_digest(&LivenessWitness::dummy_pass()))
-        } else {
-            compute_challenge_digest(&LivenessWitness::dummy_pass())
-        }
-    } else {
-        compute_challenge_digest(&LivenessWitness::dummy_pass())
-    };
-
-    // Parse enrolled-template commitment (index 6), or default to zero. The
-    // circuit exposes it as the fifth public input; verification requires the
-    // same value the proof was generated with.
-    let commitment_val = if req.public_inputs_hex.len() >= 7 {
-        let bytes = hex::decode(&req.public_inputs_hex[6]).unwrap_or_default();
-        if bytes.len() == 32 {
-            use ff::PrimeField;
-            let mut repr = <Halo2Fr as PrimeField>::Repr::default();
-            repr.as_mut().copy_from_slice(&bytes);
-            Halo2Fr::from_repr(repr).unwrap_or(Halo2Fr::from(0u64))
-        } else {
-            Halo2Fr::from(0u64)
-        }
-    } else {
-        Halo2Fr::from(0u64)
-    };
-
-    // Reconstruct public inputs as Fr field elements
-    let public_inputs = vec![
-        Halo2Fr::from(result_val),
-        Halo2Fr::from(threshold),
-        Halo2Fr::from(liveness_val),
-        digest_val,
-        commitment_val,
-    ];
-
+    let challenge_id = req.challenge_id.as_deref()
+        .ok_or_else(|| bad_liveness_input("challenge_id is required".into()))?;
+    let policy = state.take_verification_policy(&principal, challenge_id)
+        .ok_or_else(|| bad_liveness_input("Challenge not found, expired or already consumed".into()))?;
+    let encoded: Result<Vec<[u8; 32]>, _> = req.public_inputs_hex.iter().map(|value| {
+        require_nonce_hex(Some(value), "public instance")?;
+        let bytes = hex::decode(value).map_err(|_| "Invalid instance encoding".to_string())?;
+        bytes.try_into().map_err(|_| "Invalid instance length".to_string())
+    }).collect();
+    let public_inputs = sable_core::zk::halo2::decode_instances(&encoded.map_err(bad_liveness_input)?)
+        .map_err(|_| bad_liveness_input("Non-canonical public input".into()))?;
+    let liveness_val = public_inputs[2] == Halo2Fr::from(1);
+    let digest_val = public_inputs[3];
+    let commitment_val = public_inputs[4];
     let proof = Proof {
         proof_bytes,
         public_inputs,
-        liveness_passed: liveness_val == 1,
+        liveness_passed: liveness_val,
         challenge_digest: digest_val,
         commitment: commitment_val,
     };
+    let verification_now = unix_seconds().map_err(bad_liveness_input)?;
+    policy.validate(&proof, verification_now, Instant::now()).map_err(bad_liveness_input)?;
 
     // Verify using Halo2
     let verification_result = {
         let mut prover = state.halo2_prover.write();
         match FaceVerificationVerifier::from_prover(&mut prover) {
-            Ok(verifier) => verifier.verify(&proof),
+            Ok(verifier) => verifier.verify_expected(&proof, &policy.expected, unix_seconds().map_err(bad_liveness_input)?),
             Err(e) => Err(e),
         }
     };
 
+    // Key generation/verification can cross the deadline after the initial check.
+    // The consumed policy must remain expired even if the wall clock rolls back.
+    policy.validate(&proof, unix_seconds().map_err(bad_liveness_input)?, Instant::now())
+        .map_err(bad_liveness_input)?;
     let verification_time = start.elapsed();
 
     // Look up liveness result if challenge_id provided.
     let liveness_check = req
         .challenge_id
         .as_deref()
-        .and_then(|cid| state.get_liveness_result(cid))
+        .and_then(|cid| state.get_liveness_result(&principal, cid))
         .map(|r| r.passed);
 
     match verification_result {
         Ok(is_match) => {
-            tracing::info!(
-                "Halo2 verification completed: valid={}, liveness={:?}, liveness_zk={}, time={:.2}ms",
-                is_match,
-                liveness_check,
-                proof.liveness_passed,
-                verification_time.as_secs_f64() * 1000.0
-            );
             Ok(Json(VerifyResponse {
                 valid: is_match,
                 verification_time_ms: verification_time.as_secs_f64() * 1000.0,
@@ -1266,8 +1119,7 @@ pub async fn verify(
                 },
             }))
         }
-        Err(e) => {
-            tracing::warn!("Halo2 verification failed: {}", e);
+        Err(_e) => {
             // Return valid=false rather than error for invalid proofs
             Ok(Json(VerifyResponse {
                 valid: false,
@@ -1334,13 +1186,14 @@ pub struct LivenessSignals {
 }
 
 pub async fn screen_flash_check(
+    Extension(principal): Extension<Principal>,
     State(state): State<AppState>,
     Json(req): Json<ScreenFlashRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     let start = Instant::now();
 
     // Verify challenge exists (liveness is challenge-bound and single-use).
-    let challenge = state.get_challenge(&req.challenge_id).ok_or_else(|| {
+    let challenge = state.get_challenge(&principal, &req.challenge_id).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -1349,8 +1202,8 @@ pub async fn screen_flash_check(
         )
     })?;
 
-    if challenge.created_at.elapsed().as_secs() > 30 {
-        let _ = state.take_liveness_result(&req.challenge_id);
+    if challenge.created_at.elapsed() >= std::time::Duration::from_secs(30) {
+        let _ = state.take_liveness_result(&principal, &req.challenge_id);
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -1371,7 +1224,7 @@ pub async fn screen_flash_check(
     }
 
     // Verify session exists
-    state.get_session(&challenge.session_id).ok_or_else(|| {
+    state.get_session(&principal, &challenge.session_id).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -1408,10 +1261,6 @@ pub async fn screen_flash_check(
     // derivative) of the ratio map — high energy = photo attack.
     let smoothness = check_ratio_smoothness(&baseline_img, &flash_img);
 
-    tracing::info!(
-        "Ratio smoothness: laplacian_energy={:.6}, mean_ratio={:.4}, passed={}",
-        smoothness.laplacian_energy, smoothness.mean_ratio, smoothness.passed
-    );
 
     // Run screen flash extractor with high-security thresholds
     let thresholds = ScreenFlashThresholds::high_security();
@@ -1440,16 +1289,9 @@ pub async fn screen_flash_check(
     let softness_f = signals.highlight_softness as f64 / 65535.0;
     let consistency_f = signals.channel_consistency as f64 / 65535.0;
 
-    tracing::info!(
-        "Liveness check: passed={} (reflectance={}, smoothness={}), variance={:.4}, gradient={:.4}, softness={:.4}, consistency={:.4}, laplacian={:.6}, time={:.2}ms",
-        passed, reflectance_passed, smoothness.passed,
-        variance_f, gradient_f, softness_f, consistency_f,
-        smoothness.laplacian_energy,
-        timing.as_secs_f64() * 1000.0
-    );
 
     // Store result for this specific challenge (single-use in auth_prove).
-    state.store_liveness_result(
+    state.store_liveness_result(&principal,
         req.challenge_id,
         LivenessResult {
             passed,
@@ -1459,7 +1301,7 @@ pub async fn screen_flash_check(
             channel_consistency: consistency_f,
             checked_at: Instant::now(),
         },
-    );
+    ).map_err(storage_unavailable)?;
 
     Ok(Json(ScreenFlashResponse {
         passed,
@@ -1475,12 +1317,6 @@ pub async fn screen_flash_check(
 
 /// Result of ratio-Laplacian smoothness check.
 struct RatioSmoothnessCheck {
-    /// Mean squared Laplacian of the reflectance ratio map.
-    /// Low = smooth ratio variation (real 3D face).
-    /// High = high-frequency ratio variation (photo on screen).
-    laplacian_energy: f64,
-    /// Mean ratio across the image (sanity check that flash had effect).
-    mean_ratio: f64,
     /// Whether the check passed.
     passed: bool,
 }
@@ -1516,8 +1352,6 @@ fn check_ratio_smoothness(baseline: &PalmImage, flash: &PalmImage) -> RatioSmoot
 
     if dw < 3 || dh < 3 {
         return RatioSmoothnessCheck {
-            laplacian_energy: 0.0,
-            mean_ratio: 1.0,
             passed: false,
         };
     }
@@ -1592,14 +1426,206 @@ fn check_ratio_smoothness(baseline: &PalmImage, flash: &PalmImage) -> RatioSmoot
     let passed = laplacian_energy < 0.35 && mean_ratio > 0.95;
 
     RatioSmoothnessCheck {
-        laplacian_energy,
-        mean_ratio,
         passed,
     }
 }
 
 fn bad_liveness_input(error: String) -> (StatusCode, Json<ErrorResponse>) {
     (StatusCode::BAD_REQUEST, Json(ErrorResponse { error }))
+}
+
+fn storage_unavailable(error: String) -> (StatusCode, Json<ErrorResponse>) {
+    (StatusCode::SERVICE_UNAVAILABLE, Json(ErrorResponse { error }))
+}
+
+fn unix_seconds() -> Result<u64, String> {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs()).map_err(|_| "Verifier clock unavailable".into())
+}
+
+fn require_nonce_hex(value: Option<&str>, field: &str) -> Result<(), String> {
+    let value = value.ok_or_else(|| format!("{field} is required"))?;
+    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err(format!("{field} must be 32 bytes of lowercase hexadecimal"));
+    }
+    Ok(())
+}
+
+/// Reject incomplete captures before looking up a challenge or decoding images.
+/// This validates structure only; capture provenance is a separate trust boundary.
+fn require_capture_input(req: &ProveRequest) -> Result<(), String> {
+    if req.noise_level.is_some() {
+        return Err("Simulation is unavailable on authentication routes".into());
+    }
+    let embedding = req.face_embedding.as_ref().ok_or("face_embedding is required")?;
+    if embedding.len() != 1024 || embedding.iter().any(|v| !v.is_finite()) {
+        return Err("face_embedding must contain exactly 1024 finite values".into());
+    }
+    if !embedding.iter().any(|v| *v != 0.0) {
+        return Err("face_embedding must have nonzero magnitude".into());
+    }
+    require_nonce_hex(req.c_nonce.as_deref(), "c_nonce")?;
+    let frames = req.flash_frames.as_ref().ok_or("flash_frames is required")?;
+    if frames.len() != 4 || frames.iter().any(|frame| frame.is_empty()) {
+        return Err("flash_frames must contain baseline and three nonempty flash frames".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod capture_input_security_tests {
+    use super::*;
+
+    fn capture() -> ProveRequest {
+        ProveRequest {
+            challenge_id: "challenge".into(),
+            noise_level: None,
+            face_embedding: Some(vec![0.1; 1024]),
+            c_nonce: Some("01".repeat(32)),
+            flash_frames: Some(vec!["encoded frame".into(); 4]),
+            eye_crops: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn authentication_routes_reject_omissions_and_policy_replay() {
+        use sable_core::zk::halo2::{ExpectedPolicy, AUTH_CIRCUIT_V1};
+        let state = AppState::new();
+        let principal = Principal("alice".into());
+        let missing = EnrollRequest { user_id: "known-user".into(), face_embedding: None };
+        assert!(enroll(Extension(principal.clone()), State(state.clone()), Json(missing)).await.is_err());
+        let attack: ProveRequest = serde_json::from_str(r#"{"challenge_id":"target"}"#).unwrap();
+        assert!(auth_prove(Extension(principal.clone()), State(state.clone()), Json(attack)).await.is_err());
+        let challenge = ChallengeRequest { session_id: "target".into(), client_commitment: None };
+        assert!(auth_challenge(Extension(principal.clone()), State(state.clone()), Json(challenge)).await.is_err());
+        let now = unix_seconds().unwrap();
+        let policy = ExpectedPolicy {
+            registered_template: Halo2Fr::from(17),
+            threshold: 200,
+            challenge_digest: Halo2Fr::from(23),
+            required_liveness: true,
+            circuit_id: AUTH_CIRCUIT_V1.into(),
+            expires_at: now + 30,
+        };
+        let pending = || PendingVerification::new(policy.clone(), Instant::now()).unwrap();
+        state.store_verification_policy(&principal, "target".into(), pending(), now).unwrap();
+        assert!(state.store_verification_policy(&principal, "target".into(), pending(), now).is_err());
+        // All-zero instances have valid encoding but conflict with trusted policy.
+        let request = || VerifyRequest {
+            proof_hex: "00".into(),
+            public_inputs_hex: vec!["00".repeat(32); 5],
+            challenge_id: Some("target".into()),
+            session_id: None,
+        };
+        let other = Principal("bob".into());
+        assert!(verify(Extension(other.clone()), State(state.clone()), Json(request())).await.is_err());
+        // Bob's failed verification must not consume Alice's policy.
+        assert!(state.take_verification_policy(&other, "target").is_none());
+        let preserved = state.take_verification_policy(&principal, "target").unwrap();
+        state.store_verification_policy(&principal, "target".into(), preserved, now).unwrap();
+        state.store_challenge(&principal, AuthChallenge {
+            challenge_id: "owned-challenge".into(), session_id: "owned-session".into(), nonce: [1; 32],
+            client_commitment: Some("01".repeat(32)), created_at: Instant::now(),
+        }).unwrap();
+        assert!(state.get_challenge(&other, "owned-challenge").is_none());
+        assert!(state.remove_challenge(&other, "owned-challenge").is_none());
+        assert!(state.remove_challenge(&principal, "owned-challenge").is_some());
+        let session = |id: &str| EnrollmentSession {
+            session_id: id.into(), commitment_bytes: [0; 48],
+            face_embedding: vec![0.0; 1024], quantized_embedding: vec![0; 512],
+            template_commitment: Halo2Fr::from(17), created_at: Instant::now(),
+        };
+        for id in ["one", "two", "three", "four"] {
+            state.store_session(&principal, session(id)).unwrap();
+        }
+        assert!(state.store_session(&principal, session("five")).is_err());
+        assert!(state.get_session(&other, "one").is_none());
+        state.store_session(&other, session("one")).unwrap();
+        assert!(state.get_session(&principal, "one").is_some());
+        assert!(state.get_session(&other, "one").is_some());
+        // Exercise the actual API composition, not just direct handler calls.
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+        let credentials = crate::auth::Credentials::from_json(&format!(
+            r#"[{{"principal":"alice","token":"{}"}},{{"principal":"bob","token":"{}"}}]"#,
+            "ab".repeat(32), "cd".repeat(32),
+        )).unwrap();
+        let app = crate::routes::api_router(state.clone(), credentials);
+        let unauthorized = Request::builder().uri("/auth/prove").method("POST")
+            .header("content-length", "999999999").body(Body::empty()).unwrap();
+        assert_eq!(app.clone().oneshot(unauthorized).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        let health = Request::builder().uri("/health").body(Body::empty()).unwrap();
+        assert_eq!(app.clone().oneshot(health).await.unwrap().status(), StatusCode::OK);
+        let challenge_request = |token: &str| Request::builder().uri("/auth/challenge").method("POST")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(format!(r#"{{"session_id":"two","client_commitment":"{}","principal":"alice"}}"#, "01".repeat(32)))).unwrap();
+        assert_eq!(app.clone().oneshot(challenge_request(&"cd".repeat(32))).await.unwrap().status(), StatusCode::NOT_FOUND);
+        assert_eq!(app.oneshot(challenge_request(&"ab".repeat(32))).await.unwrap().status(), StatusCode::OK);
+        assert!(verify(Extension(principal.clone()), State(state.clone()), Json(request())).await.is_err());
+        assert!(state.take_verification_policy(&principal, "target").is_none());
+        assert!(verify(Extension(principal.clone()), State(state.clone()), Json(request())).await.is_err());
+        let mut expired = policy;
+        expired.expires_at = now;
+        assert!(state.store_verification_policy(&principal, "expired".into(),
+            PendingVerification::new(expired.clone(), Instant::now()).unwrap(), now).is_err());
+        // Rolling back the wall clock cannot admit a policy whose original
+        // challenge's monotonic deadline already passed during proof generation.
+        expired.expires_at = now + 30;
+        assert!(state.store_verification_policy(&principal, "slow-proof".into(),
+            PendingVerification::new(expired, Instant::now() - std::time::Duration::from_secs(31)).unwrap(),
+            now - 10).is_err());
+    }
+
+    #[test]
+    fn challenge_only_attack_and_partial_captures_are_rejected() {
+        let attack: ProveRequest = serde_json::from_str(r#"{"challenge_id":"target"}"#).unwrap();
+        assert!(require_capture_input(&attack).is_err());
+        assert!(require_capture_input(&capture()).is_ok());
+        for field in ["face_embedding", "c_nonce", "flash_frames"] {
+            let mut req = capture();
+            match field {
+                "face_embedding" => req.face_embedding = None,
+                "c_nonce" => req.c_nonce = None,
+                _ => req.flash_frames = None,
+            }
+            assert!(require_capture_input(&req).is_err(), "{field}");
+        }
+        let mut req = capture();
+        req.noise_level = Some(0.0);
+        assert!(require_capture_input(&req).is_err());
+    }
+
+    #[test]
+    fn malformed_embeddings_and_frame_sets_are_rejected() {
+        for embedding in [vec![], vec![0.1; 1023], vec![0.1; 1025], vec![0.0; 1024], vec![f64::NAN; 1024], vec![f64::INFINITY; 1024]] {
+            let mut req = capture();
+            req.face_embedding = Some(embedding);
+            assert!(require_capture_input(&req).is_err());
+        }
+        for frames in [vec![], vec!["frame".into(); 3], vec!["frame".into(); 5], vec![String::new(); 4]] {
+            let mut req = capture();
+            req.flash_frames = Some(frames);
+            assert!(require_capture_input(&req).is_err());
+        }
+    }
+
+    #[test]
+    fn commitments_and_nonces_require_canonical_encoding() {
+        assert!(require_nonce_hex(None, "commitment").is_err());
+        for invalid in [String::new(), "00".repeat(31), "00".repeat(33), "AA".repeat(32), "gg".repeat(32), format!("0x{}", "00".repeat(32))] {
+            assert!(require_nonce_hex(Some(&invalid), "commitment").is_err());
+        }
+        assert!(require_nonce_hex(Some(&"ab".repeat(32)), "commitment").is_ok());
+    }
+
+    #[test]
+    fn enrollment_conversion_rejects_invalid_numeric_inputs() {
+        for invalid in [vec![0.0; 1024], vec![f64::NAN; 1024], vec![f64::INFINITY; 1024], vec![f64::MAX; 1024], vec![1e37; 1024], vec![0.1; 1023]] {
+            assert!(convert_face_embedding_to_features(&invalid).is_err());
+        }
+        assert!(convert_face_embedding_to_features(&vec![0.1; 1024]).is_ok());
+    }
 }
 
 fn require_corneal_evidence(req: &ProveRequest, enabled: bool) -> Result<(), String> {
@@ -1621,11 +1647,11 @@ fn decode_eye_crops(encoded: &[Vec<String>]) -> Result<Vec<[PalmImage; 2]>, Stri
         let right = decode_base64_image(&pair[1])?;
         for image in [&left, &right] {
             let size = (image.width, image.height);
-            if !(8..=4096).contains(&size.0)
-                || !(8..=4096).contains(&size.1)
+            if !(8..=256).contains(&size.0)
+                || !(8..=256).contains(&size.1)
                 || dimensions.is_some_and(|expected| expected != size)
             {
-                return Err("All eye crops must share dimensions in [8, 4096]".into());
+                return Err("All eye crops must share dimensions in [8, 256]".into());
             }
             dimensions = Some(size);
         }
@@ -1639,43 +1665,11 @@ fn decode_eye_crops(encoded: &[Vec<String>]) -> Result<Vec<[PalmImage; 2]>, Stri
 /// Eye crops arrive as PNG: at ~16 px a JPEG's chroma subsampling would smear
 /// the very colour the glint check measures.
 fn decode_base64_image(input: &str) -> std::result::Result<PalmImage, String> {
-    use base64::Engine;
-    use image::GenericImageView;
-
-    let b64_data = input.rsplit(',').next().unwrap_or(input);
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64_data)
-        .map_err(|e| format!("Base64 decode failed: {}", e))?;
-    let img = image::load_from_memory(&bytes).map_err(|e| format!("Image decode failed: {}", e))?;
-    let rgb = img.to_rgb8();
-    let (w, h) = img.dimensions();
-    Ok(PalmImage::new(w, h, 3, rgb.into_raw()))
+    crate::images::decode(input, crate::images::CaptureImage::Eye)
 }
 
 fn decode_base64_jpeg(input: &str) -> std::result::Result<PalmImage, String> {
-    use base64::Engine;
-    use image::GenericImageView;
-
-    // Strip data URL prefix if present
-    let b64_data = if let Some(pos) = input.find(",") {
-        &input[pos + 1..]
-    } else {
-        input
-    };
-
-    // Decode base64
-    let jpeg_bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64_data)
-        .map_err(|e| format!("Base64 decode failed: {}", e))?;
-
-    // Decode JPEG to RGB
-    let img = image::load_from_memory_with_format(&jpeg_bytes, image::ImageFormat::Jpeg)
-        .map_err(|e| format!("JPEG decode failed: {}", e))?;
-
-    let rgb = img.to_rgb8();
-    let (w, h) = img.dimensions();
-
-    Ok(PalmImage::new(w, h, 3, rgb.into_raw()))
+    crate::images::decode(input, crate::images::CaptureImage::Frame)
 }
 
 // ============================================================================
@@ -1690,18 +1684,6 @@ pub struct ErrorResponse {
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-fn hash_string_to_u64(s: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn scalar_to_bytes(scalar: &blstrs::Scalar) -> [u8; 32] {
-    use ff::PrimeField;
-    scalar.to_repr().into()
-}
 
 /// Convert 1024-dimensional face embedding to 512 ZK-compatible features
 ///
@@ -1728,6 +1710,14 @@ fn convert_face_embedding_to_features(
     }
 
     let mut features = [0.0f32; FEATURE_VECTOR_SIZE];
+    if embedding.iter().any(|value| !value.is_finite()) || !embedding.iter().any(|value| *value != 0.0) {
+        return Err(bad_liveness_input("Embedding must be finite and nonzero".into()));
+    }
+    // Leave headroom for 512-element f32 sums of squared feature differences.
+    let component_limit = f64::from(f32::MAX).sqrt() / 1024.0;
+    if embedding.iter().any(|value| value.abs() > component_limit) {
+        return Err(bad_liveness_input("Embedding exceeds supported numeric range".into()));
+    }
 
     // Convert 1024-dim to 512-dim by averaging adjacent pairs
     // This preserves the discriminative information while matching our ZK circuit size
@@ -1736,6 +1726,9 @@ fn convert_face_embedding_to_features(
         let avg = (embedding[idx] + embedding[idx + 1]) / 2.0;
         // Normalize to [-2, 2] range (face embeddings are typically in [-1, 1])
         features[i] = (avg * 2.0) as f32;
+        if !features[i].is_finite() {
+            return Err(bad_liveness_input("Embedding exceeds supported numeric range".into()));
+        }
     }
 
     // Calculate quality score based on embedding statistics
@@ -1747,14 +1740,6 @@ fn convert_face_embedding_to_features(
     // Quality score based on embedding characteristics
     // Good embeddings have reasonable variance (not too flat, not too noisy)
     let quality_score = (std_dev * 2.0).min(1.0).max(0.5) as f32;
-
-    // Log feature statistics for debugging
-    let feature_mean: f32 = features.iter().sum::<f32>() / FEATURE_VECTOR_SIZE as f32;
-    let feature_variance: f32 = features.iter().map(|x| (x - feature_mean).powi(2)).sum::<f32>() / FEATURE_VECTOR_SIZE as f32;
-    tracing::info!(
-        "Face embedding conversion: embedding_std={:.4}, feature_mean={:.4}, feature_var={:.4}, quality={:.4}",
-        std_dev, feature_mean, feature_variance, quality_score
-    );
 
     Ok((features, quality_score))
 }
@@ -1778,340 +1763,7 @@ fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
 }
 
 // ============================================================================
-// Fuzzy Commitment Endpoints
-// ============================================================================
-
-#[derive(Debug, Deserialize)]
-pub struct FuzzyEnrollRequest {
-    /// User identifier
-    pub user_id: String,
-    /// Face embedding from Human library (1024-dimensional)
-    pub face_embedding: Option<Vec<f64>>,
-    /// Error correction capacity per RS block (default: 40)
-    pub error_threshold: Option<usize>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct FuzzyEnrollResponse {
-    pub session_id: String,
-    /// Deterministic commitment derived from the biometric (hex-encoded SHA-256)
-    pub commitment_hex: String,
-    /// Public helper data (hex-encoded, needed for future verification)
-    pub helper_data_hex: String,
-    pub quality_score: f32,
-    pub timings: FuzzyEnrollTimings,
-}
-
-#[derive(Debug, Serialize)]
-pub struct FuzzyEnrollTimings {
-    pub feature_generation_ms: f64,
-    pub fuzzy_commitment_ms: f64,
-    pub total_ms: f64,
-}
-
-/// Enroll with fuzzy commitment mode.
-///
-/// This produces a deterministic commitment from the biometric that can be
-/// reproduced from a future noisy reading. Useful for unique-set enrollment
-/// (deduplication) where you need to check if a biometric already exists.
-pub async fn fuzzy_enroll(
-    State(state): State<AppState>,
-    Json(req): Json<FuzzyEnrollRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    use sable_core::crypto::fuzzy_commitment::{self, FuzzyParams};
-
-    let total_start = Instant::now();
-
-    // Generate features
-    let feature_start = Instant::now();
-    let (features, quality_score) = if let Some(embedding) = &req.face_embedding {
-        convert_face_embedding_to_features(embedding)?
-    } else {
-        let seed = hash_string_to_u64(&req.user_id);
-        let features = generate_simulated_features(seed);
-        let quality = calculate_quality_score(&features);
-        (features, quality)
-    };
-    let feature_time = feature_start.elapsed();
-
-    // Binary quantize: sign bit per feature → 0x00 / 0xFF
-    // Fine u8 quantization produces Hamming distances of ~85% between webcam
-    // captures (values cluster in a narrow band).  Binary quantization reduces
-    // this to ~14% (only positions that cross the sign boundary differ).
-    let quantized: Vec<u8> = features
-        .iter()
-        .map(|&f| if f >= 0.0 { 0xFF } else { 0x00 })
-        .collect();
-
-    // Generate deterministic fuzzy commitment (same biometric → same commitment)
-    let fuzzy_start = Instant::now();
-    let t = req.error_threshold.unwrap_or(100);
-    let params = FuzzyParams::new(t);
-    let enrollment = fuzzy_commitment::gen_deterministic(&quantized, &params);
-    let fuzzy_time = fuzzy_start.elapsed();
-
-    let total_time = total_start.elapsed();
-
-    // Store session
-    let session_id = uuid::Uuid::new_v4().to_string();
-
-    // We still create a dummy Pedersen commitment for the session struct
-    // (the fuzzy commitment is stored separately)
-    let feature_hash = poseidon_hash(&features).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Poseidon hash failed: {}", e),
-            }),
-        )
-    })?;
-    let opening = CommitmentOpening::new_with_random_salt(feature_hash).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Commitment opening failed: {}", e),
-            }),
-        )
-    })?;
-    let generators = Generators::get();
-    let commitment = commit_with_opening(&opening, generators);
-    let commitment_bytes = commitment.to_bytes();
-    let salt_bytes = scalar_to_bytes(&opening.randomness);
-
-    let helper_data_bytes = enrollment.helper_data.to_bytes();
-
-    let template_commitment = poseidon_commit_bytes_value(&quantized);
-
-    let session = EnrollmentSession {
-        session_id: session_id.clone(),
-        enrollment_mode: crate::state::EnrollmentMode::FuzzyCommitment,
-        commitment,
-        commitment_bytes,
-        features,
-        face_embedding: req.face_embedding.clone(),
-        quantized_embedding: quantized,
-        template_commitment,
-        salt_bytes,
-        created_at: Instant::now(),
-        fuzzy_helper_data: Some(enrollment.helper_data),
-        fuzzy_commitment_hash: Some(enrollment.commitment),
-    };
-    state.store_session(session);
-
-    Ok(Json(FuzzyEnrollResponse {
-        session_id,
-        commitment_hex: hex::encode(enrollment.commitment),
-        helper_data_hex: hex::encode(&helper_data_bytes),
-        quality_score,
-        timings: FuzzyEnrollTimings {
-            feature_generation_ms: feature_time.as_secs_f64() * 1000.0,
-            fuzzy_commitment_ms: fuzzy_time.as_secs_f64() * 1000.0,
-            total_ms: total_time.as_secs_f64() * 1000.0,
-        },
-    }))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct FuzzyVerifyRequest {
-    /// Session ID from enrollment (looks up stored helper data)
-    pub session_id: Option<String>,
-    /// Or provide helper data directly (hex-encoded)
-    pub helper_data_hex: Option<String>,
-    /// Face embedding to verify (1024-dimensional)
-    pub face_embedding: Option<Vec<f64>>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct FuzzyVerifyResponse {
-    pub matched: bool,
-    /// The reproduced commitment (hex), if matched
-    pub commitment_hex: Option<String>,
-    pub timing_ms: f64,
-}
-
-/// Verify a biometric against a fuzzy commitment.
-///
-/// Attempts to reproduce the commitment from a fresh biometric reading.
-/// Returns whether the biometric matches (is within the error threshold).
-pub async fn fuzzy_verify(
-    State(state): State<AppState>,
-    Json(req): Json<FuzzyVerifyRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    use sable_core::crypto::fuzzy_commitment::{self, HelperData};
-
-    let start = Instant::now();
-
-    // Get helper data from session or request
-    let helper_data = if let Some(session_id) = &req.session_id {
-        let session = state.get_session(session_id).ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Session not found".to_string(),
-                }),
-            )
-        })?;
-        session.fuzzy_helper_data.ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "Session was not enrolled with fuzzy commitment mode".to_string(),
-                }),
-            )
-        })?
-    } else if let Some(hex_str) = &req.helper_data_hex {
-        let bytes = hex::decode(hex_str).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Invalid helper data hex: {}", e),
-                }),
-            )
-        })?;
-        HelperData::from_bytes(&bytes).ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "Invalid helper data format".to_string(),
-                }),
-            )
-        })?
-    } else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Must provide either session_id or helper_data_hex".to_string(),
-            }),
-        ));
-    };
-
-    // Get features from face embedding or error
-    let (features, _quality) = if let Some(embedding) = &req.face_embedding {
-        convert_face_embedding_to_features(embedding)?
-    } else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "face_embedding is required for fuzzy verification".to_string(),
-            }),
-        ));
-    };
-
-    // Binary quantize (must match enrollment quantization)
-    let quantized: Vec<u8> = features
-        .iter()
-        .map(|&f| if f >= 0.0 { 0xFF } else { 0x00 })
-        .collect();
-
-    // Log Hamming distance for diagnostics
-    if let Some(session_id) = &req.session_id {
-        if let Some(session) = state.get_session(session_id) {
-            let hamming: usize = session
-                .quantized_embedding
-                .iter()
-                .zip(quantized.iter())
-                .filter(|(a, b)| a != b)
-                .count();
-            tracing::info!(
-                "Fuzzy verify: binary Hamming distance = {}/512 ({:.1}%), t={} (corrects ~{})",
-                hamming,
-                hamming as f64 / 512.0 * 100.0,
-                helper_data.params.t,
-                helper_data.params.t * 2
-            );
-        }
-    }
-
-    // Attempt to reproduce commitment
-    let result = fuzzy_commitment::rep(&quantized, &helper_data);
-    let timing = start.elapsed();
-
-    Ok(Json(FuzzyVerifyResponse {
-        matched: result.is_some(),
-        commitment_hex: result.map(|c| hex::encode(c)),
-        timing_ms: timing.as_secs_f64() * 1000.0,
-    }))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct FuzzyCheckUniqueRequest {
-    /// Face embedding to check (1024-dimensional)
-    pub face_embedding: Vec<f64>,
-    /// List of existing helper data (hex-encoded) to check against
-    pub existing_enrollments: Vec<String>,
-    /// Error correction threshold (default: 40)
-    pub error_threshold: Option<usize>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct FuzzyCheckUniqueResponse {
-    /// Whether the biometric is unique (not found in existing set)
-    pub is_unique: bool,
-    /// Index of the matched enrollment, if any
-    pub matched_index: Option<usize>,
-    /// Reproduced commitment of the match (hex), if any
-    pub matched_commitment_hex: Option<String>,
-    pub timing_ms: f64,
-    pub checked_count: usize,
-}
-
-/// Check if a biometric is unique within a set of existing fuzzy enrollments.
-///
-/// This is the core deduplication use case: given a fresh biometric and a set
-/// of existing enrollments (helper data), check if the biometric matches any
-/// existing enrollment.
-pub async fn fuzzy_check_unique(
-    Json(req): Json<FuzzyCheckUniqueRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
-    use sable_core::crypto::fuzzy_commitment::{self, HelperData};
-
-    let start = Instant::now();
-
-    // Convert face embedding to binary-quantized features
-    let (features, _quality) = convert_face_embedding_to_features(&req.face_embedding)?;
-    let quantized: Vec<u8> = features
-        .iter()
-        .map(|&f| if f >= 0.0 { 0xFF } else { 0x00 })
-        .collect();
-
-    // Check against each existing enrollment
-    let checked_count = req.existing_enrollments.len();
-    for (idx, helper_hex) in req.existing_enrollments.iter().enumerate() {
-        let bytes = hex::decode(helper_hex).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: format!("Invalid helper data hex at index {}: {}", idx, e),
-                }),
-            )
-        })?;
-
-        let helper_data = match HelperData::from_bytes(&bytes) {
-            Some(hd) => hd,
-            None => continue, // Skip malformed entries
-        };
-
-        if let Some(commitment) = fuzzy_commitment::rep(&quantized, &helper_data) {
-            let timing = start.elapsed();
-            return Ok(Json(FuzzyCheckUniqueResponse {
-                is_unique: false,
-                matched_index: Some(idx),
-                matched_commitment_hex: Some(hex::encode(commitment)),
-                timing_ms: timing.as_secs_f64() * 1000.0,
-                checked_count,
-            }));
-        }
-    }
-
-    let timing = start.elapsed();
-    Ok(Json(FuzzyCheckUniqueResponse {
-        is_unique: true,
-        matched_index: None,
-        matched_commitment_hex: None,
-        timing_ms: timing.as_secs_f64() * 1000.0,
-        checked_count,
-    }))
-}
+// Deterministic fuzzy authentication and deduplication were withdrawn (SBL-RT-010).
 
 #[cfg(test)]
 mod liveness_input_tests {

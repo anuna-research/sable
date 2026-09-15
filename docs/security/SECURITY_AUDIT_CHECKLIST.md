@@ -1,5 +1,12 @@
 # SABLE Security Audit Checklist
 
+> **Historical checklist — superseded 2026-09-15.** The control-completion claims
+> below are not current assurance. Several were contradicted by the
+> [red-team assessment](RED-TEAM-FINDINGS-2026-09-14.md). Use the
+> [current threat model](THREAT_MODEL.md) and
+> [remediation evidence](REMEDIATION-2026-09-14.md) for present control status.
+> This retained checklist is an audit input, not production approval.
+
 **Document Version:** 1.0
 **Last Updated:** 2026-02-02
 **Prepared For:** Formal Security Audit

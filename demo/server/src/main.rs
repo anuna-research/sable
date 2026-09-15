@@ -1,14 +1,12 @@
-use axum::{
-    routing::{get, post},
-    Router,
-};
+use axum::Router;
 use std::net::SocketAddr;
-use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use demo_server::handlers;
 use demo_server::state::AppState;
+use demo_server::auth::Credentials;
+use demo_server::routes::api_router;
 
 #[tokio::main]
 async fn main() {
@@ -21,46 +19,44 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    let credentials = Credentials::from_env().expect("Valid SABLE_API_CREDENTIALS must be configured");
     // Create application state
     let state = AppState::new();
+    let eviction_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            eviction_state.evict_expired();
+        }
+    });
 
-    // Configure CORS from ALLOWED_ORIGINS env (comma-separated) or allow any
+    // Same-origin by default; optional explicit allowlist must be valid.
     let cors = match std::env::var("ALLOWED_ORIGINS") {
         Ok(origins) if !origins.is_empty() => {
             let origins: Vec<_> = origins
                 .split(',')
-                .filter_map(|o| o.trim().parse().ok())
+                .map(|o| {
+                    assert!(o.trim() != "*", "Wildcard CORS is not permitted");
+                    o.trim().parse().expect("Invalid ALLOWED_ORIGINS entry")
+                })
                 .collect();
             CorsLayer::new()
                 .allow_origin(AllowOrigin::list(origins))
-                .allow_methods(Any)
-                .allow_headers(Any)
+                .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+                .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION])
         }
-        _ => CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any),
+        _ => CorsLayer::new(),
     };
 
     // Build API routes
-    let api_routes = Router::new()
-        .route("/health", get(handlers::health))
-        .route("/enroll", post(handlers::enroll))
-        .route("/auth/challenge", post(handlers::auth_challenge))
-        .route("/auth/prove", post(handlers::auth_prove))
-        .route("/liveness/screen-flash", post(handlers::screen_flash_check))
-        .route("/verify", post(handlers::verify))
-        // Fuzzy commitment endpoints (optional enrollment mode)
-        .route("/fuzzy/enroll", post(handlers::fuzzy_enroll))
-        .route("/fuzzy/verify", post(handlers::fuzzy_verify))
-        .route("/fuzzy/check-unique", post(handlers::fuzzy_check_unique));
+    let api_routes = api_router(state, credentials);
 
     // Build main router
     let app = Router::new()
         .nest("/api", api_routes)
         .fallback_service(ServeDir::new("../web/dist"))
-        .layer(cors)
-        .with_state(state);
+        .layer(cors);
 
     // Read bind config from environment (PORT for PaaS, BIND_ADDRESS for flexibility)
     let port: u16 = std::env::var("PORT")

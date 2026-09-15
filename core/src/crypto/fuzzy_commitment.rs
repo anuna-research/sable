@@ -1,8 +1,10 @@
-//! Reusable Fuzzy Commitment scheme for deterministic biometric commitments.
+//! Experimental randomized fuzzy commitments.
 //!
 //! Implements the code-offset construction (Juels & Wattenberg 1999) using
-//! Reed-Solomon error correction over GF(2^8). This allows deriving a stable,
-//! deterministic commitment from noisy biometric data.
+//! Reed-Solomon error correction over GF(2^8). The deterministic enrollment
+//! generator is withdrawn (SBL-RT-010) and exists only in regression tests.
+//! This remaining research code has no measured population entropy or
+//! unlinkability model and is not an approved biometric authentication primitive.
 //!
 //! # Construction
 //!
@@ -17,12 +19,12 @@
 //! 2. RS-decode to recover original messages
 //! 3. Re-derive commitment hash and verify
 //!
-//! # Security Properties
+//! # Security limitations
 //!
-//! - **Hiding**: The code-offset delta leaks at most `n - k` symbols of entropy
-//! - **Binding**: SHA-256 commitment is computationally binding
-//! - **Reusable**: Independent random codewords per enrollment (ROM security)
-//! - **Robust**: Commitment verification detects helper data tampering
+//! Public helper data permits testing candidate biometrics through `rep`.
+//! Random codewords alone do not establish resistance to offline guessing or
+//! cross-matching. Treat helper data as sensitive. Any future deployed design
+//! requires measured helper-data leakage and a reviewed per-domain protocol.
 
 use super::gf256;
 use super::reed_solomon::ReedSolomon;
@@ -133,9 +135,9 @@ pub struct Enrollment {
 
 /// Generate a fuzzy commitment from a biometric vector (enrollment).
 ///
-/// This is the **Gen** operation. It produces a deterministic commitment
-/// and public helper data that enables future reproduction from a noisy
-/// biometric reading.
+/// This is the **Gen** operation. It samples fresh random codewords and produces
+/// helper data that enables reproduction from a noisy biometric reading. Helper
+/// data also enables offline candidate testing; see the module's limitations.
 ///
 /// # Arguments
 /// - `biometric`: Quantized biometric feature vector `[u8; 512]`
@@ -298,10 +300,10 @@ fn derive_tail_mask(hasher: &Sha256) -> [u8; TAIL_LEN] {
 /// of random bytes. This means the **same quantized biometric always produces
 /// the same commitment**, enabling deduplication without storing raw biometrics.
 ///
-/// Security note: the helper data reveals the code-offset, which, combined with
-/// the deterministic codeword, leaks more information than the randomized
-/// variant. Use this only when deduplication / determinism is required.
-pub fn gen_deterministic(biometric: &[u8], params: &FuzzyParams) -> Enrollment {
+/// Withdrawn test fixture: this construction enables offline guessing and
+/// cross-matching. It must never be made available to library consumers.
+#[cfg(test)]
+fn gen_deterministic(biometric: &[u8], params: &FuzzyParams) -> Enrollment {
     assert_eq!(
         biometric.len(),
         BIOMETRIC_DIM,
@@ -357,6 +359,7 @@ pub fn gen_deterministic(biometric: &[u8], params: &FuzzyParams) -> Enrollment {
 }
 
 /// Derive a deterministic RS message from a seed and block index.
+#[cfg(test)]
 fn deterministic_message(seed: &[u8; 32], block_idx: usize, len: usize) -> Vec<u8> {
     let mut message = Vec::with_capacity(len);
     let mut counter = 0u32;

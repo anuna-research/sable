@@ -403,7 +403,11 @@ mod fuzzy_commitment_integration {
 // ============================================================================
 
 #[cfg(feature = "halo2")]
+mod halo2_fixtures;
+
+#[cfg(feature = "halo2")]
 mod halo2_integration {
+    use super::halo2_fixtures::{SyntheticFixture, default_policy, fixture_policy};
     use sable_core::zk::halo2::{
         FaceVerificationProver, FaceVerificationVerifier,
         FeatureQuantizer, ThresholdConfig, hamming_distance,
@@ -450,7 +454,7 @@ mod halo2_integration {
         // Step 8: Verify the proof
         let verifier = FaceVerificationVerifier::from_prover(&mut prover)
             .expect("Should create verifier");
-        let result = verifier.verify(&proof).expect("Verification should succeed");
+        let result = verifier.verify_expected(&proof, &default_policy(threshold), 0).is_ok();
 
         // Same person should match
         assert!(result, "Same person's embeddings should verify successfully");
@@ -484,7 +488,7 @@ mod halo2_integration {
 
         let verifier = FaceVerificationVerifier::from_prover(&mut prover)
             .expect("Should create verifier");
-        let result = verifier.verify(&proof).expect("Verification should succeed");
+        let result = verifier.verify_expected(&proof, &default_policy(threshold), 0).is_ok();
 
         // Different persons should not match (distance likely > threshold)
         // Note: This depends on the specific embeddings
@@ -502,7 +506,7 @@ mod halo2_integration {
             let proof_at = prover.prove(100, 100).expect("Should generate proof");
             let verifier = FaceVerificationVerifier::from_prover(&mut prover)
                 .expect("Should create verifier");
-            assert!(verifier.verify(&proof_at).expect("Should verify"),
+            assert!(verifier.verify_expected(&proof_at, &default_policy(100), 0).expect("Should verify"),
                 "Distance == threshold should pass");
         }
 
@@ -512,7 +516,7 @@ mod halo2_integration {
             let proof_over = prover.prove(101, 100).expect("Should generate proof");
             let verifier = FaceVerificationVerifier::from_prover(&mut prover)
                 .expect("Should create verifier");
-            assert!(!verifier.verify(&proof_over).expect("Should verify"),
+            assert!(verifier.verify_expected(&proof_over, &default_policy(100), 0).is_err(),
                 "Distance > threshold should fail");
         }
     }
@@ -547,6 +551,7 @@ mod halo2_integration {
 
         // Step 3: Generate combined proof
         let mut prover = FaceVerificationProver::new();
+        let policy = fixture_policy(threshold, &liveness);
         let proof = prover.prove_with_liveness(distance, threshold, Some(liveness))
             .expect("Combined proof should succeed");
 
@@ -555,14 +560,11 @@ mod halo2_integration {
             .expect("Should create verifier");
 
 
-        let details = verifier.verify_full(&proof).expect("Should verify");
-
-        assert!(details.face_match, "Face should match");
-        assert!(details.liveness_passed, "Liveness should pass");
+        assert!(verifier.verify_expected(&proof, &policy, 0).unwrap());
         assert!(proof.liveness_passed, "Proof.liveness_passed should be true");
         println!(
             "Combined proof: face={}, liveness={}, size={}B",
-            details.face_match, details.liveness_passed, proof.size()
+            true, proof.liveness_passed, proof.size()
         );
         assert!(proof.meets_size_requirement(), "Combined proof should be ≤10KB");
     }
@@ -583,6 +585,7 @@ mod halo2_integration {
         };
 
         let mut prover = FaceVerificationProver::new();
+        let policy = fixture_policy(200, &liveness);
         let proof = prover.prove_with_liveness(100, 200, Some(liveness))
             .expect("Proof should still generate");
 
@@ -592,14 +595,12 @@ mod halo2_integration {
             .expect("Should create verifier");
 
 
-        let details = verifier.verify_full(&proof).expect("Should verify");
-        assert!(details.face_match, "Face match is independent");
-        assert!(!details.liveness_passed, "Tampered liveness should fail");
+        assert!(verifier.verify_expected(&proof, &policy, 0).is_err(), "Failed liveness must reject authentication");
     }
 
-    /// Test backwards compatibility: prove without liveness defaults to pass
+    /// Explicit synthetic fixture supplies a liveness witness; no production fallback.
     #[test]
-    fn test_halo2_backwards_compatible_no_liveness() {
+    fn test_halo2_explicit_synthetic_fixture() {
         let mut prover = FaceVerificationProver::new();
         let proof = prover.prove(100, 200).expect("Should generate proof");
 
@@ -610,9 +611,7 @@ mod halo2_integration {
             .expect("Should create verifier");
 
 
-        let details = verifier.verify_full(&proof).expect("Should verify");
-        assert!(details.face_match);
-        assert!(details.liveness_passed, "Default liveness should pass");
+        assert!(verifier.verify_expected(&proof, &default_policy(200), 0).unwrap());
     }
 
     /// Test quantization preserves similarity ordering

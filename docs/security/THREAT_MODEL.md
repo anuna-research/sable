@@ -1,297 +1,109 @@
-# SABLE Threat Model
-
-**Document Version:** 1.0
-**Last Updated:** 2026-02-02
-**Classification:** Security Documentation
-
-## Overview
-
-This document describes the threat model for SABLE (Secure Authentication via Biometric Linkage and Encryption), a privacy-preserving biometric authentication system using zero-knowledge proofs. It identifies attack surfaces, threat actors, and mitigations implemented or planned.
-
----
-
-## System Architecture Summary
-
-SABLE consists of the following major components:
-
-1. **Cryptographic Core**: BLS12-381 operations, Poseidon hash, Pedersen commitments, Groth16 zk-SNARKs
-2. **Biometric Processing**: Palm vein/print feature extraction, template generation, matching
-3. **Mobile Integration**: Android JNI, iOS Swift bindings, hardware keystore integration
-4. **P2P Protocol**: Session management, encrypted communication, replay prevention
-
----
-
-## Threat Actors
-
-### TA-1: Passive Network Attacker
-**Capability:** Can observe all network traffic between devices
-**Motivation:** Steal biometric data, identify users, track authentication attempts
-**Resources:** Network monitoring tools, traffic analysis capabilities
-
-### TA-2: Active Network Attacker (Man-in-the-Middle)
-**Capability:** Can intercept, modify, and inject network traffic
-**Motivation:** Impersonate users, forge authentication, disrupt service
-**Resources:** Network position, cryptographic tools, protocol knowledge
-
-### TA-3: Malicious Verifier
-**Capability:** Legitimate verifier role, receives proofs and commitments
-**Motivation:** Extract biometric information, link identities across sessions
-**Resources:** Multiple verification sessions, computational resources
-
-### TA-4: Malicious Prover
-**Capability:** Attempts to authenticate without valid biometrics
-**Motivation:** Unauthorized access, identity fraud
-**Resources:** Stolen commitments, cryptographic tools, social engineering
-
-### TA-5: Compromised Device Attacker
-**Capability:** Full access to one endpoint device (mobile phone)
-**Motivation:** Extract biometric templates, keys, or forge local authentication
-**Resources:** Root access, memory inspection tools, debuggers
-
-### TA-6: Insider Threat (Ceremony Participant)
-**Capability:** Participates in trusted setup ceremony
-**Motivation:** Forge proofs by retaining toxic waste
-**Resources:** Ceremony participation, collusion with others
-
-### TA-7: Side-Channel Attacker
-**Capability:** Physical or remote observation of device during operations
-**Motivation:** Extract secrets through timing, power, or EM emissions
-**Resources:** Timing measurement tools, EM probes, specialized equipment
-
----
-
-## Attack Surfaces
-
-### AS-1: Cryptographic Primitives
-
-#### AS-1.1: Pedersen Commitments
-| Threat | Description | Mitigation | Status |
-|--------|-------------|------------|--------|
-| Binding Break | Find collision (f1,s1) != (f2,s2) with same commitment | Use proven BLS12-381 curve with 128-bit security | Implemented |
-| Hiding Break | Extract feature information from commitment | Perfect hiding via random blinding factor | Implemented |
-| Weak Randomness | Predictable salt enables commitment forgery | SecureRng with platform entropy (getrandom) | Implemented |
-
-#### AS-1.2: Groth16 zk-SNARKs
-| Threat | Description | Mitigation | Status |
-|--------|-------------|------------|--------|
-| Forged Proofs | Create valid proof without valid witness | Groth16 soundness + proper circuit design | Implemented |
-| Knowledge Extraction | Extract biometric features from proof | Zero-knowledge property of Groth16 | Implemented |
-| Circuit Under-constraint | Missing constraints allow invalid proofs | Circuit soundness review (pending audit) | Needs Review |
-| Toxic Waste Attack | Ceremony participant forges proofs | MPC ceremony with one-honest-participant model | Implemented |
-
-#### AS-1.3: Poseidon Hash
-| Threat | Description | Mitigation | Status |
-|--------|-------------|------------|--------|
-| Collision Finding | Find two inputs with same hash | 8 full + 56 partial rounds per security analysis | Implemented |
-| Preimage Attack | Recover input from hash output | Poseidon security margin against known attacks | Implemented |
-| Parameter Weakness | Weak MDS matrix or round constants | Deterministic derivation from nothing-up-my-sleeve values | Implemented |
-
-### AS-2: Biometric Processing
-
-#### AS-2.1: Feature Extraction
-| Threat | Description | Mitigation | Status |
-|--------|-------------|------------|--------|
-| Raw Biometric Exposure | Plaintext biometric data leaked | Features immediately hashed/committed | Implemented |
-| Template Reconstruction | Recreate biometric from template | One-way feature extraction + commitment | Implemented |
-| Quality Bypass | Accept low-quality samples to reduce security | Quality thresholds (FAR < 0.1%) | Implemented |
-| Input Injection | Malformed image causes buffer overflow | Input validation on image dimensions | **Implemented** |
-
-#### AS-2.2: Biometric Matching
-| Threat | Description | Mitigation | Status |
-|--------|-------------|------------|--------|
-| Timing Attack | Measure distance calculation time to infer similarity | Constant-time distance calculations (subtle crate) | Implemented |
-| Threshold Manipulation | Modify threshold to accept invalid matches | Threshold included in zk-SNARK public inputs | Implemented |
-| Replay Attack | Reuse old biometric capture | Temporal validity in proof (time window) | Implemented |
-
-### AS-3: P2P Communication
-
-#### AS-3.1: Key Exchange
-| Threat | Description | Mitigation | Status |
-|--------|-------------|------------|--------|
-| Eavesdropping | Passive attacker reads session keys | X25519 ECDH ephemeral key exchange | Implemented |
-| Key Compromise Impersonation | Past key compromise enables future attacks | Perfect forward secrecy via ephemeral keys | Implemented |
-| MITM During Exchange | Active attacker substitutes public keys | Out-of-band verification recommended | Partial |
-
-#### AS-3.2: Session Security
-| Threat | Description | Mitigation | Status |
-|--------|-------------|------------|--------|
-| Message Replay | Reuse captured encrypted messages | 96-bit nonce tracking, reject duplicates | Implemented |
-| Message Tampering | Modify ciphertext to alter plaintext | ChaCha20-Poly1305 AEAD authentication | Implemented |
-| Session Hijacking | Take over established session | 30-second session timeout, session binding | Implemented |
-| Nonce Exhaustion | Memory exhaustion via nonce tracking | Session timeout limits nonce accumulation | Implemented |
-
-### AS-4: Mobile Platform
-
-#### AS-4.1: FFI Boundary
-| Threat | Description | Mitigation | Status |
-|--------|-------------|------------|--------|
-| Buffer Overflow | Malformed input causes memory corruption | Bounds checking, null pointer validation | Implemented |
-| Use-After-Free | Access freed memory via handle | Handle lifecycle management | Implemented |
-| Information Leakage | Error messages reveal internals | Sanitized error codes (REQ-005) | Implemented |
-| Double-Free | Free same allocation twice | Single ownership model | Implemented |
-
-#### AS-4.2: Key Storage
-| Threat | Description | Mitigation | Status |
-|--------|-------------|------------|--------|
-| Key Extraction | Extract keys from device storage | Hardware keystore (Android Keystore/iOS Keychain) | Implemented |
-| Biometric Bypass | Bypass biometric to access keys | Keystore access policies require biometric | Implemented |
-| Root/Jailbreak Attack | Elevated privileges extract secrets | Hardware-backed keys resist root access | Partial |
-
-### AS-5: Trusted Setup Ceremony
-
-| Threat | Description | Mitigation | Status |
-|--------|-------------|------------|--------|
-| Single Point of Failure | One party controls all toxic waste | Multi-party computation (MPC) | Implemented |
-| Collusion Attack | All participants collude | One-honest-participant security model | Implemented |
-| Toxic Waste Retention | Participant keeps toxic waste | Attestation collection, verification | Implemented |
-| Ceremony Manipulation | Inject malicious contributions | Contribution verification before acceptance | Implemented |
-
----
-
-## Data Flow Security Analysis
-
-### Enrollment Flow
-
-```
-[Raw Biometric] --> [Feature Extraction] --> [512-dim Vector] --> [Poseidon Hash] --> [Pedersen Commitment]
-                           |                        |                    |                    |
-                           v                        v                    v                    v
-                    Zeroize after use      Zeroize after use    Hash stored      Commitment stored
-```
-
-**Security Properties:**
-- Raw biometric is never stored
-- Feature vector is cleared immediately after commitment
-- Only commitment is persisted
-- Salt is stored securely in keystore
-
-### Verification Flow
-
-```
-[Stored Commitment] + [Fresh Biometric] --> [zk-SNARK Proof Generation] --> [Proof + Public Inputs]
-                                                                                      |
-                                                                                      v
-[Verifier] <-- [P2P Encrypted Channel] <-- [Proof Transmission] <--------------- [Prover]
-     |
-     v
-[Groth16 Verification] --> Accept/Reject
-```
-
-**Security Properties:**
-- Fresh biometric never leaves device
-- Proof reveals nothing about features (zero-knowledge)
-- P2P channel is authenticated and encrypted
-- Verifier learns only pass/fail result
-
----
-
-## Mitigations Summary
-
-### Implemented Mitigations
-
-| ID | Mitigation | Threats Addressed | Implementation |
-|----|------------|-------------------|----------------|
-| M-01 | Pedersen commitments | Biometric exposure | `crypto/pedersen.rs` |
-| M-02 | Groth16 zk-SNARKs | Feature extraction from proofs | `crypto/groth16.rs` |
-| M-03 | Constant-time operations | Timing side-channels | `biometric/constant_time.rs` |
-| M-04 | X25519 ECDH + ChaCha20-Poly1305 | Network eavesdropping | `p2p/session.rs` |
-| M-05 | Nonce tracking | Replay attacks | `p2p/session.rs` |
-| M-06 | 30-second session timeout | Session hijacking | `p2p/session.rs` |
-| M-07 | MPC trusted setup | Toxic waste attacks | `crypto/groth16.rs` |
-| M-08 | Hardware keystore | Key extraction | `mobile/keystore.rs` |
-| M-09 | Error sanitization | Information leakage | `mobile/ffi.rs` |
-| M-10 | Quality thresholds | Low-quality bypass | `biometric/preprocessing.rs` |
-| M-11 | Temporal validity | Biometric replay | `crypto/groth16.rs` |
-| M-12 | Memory zeroization | Memory forensics | Multiple (zeroize crate) |
-
-### Recently Completed Mitigations
-
-| ID | Mitigation | Threats Addressed | Status |
-|----|------------|-------------------|--------|
-| M-13 | Input validation hardening | Buffer overflow | **Implemented** |
-| M-14 | Full circuit constraints | Circuit under-constraint | **Implemented** (199,273 R1CS) |
-| M-15 | SIMD/NEON optimizations | Performance attacks | **Implemented** |
-| M-16 | Memory efficiency | Resource exhaustion | **Implemented** (<128MB) |
-
-### Planned/Recommended Mitigations
-
-| ID | Mitigation | Threats Addressed | Status |
-|----|------------|-------------------|--------|
-| M-17 | HKDF key derivation | Weak key derivation | Recommended |
-| M-18 | Certificate pinning for P2P | MITM during exchange | Planned |
-| M-19 | Rate limiting | Brute force attacks | Planned |
-| M-20 | Secure boot verification | Compromised device | Planned |
-
----
-
-## Risk Assessment Matrix
-
-| Risk | Likelihood | Impact | Severity | Mitigation Status |
-|------|------------|--------|----------|-------------------|
-| Biometric data exposure | Low | Critical | High | Mitigated (M-01, M-02) |
-| Proof forgery | Very Low | Critical | Medium | Mitigated (M-02, M-07) |
-| Timing side-channel | Medium | High | Medium | Mitigated (M-03) |
-| Network eavesdropping | Medium | High | Medium | Mitigated (M-04) |
-| Replay attack (network) | Medium | Medium | Medium | Mitigated (M-05) |
-| Replay attack (biometric) | Low | High | Medium | Mitigated (M-11) |
-| Session hijacking | Low | Medium | Low | Mitigated (M-06) |
-| MITM attack | Low | High | Medium | Partial (M-04, M-18 planned) |
-| Key extraction (device) | Low | Critical | Medium | Mitigated (M-08) |
-| Input validation bypass | Medium | Medium | Medium | **Mitigated (M-13)** |
-| Toxic waste attack | Very Low | Critical | Low | Mitigated (M-07) |
-| Information leakage | Medium | Low | Low | Mitigated (M-09) |
-
----
-
-## Security Assumptions
-
-1. **Cryptographic Assumptions:**
-   - Discrete logarithm problem is hard on BLS12-381
-   - Poseidon hash is collision-resistant with chosen parameters
-   - Groth16 is secure under knowledge-of-exponent assumption
-
-2. **Platform Assumptions:**
-   - Hardware keystore provides tamper resistance
-   - Platform RNG provides adequate entropy
-   - No physical tampering with user device
-
-3. **Operational Assumptions:**
-   - Trusted setup ceremony has at least one honest participant
-   - Users do not share their biometrics with attackers
-   - Verifiers are properly authenticated
-
----
-
-## Audit Recommendations
-
-### Priority 1 (Critical)
-1. Review Groth16 circuit soundness for constraint completeness
-2. Validate Pedersen commitment implementation
-3. Audit trusted setup ceremony security
-
-### Priority 2 (High)
-1. Verify constant-time implementations with timing analysis
-2. Review FFI boundary for memory safety issues
-3. Validate biometric input validation
-
-### Priority 3 (Medium)
-1. Review session management for race conditions
-2. Audit nonce tracking for memory exhaustion
-3. Validate quality threshold enforcement
-
----
-
-## Document History
-
-| Version | Date | Author | Changes |
-|---------|------|--------|---------|
-| 1.0 | 2026-02-02 | SABLE Team | Initial threat model document |
-
----
-
-## Related Documents
-
-- [SECURITY_AUDIT_CHECKLIST.md](./SECURITY_AUDIT_CHECKLIST.md)
-- [ADR-002: Biometric Quality Thresholds](../adr/ADR-002-quality-thresholds.md)
-- [ADR-003: Trusted Setup Ceremony Protocol](../adr/ADR-003-trusted-setup-ceremony.md)
-- [IMPLEMENTATION_STATUS.md](../../IMPLEMENTATION_STATUS.md)
+# SABLE threat model — research build
+
+Updated 2026-09-15. This replaces the unsupported control claims in version 1.0.
+SABLE is not approved for security-critical authentication or public deployment.
+The [red-team assessment](RED-TEAM-FINDINGS-2026-09-14.md) remains the baseline;
+the [remediation record](REMEDIATION-2026-09-14.md) distinguishes containment from
+completed replacement. Test results are scoped evidence, not a system security audit.
+
+## Assets, actors and trust boundaries
+
+The sensitive assets are captured frames, eye crops, embeddings, quantized templates,
+operator credentials, enrollment mappings, challenge state, proving material and
+identity trust anchors. Threat actors include network attackers, malicious browser
+clients, malicious provers with stolen templates, compromised servers/operators,
+compromised devices and supply-chain attackers.
+
+The current browser is untrusted. It sends enrollment embeddings and authentication
+embeddings/images to a trusted-for-processing server. That server converts features,
+extracts liveness measurements, generates proofs and verifies them. Proof privacy
+does not hide those inputs from the server, its operator or its TLS terminator.
+
+The server owns principal-scoped enrollment/challenge state and the expected proof
+policy. Bearer credentials authorize access to this research API; they do not attest
+a device, camera, human identity or physical presence. A stolen bearer credential is
+usable until the operator removes it and restarts the process.
+
+The Halo2 circuit proves relations among witness values, not their physical origin.
+A prover possessing the enrollment template can fabricate satisfying measurements.
+See [capture boundary](CAPTURE-TRUST-BOUNDARY.md). Software liveness is unvalidated
+presentation-attack risk reduction, not cryptographic capture authentication.
+Device and attestation policies are separate application concerns, not assumptions
+baked into SABLE. Core remediation does not depend on selecting such a provider.
+
+## Current control evidence
+
+Statuses describe the stated control only:
+
+- **implemented and tested**: specific implementation and scoped tests exist;
+- **implemented but unverified**: code exists without sufficient validation;
+- **planned**: missing or withdrawn functionality, not available protection;
+- **demo only**: research behavior, not an authentication assurance.
+
+| Control | Status | Evidence and limits |
+|---|---|---|
+| Principal authentication and rate limits before protected body processing | implemented and tested | [auth.rs](../../demo/server/src/auth.rs), [routes.rs](../../demo/server/src/routes.rs); credential, router and principal-isolation tests. Operator-provisioned bearer tokens, not device attestation. |
+| Bounded principal-scoped enrollment/challenge state | implemented and tested | [state.rs](../../demo/server/src/state.rs), [cache.rs](../../demo/server/src/cache.rs); quota, expiry, drop and non-consumption tests. Enrollment availability is 15 minutes; eviction every five seconds. |
+| Verifier-owned exact public-input policy | implemented and tested | [policy.rs](../../core/src/zk/halo2/policy.rs), [proof.rs](../../core/src/zk/halo2/proof.rs), [handlers.rs](../../demo/server/src/handlers.rs); substitution, expiry, canonical-decoding and real-proof tests. [Full synthetic route test](../../demo/server/src/route_round_trip_tests.rs) checks real proof acceptance, owner isolation and replay rejection. Physical-camera validation remains. |
+| Reject omitted embedding/liveness inputs | implemented and tested | [handlers.rs](../../demo/server/src/handlers.rs), [proof.rs](../../core/src/zk/halo2/proof.rs); omission tests and compile-fail checks for public scalar simulation APIs. Does not authenticate supplied capture data. |
+| Body, image and concurrent-work bounds | implemented and tested | [admission.rs](../../demo/server/src/admission.rs), [images.rs](../../demo/server/src/images.rs); busy, timeout, permit-retention, dimension and malformed-image tests. Not image fuzzing or deployed capacity certification. |
+| Enrollment buffer zeroization on drop | implemented but unverified | [state.rs](../../demo/server/src/state.rs) invokes zeroization; drop/expiry paths have tests, but memory erasure has not been instrumented. Does not cover all parser/decoder copies, active requests, dumps, swap or a compromised operator. |
+| Centralized feature conversion, liveness extraction and proving | demo only | [browser API](../../demo/web/src/api.ts), [handlers.rs](../../demo/server/src/handlers.rs). Biometric data leaves the browser. |
+| Physical capture provenance | separate integration concern | Outside the core proof guarantee by product decision. No device or attestation provider is assumed; applications needing this assurance must supply and validate an independently bound capture policy. [Capture boundary](CAPTURE-TRUST-BOUNDARY.md). |
+| Client-only biometric processing/proving | planned | Current browser sends embeddings and images. A native/WASM proving client and commitment/proof-only server interface are required. |
+| Withdrawal of legacy attestation, Groth16, mobile and deterministic fuzzy APIs | implemented and tested | [core exports](../../core/src/lib.rs), [crypto exports](../../core/src/crypto/mod.rs), compiler gates and compile-fail tests in the remediation record. Withdrawal is not a working replacement. |
+| Internal real-X.509 chain/revocation validation | demo only | [validated_x509.rs](../../core/src/attestation/validated_x509.rs); 12 tests with real DER chains and signed CRLs. Strict Ed25519 client-auth/DNS profile; no attestation API exported. |
+| Internal certificate-key possession and Noise binding | demo only | [peer_binding.rs](../../core/src/attestation/peer_binding.rs); nine tests include exact policy binding, one-use challenge, expiry ceilings and a mutual Noise exchange. Does not establish issuer-authorized biometric enrollment. |
+| Issuer-authorized biometric binding and trust rollback protection | planned | Persistent authenticated trust/CRL versions, persistent challenge uniqueness, trusted enrollment and platform integration remain. |
+| Withdrawal of unauthenticated P2P and BLE/NFC wrappers | implemented and tested | [P2P exports](../../core/src/p2p/mod.rs); six compile-fail import tests. No public authenticated channel is available. |
+| Internal certificate-bound Noise replacement | demo only | [authenticated.rs](../../core/src/p2p/authenticated.rs); 14 focused tests plus a combined certificate-possession exchange. Test-only; persistent trust/challenge state, transport integration and independent review remain. |
+| Withdrawn FFI numerical/allocator/panic boundary | implemented and tested | [ffi.rs](../../core/src/mobile/ffi.rs), [boundary helpers](../../core/src/mobile/ffi_boundary.rs); 13 rejecting-backend tests also pass under host AddressSanitizer. No production exports or valid mobile proof backend. |
+| Mobile integration and hardware keystore adapters | planned | Mobile builds explicitly reject compilation. No available or tested device security boundary; native ABI/ownership review and device instrumentation remain. |
+| Complete circuit soundness, side-channel resistance and biometric accuracy | implemented but unverified | Research implementations and tests are not independent constraint review, timing analysis or population-level FAR/PAD validation. |
+| Production release hold | implemented and tested | [release gate](../../ci/security-release-gate.sh), [gate tests](../../ci/security-release-gate.test.mjs), package publish prohibitions and deployment Dockerfile. Does not revoke existing deployed binaries. |
+
+## Data retention and transport
+
+Enrollment stores raw embeddings and matcher templates in
+server memory. TTLs limit lookup availability, not all copies' lifetime. Active
+requests may retain data until completion. Requests and decoded images contain
+biometrics even if the server does not deliberately persist them to disk.
+
+Never log request bodies, authorization headers, embeddings or capture data.
+Deployment operators must account for reverse-proxy logs, telemetry, crash dumps,
+swap, backups and TLS termination; repository tests do not establish those controls.
+See [demo access](DEMO-ACCESS.md). Browser credential handling requires HTTPS except
+loopback, but that is not proof of a deployed server's transport configuration.
+
+Proofs expose the match result, threshold, liveness result, challenge digest and
+enrollment-template commitment. A stable template commitment can permit linkage;
+a hash/commitment is not evidence of biometric entropy or unlinkability. The
+randomized fuzzy API remains experimental; deterministic fuzzy enrollment and
+deduplication are withdrawn.
+
+## Cryptographic and operational assumptions
+
+The active proof backend is BN254 KZG through Halo2, not a transparent-setup backend.
+[ProofSetup::new](../../core/src/zk/halo2/proof.rs) creates local KZG parameters using
+the OS RNG. There is no verified production ceremony provenance or distributed
+verification-key lifecycle. Production assurance cannot be inferred from the name
+Halo2, valid unit proofs or an assumed curve-security number.
+
+RNG reliability, correct primitives, complete constraints, canonical encodings,
+trusted verifier state and a trustworthy clock are prerequisites. Device isolation,
+government PKI integration and authenticated sensors are not implemented assumptions
+that this build can guarantee.
+
+## Residual risks and release conditions
+
+Critical/high remediation remains incomplete. Major residual risks are server-side
+biometric exposure, fabricated physical-capture witnesses, absent attestation and
+revocation, unavailable authenticated P2P/mobile, unvalidated matcher/PAD thresholds,
+and incomplete end-to-end, fuzz, capacity and device testing. No numerical residual
+risk rating or production approval is asserted.
+
+The release gate intentionally fails. Lifting it requires a reviewed change with
+requirement-by-requirement evidence for the original findings, current dependency
+and circuit assessment, deployed transport/data-handling checks, and applicable
+platform/interoperability testing. Editing a status table or passing the gate's
+regression tests cannot grant approval.

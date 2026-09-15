@@ -1,4 +1,5 @@
 [package]
+publish = false # Research-only; security release hold.
 name = "demo-server"
 version = "0.1.0"
 edition = "2021"
@@ -12,7 +13,7 @@ halo2-proofs = []  # Enable real Halo2 ZK proofs instead of simulation
 
 [dependencies]
 # SABLE core with ZK support (halo2 for real ZK proofs)
-sable-core = { path = "../../core", features = ["zk", "halo2"] }
+sable-core = { path = "../../core", features = ["halo2"] }
 
 # BLS12-381 types (for scalar conversion)
 blstrs = "0.7"
@@ -21,7 +22,7 @@ ff = "0.13"
 # Web framework
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1.35", features = ["full"] }
-tower = "0.4"
+tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors", "fs"] }
 
 # Serialization
@@ -33,6 +34,8 @@ hex = "0.4"
 base64 = "0.21"
 sha2 = { workspace = true }
 hkdf = { workspace = true }
+zeroize = { workspace = true }
+subtle = { workspace = true }
 
 # Image decoding (JPEG from webcam frames)
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
@@ -42,4 +45,3 @@ uuid = { version = "1.6", features = ["v4"] }
 parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-

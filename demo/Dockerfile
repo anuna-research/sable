@@ -1,6 +1,10 @@
 # Build stage — nightly Rust (required by halo2-lib)
 FROM rust:slim-bookworm AS builder
 
+# No distributable service image while critical security remediation is open.
+COPY ci/security-release-gate.sh /tmp/security-release-gate.sh
+RUN sh /tmp/security-release-gate.sh
+
 # Install nightly toolchain
 RUN rustup install nightly && rustup default nightly
 

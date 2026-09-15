@@ -38,6 +38,13 @@
 //! - **Side-channel resistant**: No secret-dependent branching or memory access
 
 pub mod bls381;
+/// Experimental randomized fuzzy commitments. Helper data is sensitive and
+/// population entropy and unlinkability are unmeasured; this is not an approved
+/// authentication or deduplication protocol. The deterministic generator is withdrawn.
+///
+/// ```compile_fail
+/// use sable_core::crypto::fuzzy_commitment::gen_deterministic;
+/// ```
 pub mod fuzzy_commitment;
 pub mod gf256;
 pub mod hashing;
@@ -46,8 +53,8 @@ pub mod pedersen;
 pub mod poseidon;
 pub mod rng;
 
-#[cfg(feature = "zk")]
-pub mod groth16;
+// The placeholder Groth16 circuit is intentionally not compiled under any feature.
+// Reintroduction requires the cryptographic review gates in SBL-RT-004.
 
 // Re-export commonly used items
 pub use bls381::{Fr, G1Affine, G1Projective};

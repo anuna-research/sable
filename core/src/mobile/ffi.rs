@@ -1,95 +1,57 @@
-// SABLE Mobile FFI Layer
-//
-// C-compatible Foreign Function Interface for mobile platforms.
-// Provides memory-safe bindings for Android JNI and iOS Swift integration.
-//
-// REQ-005: Error messages are sanitized to prevent information leakage.
-// Only generic error codes are exposed to external callers.
-// Detailed errors should be logged internally before conversion.
+//! Withdrawn mobile C ABI. Compiled only by the rejecting-backend test harness.
+//! No production export is restored by the boundary repairs.
+//!
+//! All pointer-taking exports are unsafe: C callers must provide live, initialized,
+//! correctly sized allocations with valid aliasing/lifetime and ownership. Numeric
+//! checks cannot validate arbitrary addresses, stale handles or forged allocations.
+//! Output buffers belong to SABLE and must be returned exactly once, unmodified,
+//! through sable_free_result; never use the host allocator to release them.
+#![allow(unsafe_code)]
+#![allow(missing_docs)]
 
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_double, c_int, c_uchar};
-use std::ptr;
-use std::slice;
+#[cfg(panic = "abort")]
+compile_error!("SABLE FFI requires panic=unwind for its ABI panic boundary");
+
+#[path = "ffi_boundary.rs"]
+mod boundary;
 
 use super::MobileSable;
-use crate::crypto::rng::SecureRng;
-use crate::error::{PublicErrorCode, SableError};
-use crate::types::{Distance, Salt, Timestamp};
+use crate::{
+    crypto::{pedersen::PedersenCommitment, rng::SecureRng},
+    error::{PublicErrorCode, SableError},
+    types::{Distance, Salt, Timestamp},
+};
+use boundary::{check_region, guard, input, output};
+use std::{
+    os::raw::{c_char, c_double, c_int, c_uchar},
+    ptr,
+};
 
-// Opaque handles for mobile platforms
+const FEATURES: usize = 512;
+const MAX_PROOF: usize = 10 * 1024;
+
 pub type SableHandle = *mut MobileSable;
 
-/// Error codes for mobile FFI (REQ-005: Sanitized for external exposure)
-///
-/// These error codes do not reveal implementation details, file paths,
-/// internal state, timing information, or algorithm details.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SableErrorCode {
-    /// Operation completed successfully
     Success = 0,
-    /// Invalid input parameters or data format
     InvalidInput = 1,
-    /// Processing operation failed
     ProcessingFailed = 2,
-    /// Internal system error
     SystemError = 3,
 }
 
 impl From<SableError> for SableErrorCode {
-    /// Convert internal SableError to sanitized FFI error code (REQ-005)
-    ///
-    /// NOTE: The original error should be logged internally before this conversion
-    /// for administrator access to detailed error information.
     fn from(error: SableError) -> Self {
-        // Map using PublicError to ensure consistent sanitization
         match error.to_public_error().code {
-            PublicErrorCode::InvalidInput => SableErrorCode::InvalidInput,
-            PublicErrorCode::ProcessingFailed => SableErrorCode::ProcessingFailed,
-            PublicErrorCode::SystemError => SableErrorCode::SystemError,
+            PublicErrorCode::InvalidInput => Self::InvalidInput,
+            PublicErrorCode::ProcessingFailed => Self::ProcessingFailed,
+            PublicErrorCode::SystemError => Self::SystemError,
         }
     }
 }
 
-impl From<PublicErrorCode> for SableErrorCode {
-    fn from(code: PublicErrorCode) -> Self {
-        match code {
-            PublicErrorCode::InvalidInput => SableErrorCode::InvalidInput,
-            PublicErrorCode::ProcessingFailed => SableErrorCode::ProcessingFailed,
-            PublicErrorCode::SystemError => SableErrorCode::SystemError,
-        }
-    }
-}
-
-/// Internal helper to log error details before sanitization (REQ-005)
-///
-/// This function logs the detailed error information for administrator access
-/// before converting to a sanitized error code for external exposure.
-///
-/// In production, this should integrate with a secure logging framework
-/// that is only accessible to authorized administrators.
-#[cfg(feature = "internal-logging")]
-fn log_internal_error(error: &SableError, context: &str) {
-    // Log detailed error for administrators
-    // This log should only be accessible to authorized personnel
-    eprintln!("[INTERNAL] {} - Error: {:?}", context, error);
-}
-
-#[cfg(not(feature = "internal-logging"))]
-fn log_internal_error(_error: &SableError, _context: &str) {
-    // Logging disabled - errors are silently sanitized
-}
-
-/// Convert SableError to FFI error code with internal logging (REQ-005)
-fn sanitize_error(error: SableError, context: &str) -> SableErrorCode {
-    log_internal_error(&error, context);
-    error.into()
-}
-
-/// FFI result structure (for internal use only)
 #[repr(C)]
-#[doc(hidden)]
 pub struct SableResult {
     pub error_code: SableErrorCode,
     pub data: *mut c_uchar,
@@ -97,17 +59,6 @@ pub struct SableResult {
 }
 
 impl SableResult {
-    fn success(data: Vec<u8>) -> Self {
-        let data_len = data.len() as c_int;
-        let data_ptr = Box::into_raw(data.into_boxed_slice()) as *mut c_uchar;
-        
-        Self {
-            error_code: SableErrorCode::Success,
-            data: data_ptr,
-            data_len,
-        }
-    }
-    
     fn error(code: SableErrorCode) -> Self {
         Self {
             error_code: code,
@@ -115,96 +66,98 @@ impl SableResult {
             data_len: 0,
         }
     }
-}
 
-// Core SABLE FFI functions
-
-/// Create new SABLE instance
-/// Returns opaque handle or null on error
-#[no_mangle]
-pub extern "C" fn sable_new() -> SableHandle {
-    match MobileSable::new() {
-        Ok(sable) => Box::into_raw(Box::new(sable)),
-        Err(_) => ptr::null_mut(),
-    }
-}
-
-/// Free SABLE instance
-#[no_mangle]
-pub extern "C" fn sable_free(handle: SableHandle) {
-    if !handle.is_null() {
-        unsafe {
-            let _ = Box::from_raw(handle);
+    fn success(data: Vec<u8>) -> Self {
+        if data.is_empty() || data.len() > MAX_PROOF {
+            return Self::error(SableErrorCode::ProcessingFailed);
+        }
+        let Ok(data_len) = c_int::try_from(data.len()) else {
+            return Self::error(SableErrorCode::SystemError);
+        };
+        Self {
+            error_code: SableErrorCode::Success,
+            data: Box::into_raw(data.into_boxed_slice()).cast(),
+            data_len,
         }
     }
 }
 
-/// Generate biometric commitment
-/// 
-/// # Arguments
-/// * `handle` - SABLE instance handle
-/// * `features` - Array of biometric features (f64)
-/// * `features_len` - Number of features
-/// * `salt` - 32-byte salt array
-/// 
-/// # Returns
-/// SableResult with commitment data (48 bytes) or error
-#[no_mangle]
-pub extern "C" fn sable_generate_commitment(
+fn result(operation: impl FnOnce() -> Result<Vec<u8>, SableErrorCode>) -> SableResult {
+    guard(
+        SableResult::error(SableErrorCode::SystemError),
+        || match operation() {
+            Ok(data) => SableResult::success(data),
+            Err(code) => SableResult::error(code),
+        },
+    )
+}
+
+fn valid<T>(pointer: *const T, len: c_int, min: usize, max: usize) -> Result<(), SableErrorCode> {
+    check_region(pointer, len, min..=max)
+        .map(|_| ())
+        .ok_or(SableErrorCode::InvalidInput)
+}
+
+#[cfg_attr(not(test), no_mangle)]
+pub extern "C" fn sable_new() -> SableHandle {
+    guard(ptr::null_mut(), || {
+        MobileSable::new()
+            .map(|value| Box::into_raw(Box::new(value)))
+            .unwrap_or(ptr::null_mut())
+    })
+}
+
+/// # Safety
+/// Handle must be null or a live handle returned by sable_new, uniquely owned and
+/// not concurrently used. A freed/copied/forged handle is invalid.
+#[cfg_attr(not(test), no_mangle)]
+pub unsafe extern "C" fn sable_free(handle: SableHandle) {
+    guard((), || {
+        if check_region(handle, 1, 1..=1).is_some() {
+            unsafe {
+                drop(Box::from_raw(handle));
+            }
+        }
+    })
+}
+
+/// # Safety
+/// Handle must be live; features must hold features_len initialized f64 values
+/// and salt must hold 32 bytes. Inputs may not be mutated during this call.
+#[cfg_attr(not(test), no_mangle)]
+pub unsafe extern "C" fn sable_generate_commitment(
     handle: SableHandle,
     features: *const c_double,
     features_len: c_int,
     salt: *const c_uchar,
 ) -> SableResult {
-    if handle.is_null() || features.is_null() || salt.is_null() {
-        return SableResult::error(SableErrorCode::InvalidInput);
-    }
-    
-    let sable = unsafe { &*handle };
-    
-    // Convert features from C array
-    let features_slice = unsafe {
-        slice::from_raw_parts(features, features_len as usize)
-    };
-    
-    // Convert salt from C array (32 bytes)
-    let salt_slice = unsafe {
-        slice::from_raw_parts(salt, 32)
-    };
-    
-    let salt = match Salt::from_bytes(salt_slice) {
-        Ok(s) => s,
-        Err(_) => return SableResult::error(SableErrorCode::InvalidInput),
-    };
-    
-    // Generate commitment
-    match sable.generate_commitment(features_slice, &salt) {
-        Ok(commitment) => {
-            // Serialize commitment to 48-byte format
-            match commitment.to_bytes() {
-                Ok(bytes) => SableResult::success(bytes),
-                Err(e) => SableResult::error(sanitize_error(e, "commitment_serialization")),
-            }
+    result(|| {
+        // Validate every numerical boundary before the first pointer dereference.
+        valid(features, features_len, FEATURES, FEATURES)?;
+        valid(salt, 32, 32, 32)?;
+        valid(handle, 1, 1, 1)?;
+        let features = unsafe { input(features, features_len, FEATURES..=FEATURES) }
+            .ok_or(SableErrorCode::InvalidInput)?;
+        if features.iter().any(|f| !f.is_finite()) {
+            return Err(SableErrorCode::InvalidInput);
         }
-        Err(e) => SableResult::error(sanitize_error(e, "generate_commitment")),
-    }
+        let salt = Salt::from_bytes(
+            unsafe { input(salt, 32, 32..=32) }.ok_or(SableErrorCode::InvalidInput)?,
+        )
+        .map_err(SableErrorCode::from)?;
+        let sable = &unsafe { input(handle, 1, 1..=1) }.ok_or(SableErrorCode::InvalidInput)?[0];
+        let commitment = sable
+            .generate_commitment(features, &salt)
+            .map_err(SableErrorCode::from)?;
+        Ok(commitment.to_bytes().to_vec())
+    })
 }
 
-/// Generate zero-knowledge proof
-///
-/// # Arguments
-/// * `handle` - SABLE instance handle  
-/// * `features` - Array of biometric features
-/// * `features_len` - Number of features
-/// * `salt` - 32-byte salt array
-/// * `commitment` - 48-byte commitment array
-/// * `threshold` - Distance threshold (f64)
-/// * `current_time` - Current timestamp (u64)
-///
-/// # Returns
-/// SableResult with proof data or error
-#[no_mangle]
-pub extern "C" fn sable_generate_proof(
+/// # Safety
+/// As for sable_generate_commitment; commitment must also hold 48 readable bytes.
+/// This remains the withdrawn legacy proof API, not the policy-aware replacement.
+#[cfg_attr(not(test), no_mangle)]
+pub unsafe extern "C" fn sable_generate_proof(
     handle: SableHandle,
     features: *const c_double,
     features_len: c_int,
@@ -213,60 +166,47 @@ pub extern "C" fn sable_generate_proof(
     threshold: c_double,
     current_time: u64,
 ) -> SableResult {
-    if handle.is_null() || features.is_null() || salt.is_null() || commitment.is_null() {
-        return SableResult::error(SableErrorCode::InvalidInput);
-    }
-    
-    let sable = unsafe { &*handle };
-    
-    // Convert inputs from C
-    let features_slice = unsafe {
-        slice::from_raw_parts(features, features_len as usize)
-    };
-    
-    let salt_slice = unsafe {
-        slice::from_raw_parts(salt, 32)
-    };
-    
-    let commitment_slice = unsafe {
-        slice::from_raw_parts(commitment, 48)
-    };
-    
-    // Parse inputs
-    let salt = match Salt::from_bytes(salt_slice) {
-        Ok(s) => s,
-        Err(_) => return SableResult::error(SableErrorCode::InvalidInput),
-    };
-    
-    let commitment = match crate::crypto::pedersen::PedersenCommitment::from_bytes(commitment_slice) {
-        Ok(c) => c,
-        Err(e) => return SableResult::error(sanitize_error(e, "parse_commitment")),
-    };
-
-    let threshold = Distance::new(threshold);
-    let timestamp = Timestamp::from_unix(current_time);
-
-    // Generate proof
-    match sable.generate_proof(features_slice, &salt, &commitment, threshold, timestamp) {
-        Ok(proof_bytes) => SableResult::success(proof_bytes),
-        Err(e) => SableResult::error(sanitize_error(e, "generate_proof")),
-    }
+    result(|| {
+        valid(features, features_len, FEATURES, FEATURES)?;
+        valid(salt, 32, 32, 32)?;
+        valid(commitment, 48, 48, 48)?;
+        valid(handle, 1, 1, 1)?;
+        if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+            return Err(SableErrorCode::InvalidInput);
+        }
+        let features = unsafe { input(features, features_len, FEATURES..=FEATURES) }
+            .ok_or(SableErrorCode::InvalidInput)?;
+        if features.iter().any(|f| !f.is_finite()) {
+            return Err(SableErrorCode::InvalidInput);
+        }
+        let salt = Salt::from_bytes(
+            unsafe { input(salt, 32, 32..=32) }.ok_or(SableErrorCode::InvalidInput)?,
+        )
+        .map_err(SableErrorCode::from)?;
+        let bytes =
+            unsafe { input(commitment, 48, 48..=48) }.ok_or(SableErrorCode::InvalidInput)?;
+        let commitment = PedersenCommitment::from_bytes(
+            bytes.try_into().map_err(|_| SableErrorCode::InvalidInput)?,
+        )
+        .map_err(SableErrorCode::from)?;
+        let sable = &unsafe { input(handle, 1, 1..=1) }.ok_or(SableErrorCode::InvalidInput)?[0];
+        sable
+            .generate_proof(
+                features,
+                &salt,
+                &commitment,
+                Distance::new(threshold),
+                Timestamp::from_unix(current_time),
+            )
+            .map_err(SableErrorCode::from)
+    })
 }
 
-/// Verify zero-knowledge proof
-///
-/// # Arguments
-/// * `handle` - SABLE instance handle
-/// * `proof` - Proof data bytes
-/// * `proof_len` - Proof data length
-/// * `commitment` - 48-byte commitment array
-/// * `threshold` - Distance threshold (f64)
-/// * `current_time` - Current timestamp (u64)
-///
-/// # Returns
-/// 1 if verification succeeds, 0 if fails, -1 on error
-#[no_mangle]
-pub extern "C" fn sable_verify_proof(
+/// # Safety
+/// Handle must be live; proof must hold proof_len readable bytes and commitment
+/// must hold 48 readable bytes. No concurrent mutation of inputs is permitted.
+#[cfg_attr(not(test), no_mangle)]
+pub unsafe extern "C" fn sable_verify_proof(
     handle: SableHandle,
     proof: *const c_uchar,
     proof_len: c_int,
@@ -274,128 +214,159 @@ pub extern "C" fn sable_verify_proof(
     threshold: c_double,
     current_time: u64,
 ) -> c_int {
-    if handle.is_null() || proof.is_null() || commitment.is_null() {
-        return -1; // Error
-    }
-    
-    let sable = unsafe { &*handle };
-    
-    // Convert inputs from C
-    let proof_slice = unsafe {
-        slice::from_raw_parts(proof, proof_len as usize)
-    };
-    
-    let commitment_slice = unsafe {
-        slice::from_raw_parts(commitment, 48)
-    };
-    
-    // Parse inputs
-    let commitment = match crate::crypto::pedersen::PedersenCommitment::from_bytes(commitment_slice) {
-        Ok(c) => c,
-        Err(_) => return -1,
-    };
-    
-    let threshold = Distance::new(threshold);
-    let timestamp = Timestamp::from_unix(current_time);
-    
-    // Verify proof
-    match sable.verify_proof(proof_slice, &commitment, threshold, timestamp) {
-        Ok(true) => 1,   // Verification succeeded
-        Ok(false) => 0,  // Verification failed
-        Err(_) => -1,    // Error occurred
-    }
-}
-
-/// Generate random salt for commitment
-/// 
-/// # Arguments
-/// * `salt_out` - Output buffer for 32-byte salt
-///
-/// # Returns
-/// 0 on success, -1 on error
-#[no_mangle]
-pub extern "C" fn sable_generate_salt(salt_out: *mut c_uchar) -> c_int {
-    if salt_out.is_null() {
-        return -1;
-    }
-    
-    let mut rng = match SecureRng::new() {
-        Ok(r) => r,
-        Err(_) => return -1,
-    };
-    let salt = Salt::random(&mut rng);
-    
-    match salt.to_bytes() {
-        Ok(bytes) => {
-            unsafe {
-                ptr::copy_nonoverlapping(bytes.as_ptr(), salt_out, 32);
+    guard(-1, || {
+        let operation = || -> Option<c_int> {
+            valid(proof, proof_len, 1, MAX_PROOF).ok()?;
+            valid(commitment, 48, 48, 48).ok()?;
+            valid(handle, 1, 1, 1).ok()?;
+            if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+                return None;
             }
-            0
-        }
-        Err(_) => -1,
-    }
+            let proof = unsafe { input(proof, proof_len, 1..=MAX_PROOF) }?;
+            let bytes = unsafe { input(commitment, 48, 48..=48) }?;
+            let commitment = PedersenCommitment::from_bytes(bytes.try_into().ok()?).ok()?;
+            let sable = &unsafe { input(handle, 1, 1..=1) }?[0];
+            sable
+                .verify_proof(
+                    proof,
+                    &commitment,
+                    Distance::new(threshold),
+                    Timestamp::from_unix(current_time),
+                )
+                .ok()
+                .map(c_int::from)
+        };
+        operation().unwrap_or(-1)
+    })
 }
 
-/// Free result data allocated by SABLE FFI functions
-#[no_mangle]
-pub extern "C" fn sable_free_result(result: &mut SableResult) {
-    if !result.data.is_null() {
-        unsafe {
-            let _ = Vec::from_raw_parts(result.data, result.data_len as usize, result.data_len as usize);
+/// # Safety
+/// salt_out must point to an exclusively writable, initialized 32-byte buffer.
+#[cfg_attr(not(test), no_mangle)]
+pub unsafe extern "C" fn sable_generate_salt(salt_out: *mut c_uchar) -> c_int {
+    guard(-1, || {
+        if valid(salt_out, 32, 32, 32).is_err() {
+            return -1;
         }
+        let Ok(mut rng) = SecureRng::new() else {
+            return -1;
+        };
+        let Ok(bytes) = Salt::random(&mut rng).to_bytes() else {
+            return -1;
+        };
+        let Some(destination) = (unsafe { output(salt_out, 32, 32..=32) }) else {
+            return -1;
+        };
+        destination.copy_from_slice(&bytes);
+        0
+    })
+}
+
+/// # Safety
+/// result must be null or an exclusively writable initialized result from SABLE.
+/// Its data pointer and length must be unmodified, and the allocation must not
+/// have been freed through another copy. Repeated calls on the SAME cleared
+/// result are harmless; copying an owning result does not duplicate ownership.
+#[cfg_attr(not(test), no_mangle)]
+pub unsafe extern "C" fn sable_free_result(result: *mut SableResult) {
+    guard((), || {
+        let Some(result) = (unsafe { output(result, 1, 1..=1) }) else {
+            return;
+        };
+        let result = &mut result[0];
+        if result.data.is_null() {
+            result.data_len = 0;
+            return;
+        }
+        let Some(len) = check_region(result.data, result.data_len, 1..=MAX_PROOF) else {
+            result.error_code = SableErrorCode::InvalidInput;
+            return; // Never reconstruct an allocation from an invalid length.
+        };
+        let pointer = result.data;
         result.data = ptr::null_mut();
         result.data_len = 0;
-    }
-}
-
-/// Get error message string (REQ-005: Sanitized for external exposure)
-///
-/// Returns generic error messages that do not reveal implementation details,
-/// file paths, internal state, timing information, or algorithm details.
-#[no_mangle]
-pub extern "C" fn sable_error_message(error_code: SableErrorCode) -> *const c_char {
-    // REQ-005: Use generic messages that don't leak implementation details
-    let message = match error_code {
-        SableErrorCode::Success => "Success",
-        SableErrorCode::InvalidInput => "Invalid input provided",
-        SableErrorCode::ProcessingFailed => "Operation could not be completed",
-        SableErrorCode::SystemError => "An internal error occurred",
-    };
-
-    match CString::new(message) {
-        Ok(c_str) => c_str.into_raw(),
-        Err(_) => ptr::null(),
-    }
-}
-
-/// Free error message string
-#[no_mangle]
-pub extern "C" fn sable_free_error_message(message: *mut c_char) {
-    if !message.is_null() {
+        // Match the exact Box<[u8]> allocator/layout used by success(), not a
+        // guessed Vec capacity. Allocation provenance is the caller contract.
         unsafe {
-            let _ = CString::from_raw(message);
+            drop(Box::from_raw(ptr::slice_from_raw_parts_mut(pointer, len)));
         }
-    }
+    })
 }
+
+/// Borrowed static string; callers must not free it with their allocator.
+/// An integer parameter avoids undefined behavior for unknown C enum values.
+#[cfg_attr(not(test), no_mangle)]
+pub extern "C" fn sable_error_message(error_code: c_int) -> *const c_char {
+    guard(ptr::null(), || {
+        let message: &'static [u8] = match error_code {
+            0 => b"Success\0",
+            1 => b"Invalid input provided\0",
+            2 => b"Operation could not be completed\0",
+            _ => b"An internal error occurred\0",
+        };
+        message.as_ptr().cast()
+    })
+}
+
+/// Compatibility no-op: error messages are borrowed static strings.
+#[cfg_attr(not(test), no_mangle)]
+pub extern "C" fn sable_free_error_message(_message: *mut c_char) {}
 
 #[cfg(test)]
-mod tests {
+mod allocation_tests {
     use super::*;
-    
+
     #[test]
-    fn test_ffi_sable_creation() {
-        let handle = sable_new();
-        assert!(!handle.is_null());
-        sable_free(handle);
+    fn boxed_output_uses_matching_free_and_clears_owner() {
+        let mut bytes = Vec::with_capacity(1024);
+        bytes.extend_from_slice(&[1, 2, 3]);
+        let mut result = SableResult::success(bytes);
+        assert_eq!(result.data_len, 3);
+        assert_eq!(
+            unsafe { input(result.data, result.data_len, 1..=MAX_PROOF) }.unwrap(),
+            &[1, 2, 3]
+        );
+        unsafe {
+            sable_free_result(&mut result);
+        }
+        assert!(result.data.is_null());
+        assert_eq!(result.data_len, 0);
+        unsafe {
+            sable_free_result(&mut result);
+        }
     }
-    
+
     #[test]
-    fn test_ffi_salt_generation() {
-        let mut salt = [0u8; 32];
-        let result = sable_generate_salt(salt.as_mut_ptr());
-        assert_eq!(result, 0);
-        
-        // Salt should not be all zeros
-        assert!(salt.iter().any(|&x| x != 0));
+    fn invalid_output_length_is_rejected_before_allocator_reconstruction() {
+        for len in [c_int::MIN, -1, 0, c_int::MAX, MAX_PROOF as c_int + 1] {
+            let mut result = SableResult::success(vec![42; 3]);
+            let pointer = result.data;
+            result.data_len = len;
+            unsafe {
+                sable_free_result(&mut result);
+            }
+            assert_eq!(result.error_code, SableErrorCode::InvalidInput);
+            assert_eq!(result.data, pointer);
+            // Restore the real allocation descriptor to release it legitimately.
+            result.data_len = 3;
+            unsafe {
+                sable_free_result(&mut result);
+            }
+        }
+    }
+
+    #[test]
+    fn output_size_is_bounded_before_ownership_transfer() {
+        for bytes in [vec![], vec![0; MAX_PROOF + 1]] {
+            let result = SableResult::success(bytes);
+            assert_ne!(result.error_code, SableErrorCode::Success);
+            assert!(result.data.is_null());
+            assert_eq!(result.data_len, 0);
+        }
+        let mut result = SableResult::success(vec![0; MAX_PROOF]);
+        assert_eq!(result.error_code, SableErrorCode::Success);
+        unsafe {
+            sable_free_result(&mut result);
+        }
     }
 }

@@ -5,6 +5,8 @@
 #ifndef SABLE_FFI_H
 #define SABLE_FFI_H
 
+#error "SABLE mobile FFI is withdrawn (SBL-RT-004/008)."
+
 #include <stdint.h>
 #include <stddef.h>
 

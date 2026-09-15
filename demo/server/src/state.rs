@@ -1,44 +1,34 @@
 use parking_lot::RwLock;
-use sable_core::crypto::fuzzy_commitment::HelperData;
-use sable_core::crypto::pedersen::Commitment;
+use zeroize::Zeroize;
 use sable_core::zk::halo2::{FaceVerificationProver, Halo2Fr};
-use std::collections::HashMap;
+use crate::verification_policy::PendingVerification;
+use crate::cache::TtlCache;
+use crate::auth::Principal;
+use std::time::Duration;
 use std::sync::Arc;
-
-/// Enrollment mode: Pedersen commitment (ZK-compatible) or Fuzzy Commitment (deterministic).
-#[derive(Clone, Debug)]
-pub enum EnrollmentMode {
-    /// Standard Pedersen commitment with ZK proof support.
-    Pedersen,
-    /// Fuzzy commitment for deterministic biometric deduplication.
-    FuzzyCommitment,
-}
 
 /// Session data for an enrolled user
 #[derive(Clone)]
 pub struct EnrollmentSession {
     pub session_id: String,
-    pub enrollment_mode: EnrollmentMode,
-    #[allow(dead_code)]
-    pub commitment: Commitment,
     pub commitment_bytes: [u8; 48],
-    pub features: [f32; 512],
     /// Original 1024-dim face embedding for cosine similarity comparison
-    pub face_embedding: Option<Vec<f64>>,
+    pub face_embedding: Vec<f64>,
     /// Quantized embedding for Halo2 ZK proofs (Hamming distance)
     pub quantized_embedding: Vec<u8>,
     /// Poseidon commitment to the quantized template, registered at enrollment.
     /// The ZK proof binds to this so a prover cannot match against a different
-    /// template (see `FaceVerificationVerifier::verify_bound`).
+    /// template (see `FaceVerificationVerifier::verify_expected`).
     pub template_commitment: Halo2Fr,
     #[allow(dead_code)]
-    pub salt_bytes: [u8; 32],
-    #[allow(dead_code)]
     pub created_at: std::time::Instant,
-    /// Fuzzy commitment helper data (only for FuzzyCommitment mode)
-    pub fuzzy_helper_data: Option<HelperData>,
-    /// Fuzzy commitment hash (only for FuzzyCommitment mode)
-    pub fuzzy_commitment_hash: Option<[u8; 32]>,
+}
+
+impl Drop for EnrollmentSession {
+    fn drop(&mut self) {
+        self.face_embedding.zeroize();
+        self.quantized_embedding.zeroize();
+    }
 }
 
 /// Screen flash liveness result stored per session
@@ -69,14 +59,16 @@ pub struct AuthChallenge {
 /// Application state shared across handlers
 #[derive(Clone)]
 pub struct AppState {
+    /// Single-use verifier-owned policies for consumed authentication challenges.
+    verification_policies: Arc<RwLock<TtlCache<PendingVerification>>>,
     /// Enrolled sessions by session_id
-    pub sessions: Arc<RwLock<HashMap<String, EnrollmentSession>>>,
+    sessions: Arc<RwLock<TtlCache<EnrollmentSession>>>,
     /// Active authentication challenges
-    pub challenges: Arc<RwLock<HashMap<String, AuthChallenge>>>,
+    challenges: Arc<RwLock<TtlCache<AuthChallenge>>>,
     /// Halo2 ZK prover (shared for setup reuse)
     pub halo2_prover: Arc<RwLock<FaceVerificationProver>>,
     /// Pending liveness results by challenge_id (single-use)
-    pub liveness_results: Arc<RwLock<HashMap<String, LivenessResult>>>,
+    liveness_results: Arc<RwLock<TtlCache<LivenessResult>>>,
 }
 
 impl AppState {
@@ -86,52 +78,78 @@ impl AppState {
         tracing::info!("Halo2 ZK prover initialized");
 
         Self {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            challenges: Arc::new(RwLock::new(HashMap::new())),
+            verification_policies: Arc::new(RwLock::new(TtlCache::new(256, Duration::from_secs(30)))),
+            sessions: Arc::new(RwLock::new(TtlCache::new(128, Duration::from_secs(15 * 60)))),
+            challenges: Arc::new(RwLock::new(TtlCache::new(256, Duration::from_secs(30)))),
             halo2_prover: Arc::new(RwLock::new(prover)),
-            liveness_results: Arc::new(RwLock::new(HashMap::new())),
+            liveness_results: Arc::new(RwLock::new(TtlCache::new(256, Duration::from_secs(30)))),
         }
     }
 
-    pub fn store_session(&self, session: EnrollmentSession) {
+    pub fn store_session(&self, principal: &Principal, session: EnrollmentSession) -> Result<(), String> {
         let mut sessions = self.sessions.write();
-        sessions.insert(session.session_id.clone(), session);
+        if sessions.count_prefix(&principal.prefix()) >= 4 { return Err("Enrollment quota exhausted".into()); }
+        sessions.insert(principal.key(&session.session_id), session)
     }
 
-    pub fn get_session(&self, session_id: &str) -> Option<EnrollmentSession> {
+    pub(crate) fn store_verification_policy(&self, principal: &Principal, id: String, policy: PendingVerification, now: u64) -> Result<(), String> {
+        let mut policies = self.verification_policies.write();
+        let monotonic_now = std::time::Instant::now();
+        policies.retain(|_, value| value.is_current(now, monotonic_now));
+        if !policy.is_current(now, monotonic_now) || policies.len() >= 256 || policies.contains_key(&principal.key(&id)) || policies.count_prefix(&principal.prefix()) >= 8 {
+            return Err("Verification policy expired or capacity exhausted".into());
+        }
+        policies.insert(principal.key(&id), policy)
+    }
+
+    pub(crate) fn take_verification_policy(&self, principal: &Principal, id: &str) -> Option<PendingVerification> {
+        self.verification_policies.write().remove(&principal.key(id))
+    }
+
+    pub fn get_session(&self, principal: &Principal, session_id: &str) -> Option<EnrollmentSession> {
         let sessions = self.sessions.read();
-        sessions.get(session_id).cloned()
+        sessions.get(&principal.key(session_id)).cloned()
     }
 
-    pub fn store_challenge(&self, challenge: AuthChallenge) {
+    pub fn store_challenge(&self, principal: &Principal, challenge: AuthChallenge) -> Result<(), String> {
         let mut challenges = self.challenges.write();
-        challenges.insert(challenge.challenge_id.clone(), challenge);
+        if challenges.count_prefix(&principal.prefix()) >= 8 { return Err("Challenge quota exhausted".into()); }
+        challenges.insert(principal.key(&challenge.challenge_id), challenge)
     }
 
     #[allow(dead_code)]
-    pub fn get_challenge(&self, challenge_id: &str) -> Option<AuthChallenge> {
+    pub fn get_challenge(&self, principal: &Principal, challenge_id: &str) -> Option<AuthChallenge> {
         let challenges = self.challenges.read();
-        challenges.get(challenge_id).cloned()
+        challenges.get(&principal.key(challenge_id)).cloned()
     }
 
-    pub fn remove_challenge(&self, challenge_id: &str) -> Option<AuthChallenge> {
+    pub fn remove_challenge(&self, principal: &Principal, challenge_id: &str) -> Option<AuthChallenge> {
         let mut challenges = self.challenges.write();
-        challenges.remove(challenge_id)
+        challenges.remove(&principal.key(challenge_id))
     }
 
-    pub fn store_liveness_result(&self, challenge_id: String, result: LivenessResult) {
+    pub fn store_liveness_result(&self, principal: &Principal, challenge_id: String, result: LivenessResult) -> Result<(), String> {
         let mut results = self.liveness_results.write();
-        results.insert(challenge_id, result);
+        if results.count_prefix(&principal.prefix()) >= 8 { return Err("Liveness quota exhausted".into()); }
+        results.insert(principal.key(&challenge_id), result)
     }
 
-    pub fn get_liveness_result(&self, challenge_id: &str) -> Option<LivenessResult> {
+    pub fn get_liveness_result(&self, principal: &Principal, challenge_id: &str) -> Option<LivenessResult> {
         let results = self.liveness_results.read();
-        results.get(challenge_id).cloned()
+        results.get(&principal.key(challenge_id)).cloned()
     }
 
-    pub fn take_liveness_result(&self, challenge_id: &str) -> Option<LivenessResult> {
+    pub fn take_liveness_result(&self, principal: &Principal, challenge_id: &str) -> Option<LivenessResult> {
         let mut results = self.liveness_results.write();
-        results.remove(challenge_id)
+        results.remove(&principal.key(challenge_id))
+    }
+
+    /// Release expired records even when the service receives no traffic.
+    pub fn evict_expired(&self) {
+        self.sessions.write().retain(|_, _| true);
+        self.challenges.write().retain(|_, _| true);
+        self.liveness_results.write().retain(|_, _| true);
+        self.verification_policies.write().retain(|_, _| true);
     }
 }
 

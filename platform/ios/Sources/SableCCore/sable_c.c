@@ -2,6 +2,8 @@
 //
 // This file will link to the Rust SABLE core library compiled as a static library
 
+#error "SABLE mobile packages are withdrawn (SBL-RT-004/008)."
+
 #include "sable_c.h"
 #include <stdlib.h>
 #include <string.h>

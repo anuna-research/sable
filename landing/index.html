@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>sable — prove who you are without revealing your biometrics</title>
-<meta name="description" content="Zero-knowledge biometric auth for the edge. Halo2 proofs over face templates. Offline NFC/BLE verification. BBS+ selective disclosure. No cloud, no database, no special hardware.">
+<title>sable — biometric proof research</title>
+<meta name="description" content="Experimental biometric proof research. The demo processes embeddings and images centrally. Security remediation is incomplete; not approved for production.">
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -138,409 +138,127 @@
 </style>
 </head>
 <body>
-
 <nav>
-  <div class="nav-inner">
-    <a href="#" class="wordmark">sable<span>·</span></a>
+  <div class="wrap nav-inner">
+    <a href="#" class="logo">sable<span>.</span></a>
     <div class="nav-links">
-      <a href="#demo">Demo</a>
-      <a href="#how">How it works</a>
-      <a href="#faq">FAQ</a>
-      <a href="#cta" class="nav-cta">Source</a>
+      <a href="#demo">Research demo</a>
+      <a href="#how">Data flow</a>
+      <a href="#faq">Limitations</a>
+      <a href="https://codeberg.org/anuna/sable" class="nav-cta">Source</a>
     </div>
   </div>
 </nav>
-
 <section class="hero">
   <div class="hero-grid"></div>
   <div class="wrap hero-content">
-    <div class="eyebrow">sable · secure attested biometric library for edge</div>
-    <h1>Prove who you are <em>without</em> revealing your biometrics.</h1>
+    <div class="eyebrow">sable · biometric proof research</div>
+    <h1>Explore biometric matching with <em>zero-knowledge proofs.</em></h1>
     <p class="hero-sub">
-      Biometric identity today trades privacy for convenience: a central
-      database, a cloud MPC service, or a proprietary scanner. sable does
-      neither. A <strong style="color:var(--text)">Halo2 zero-knowledge proof</strong> — generated in
-      ~250ms on a phone — shows a verifier your live face matches the
-      enrolled template, revealing nothing else. Offline. No special hardware.
+      Experimental Halo2 circuits check biometric and liveness relations.
+      The current browser demo sends embeddings and images to a server, which
+      generates the proof. This is <strong>centralized biometric processing</strong>,
+      not on-device-only privacy or authenticated physical capture.
     </p>
     <div class="cta-row">
-      <a href="#cta" class="btn btn-primary">Read the source <span class="arrow">→</span></a>
-      <a href="#demo" class="btn btn-ghost">See a proof</a>
+      <a href="https://codeberg.org/anuna/sable" class="btn btn-primary">Read the source</a>
+      <a href="#faq" class="btn btn-ghost">Read the limitations</a>
     </div>
     <div class="hero-meta">
-      <span>Halo2 ZK · Pedersen commit · Poseidon hash</span>
-      <span>BBS+ selective disclosure · offline NFC/BLE</span>
-      <span>Android · iOS · Apache 2.0 · 519 tests passing</span>
+      <span>Research only · security remediation incomplete</span>
+      <span>Mobile, attestation and legacy P2P APIs withdrawn</span>
+      <span>No production approval · deployment-image release blocked</span>
     </div>
   </div>
 </section>
-
-<section id="problem">
-  <div class="wrap">
-    <div class="section-label">The problem</div>
-    <h2>Every biometric system today trades <em>something</em> you shouldn't have to trade.</h2>
-    <p class="section-intro">
-      A face is not a password — it can't be rotated. Yet the industry ships
-      architectures that centralise, cache, or transmit the one credential
-      you can never replace. Breaches are irrevocable. Trust is assumed. The
-      privacy-preserving alternatives rely on cloud MPC or blockchain.
-    </p>
-
-    <div class="problem-grid">
-      <div class="problem-card bad">
-        <h3>What the alternatives trade</h3>
-        <p><strong>Centralised databases</strong> — a single breach exposes millions of irrevocable biometric records.</p>
-        <p><strong>Cloud MPC</strong> — templates are sharded across nodes, but you still trust the operators and need always-on internet.</p>
-        <p><strong>Blockchain ID</strong> — solves uniqueness, not privacy; requires gas fees and on-chain verification.</p>
-        <p><strong>Hardware systems</strong> — iris scanners and secure enclaves lock deployment to controlled environments.</p>
-      </div>
-      <div class="problem-card good">
-        <h3>What sable gives up nothing on</h3>
-        <p><strong>Biometrics never leave the device</strong> — enrolment produces a Pedersen commitment; the template stays on the phone.</p>
-        <p><strong>Real zero-knowledge proofs</strong> over the biometric data itself — not statistical matching on encrypted fragments.</p>
-        <p><strong>Offline verification</strong> via NFC or BLE — no cloud, no blockchain, no internet dependency.</p>
-        <p><strong>Any smartphone camera</strong> works — screen-flash liveness detection prevents photo-replay without special hardware.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
 <section id="demo" class="demo">
   <div class="wrap">
-    <div class="section-label">See it work</div>
-    <h2>Five steps from a <em>face</em> to a proof a verifier can check.</h2>
+    <div class="section-label">Current implementation</div>
+    <h2>A research result is not an <em>identity credential.</em></h2>
     <p class="section-intro">
-      Enrol, authenticate, prove, verify, disclose. Click through a real sable flow.
+      Operator-provisioned credentials authorize access to the research API.
+      The server requires complete embedding and liveness inputs and verifies
+      proofs against its own enrollment, threshold and single-use challenge state.
+      These checks do not attest a device, camera or human identity.
     </p>
-
-    <div class="demo-steps">
-      <div class="step-list">
-        <div class="step active" data-pane="p1">
-          <span class="step-num">01</span>
-          <div class="step-title">Enrol</div>
-          <div class="step-desc">Face captured; Pedersen commitment stored on device.</div>
-        </div>
-        <div class="step" data-pane="p2">
-          <span class="step-num">02</span>
-          <div class="step-title">Liveness check</div>
-          <div class="step-desc">Screen-flash reflectance defeats photo &amp; screen replay.</div>
-        </div>
-        <div class="step" data-pane="p3">
-          <span class="step-num">03</span>
-          <div class="step-title">Generate proof</div>
-          <div class="step-desc">Halo2 ZK: live scan matches commitment. ~250ms.</div>
-        </div>
-        <div class="step" data-pane="p4">
-          <span class="step-num">04</span>
-          <div class="step-title">Verify offline</div>
-          <div class="step-desc">Verifier reads proof over NFC/BLE. ~2ms check.</div>
-        </div>
-        <div class="step" data-pane="p5">
-          <span class="step-num">05</span>
-          <div class="step-title">Selective disclosure</div>
-          <div class="step-desc">BBS+ credential — prove "over 18" without showing DOB.</div>
-        </div>
-      </div>
-
-      <div class="terminal">
-        <div class="terminal-bar"><div class="dot"></div><div class="dot"></div><div class="dot"></div><div class="terminal-title">sable · edge device</div></div>
-        <div class="terminal-body">
-
-<div class="terminal-pane active" id="p1"><pre><span class="prompt">user@phone</span>  sable enrol
-
-<span class="dim">[camera]</span>   capturing face …              <span class="ok">✓ 512-d embedding</span>
-<span class="dim">[quant]</span>    quantising to field elements  <span class="ok">✓ 256 limbs</span>
-<span class="dim">[hash]</span>     Poseidon(template) …          <span class="ok">✓ 32 B digest</span>
-<span class="dim">[commit]</span>   Pedersen(template, r) …       <span class="ok">✓ 64 B commit</span>
-
-<span class="key">stored on device:</span>
-   · encrypted template (AES-GCM, device key)
-   · commitment  C = g^t · h^r
-   · opening r   <span class="dim">(never leaves secure storage)</span>
-
-<span class="comment"># Nothing sent off-device. No server sees anything.</span></pre></div>
-
-<div class="terminal-pane" id="p2"><pre><span class="prompt">user@phone</span>  sable auth <span class="flag">--verifier</span> gate-42
-
-<span class="dim">[camera]</span>    starting liveness sequence …
-<span class="dim">[flash]</span>     screen → white    reflectance 0.82    <span class="ok">✓</span>
-<span class="dim">[flash]</span>     screen → red      reflectance 0.41    <span class="ok">✓</span>
-<span class="dim">[flash]</span>     screen → blue     reflectance 0.53    <span class="ok">✓</span>
-<span class="dim">[classify]</span>  3D face vs planar display            <span class="ok">✓ real</span>
-
-<span class="key">liveness:</span>  <span class="ok">pass</span>   <span class="dim">(Tang et al. NDSS 2018 · controlled-illumination)</span>
-
-<span class="comment"># The screen is the light source. No depth camera needed.
-# Photos and phone-screen replays fail the reflectance model.</span></pre></div>
-
-<div class="terminal-pane" id="p3"><pre><span class="prompt">user@phone</span>  <span class="comment"># generating Halo2 proof</span>
-
-<span class="dim">[circuit]</span>  face-match (Poseidon + Pedersen opening)
-<span class="dim">[witness]</span>  live_template, stored_template, r
-<span class="dim">[prove]</span>    Halo2 …                        <span class="ok">✓ 248 ms</span>
-
-<span class="key">proof size:</span>   ~11 KB
-<span class="key">public input:</span> commitment C, context nonce
-<span class="key">private:</span>      template, opening, live scan
-
-<span class="ok">proof π generated</span>   <span class="dim">(transparent setup — no trusted ceremony)</span>
-
-<span class="comment"># The verifier learns: "this person owns a template that opens C,
-# and that template matches a live, liveness-checked capture."
-# Nothing else.</span></pre></div>
-
-<div class="terminal-pane" id="p4"><pre><span class="prompt">verifier@gate</span>  <span class="comment"># receives proof over BLE, no internet</span>
-
-<span class="dim">[ble]</span>      received (C, π, nonce) · 11.2 KB
-<span class="dim">[verify]</span>   Halo2 verify …                 <span class="ok">✓ 1.8 ms</span>
-
-<span class="key">result:</span>  <span class="ok">ACCEPT</span>
-<span class="key">learnt:</span>  this bearer controls commitment C
-        proof is fresh (nonce matches challenge)
-
-<span class="key">NOT</span> learnt:
-   · the template itself
-   · the embedding
-   · any feature of the face
-   · the opening r
-
-<span class="comment"># Verification is fully offline. No server, no phone-home.</span></pre></div>
-
-<div class="terminal-pane" id="p5"><pre><span class="prompt">user@phone</span>  sable disclose <span class="flag">--claim</span> <span class="str">"age >= 18"</span>
-
-<span class="dim">[credential]</span>  loading VC issued by gov-au-id
-<span class="dim">[bbs+]</span>        generating selective disclosure proof …
-<span class="dim">[bind]</span>        binding to biometric proof π            <span class="ok">✓</span>
-
-<span class="key">proved:</span>
-   · bearer of commitment C holds a VC from gov-au-id
-   · VC asserts date-of-birth &lt;= 2008-04-13
-   · VC is not revoked
-
-<span class="key">NOT revealed:</span>
-   · actual DOB, name, address, passport number
-   · any other attribute on the credential
-
-<span class="comment"># BBS+ signatures make "prove predicate, hide attribute" a primitive.
-# Combined with the biometric proof: you prove you are the holder,
-# and you prove one fact about the holder — nothing more.</span></pre></div>
-
-        </div>
-      </div>
-    </div>
+    <p>
+      Local research builds remain available. Registry publishing and the deployment
+      image are on a security release hold. Existing remote services and binaries
+      have not been changed by this repository remediation.
+    </p>
   </div>
 </section>
-
-<section id="pillars">
-  <div class="wrap">
-    <div class="section-label">Why sable</div>
-    <h2>Three properties no biometric system <em>combines</em>.</h2>
-
-    <div class="pillars">
-      <div class="pillar">
-        <div class="pillar-num">01 · True ZK</div>
-        <h3>Proofs over the data, not about it.</h3>
-        <p>Halo2 circuits prove that a live, quantised embedding opens a stored Pedersen commitment. The template stays secret. No trusted setup, no ceremony, no toxic waste.</p>
-        <ul>
-          <li>Halo2 proofs, transparent setup</li>
-          <li>Pedersen commitments over quantised embeddings</li>
-          <li>Poseidon hashing (SNARK-friendly)</li>
-          <li>~250ms prove, ~2ms verify</li>
-          <li>~11 KB proof size</li>
-        </ul>
-      </div>
-      <div class="pillar">
-        <div class="pillar-num">02 · Offline-first</div>
-        <h3>No cloud, no blockchain, no phone-home.</h3>
-        <p>Verification happens peer-to-peer over NFC or BLE. The verifier doesn't need a database, an API, or an internet connection. The phone holds the template; the verifier checks the proof.</p>
-        <ul>
-          <li>NFC / BLE peer-to-peer flow</li>
-          <li>No central registry, ever</li>
-          <li>Works in border crossings, clinics, disasters</li>
-          <li>Verifier learns only what the proof asserts</li>
-          <li>Replay-resistant via challenge nonces</li>
-        </ul>
-      </div>
-      <div class="pillar">
-        <div class="pillar-num">03 · Any phone</div>
-        <h3>A camera and a screen is the hardware.</h3>
-        <p>Liveness uses controlled-illumination reflectance (Tang et al., NDSS 2018): the screen flashes colours, the camera measures how a 3D face reflects them differently from a flat display. Works on commodity phones.</p>
-        <ul>
-          <li>Android and iOS native integrations</li>
-          <li>Screen-flash liveness — no IR, no depth cam</li>
-          <li>Defeats photo &amp; display replay</li>
-          <li>BBS+ verifiable credentials bound to biometric</li>
-          <li>Apache 2.0, 519 tests, 89% coverage</li>
-        </ul>
-      </div>
-    </div>
-  </div>
-</section>
-
 <section id="how" class="how">
   <div class="wrap">
-    <div class="section-label">How it works</div>
-    <h2>A commitment stays on the phone. A <em>proof</em> leaves.</h2>
-    <p class="section-intro">
-      Enrolment hashes and commits to the template. Authentication regenerates
-      the embedding, proves equality under the commitment, and binds the proof
-      to a fresh challenge from the verifier. Optional verifiable credentials
-      carry attested attributes you can reveal selectively.
-    </p>
-
-    <div class="how-arch"><span class="cm">         ┌──────────────────────┐   optional
-         │  </span><span class="hl">Issuer</span> <span class="cm">(government)  │ ───────────┐
-         │  BBS+ signed VC      │            ▼
-         └──────────────────────┘     ┌──────────────┐
-                                      │  </span><span class="hl2">phone</span> <span class="cm">(bearer) │
-    ┌──────────────┐                  │                │        ┌────────────────┐
-    │ </span><span class="hl2">face capture</span> <span class="cm">│ ───────────────► │  </span><span class="hl2">ZK engine</span> <span class="cm">     │ ─────► │  </span><span class="hl">verifier</span> <span class="cm">      │
-    │ liveness     │                  │  Poseidon      │        │                │
-    │ check        │                  │  Pedersen      │ NFC/   │  Halo2 verify  │
-    └──────────────┘                  │  Halo2 prove   │ BLE    │  check VC      │
-                                      │  BBS+ disclose │        │                │
-                                      └──────────────┘        └────────────────┘
-                                        │                         │
-                                        ▼                         ▼
-                               ┌──────────────────┐      ┌─────────────────────┐
-                               │  </span><span class="hl2">never leaves</span> <span class="cm">    │      │  </span><span class="hl">learns only</span> <span class="cm">        │
-                               │  template        │      │  what proof asserts │
-                               │  opening r       │      │  pass / fail        │
-                               │  embedding       │      │  disclosed predicate│
-                               └──────────────────┘      └─────────────────────┘</span></div>
-
+    <div class="section-label">Actual data boundary</div>
+    <h2>The server currently <em>receives biometrics.</em></h2>
     <div class="how-points">
       <div class="how-point">
-        <h4>Poseidon + Pedersen</h4>
-        <p>SNARK-friendly primitives keep the circuit small enough to prove in ~250ms on a modern phone.</p>
+        <h4>Browser capture</h4>
+        <p>Enrollment sends an embedding. Authentication sends a live embedding,
+        four flash frames and any enabled eye crops. The browser is an untrusted input source.</p>
       </div>
       <div class="how-point">
-        <h4>Halo2, transparent setup</h4>
-        <p>No trusted ceremony, no toxic waste, no "we promise nobody kept the τ." The proof system is auditable.</p>
+        <h4>Server processing</h4>
+        <p>The server converts features, extracts measurements and generates proofs.
+        Enrollment lookup expires after 15 minutes; active requests may retain copies longer.</p>
       </div>
       <div class="how-point">
-        <h4>Liveness as a sensor</h4>
-        <p>Controlled-illumination reflectance uses the screen as a light source. Defeats photo and screen replay without IR hardware.</p>
+        <h4>Verifier policy</h4>
+        <p>The proof must match a stored template, threshold, liveness result,
+        challenge digest and expiry. Public fields are not accepted as authorization by themselves.</p>
       </div>
       <div class="how-point">
-        <h4>Selective disclosure via BBS+</h4>
-        <p>A government-issued VC can be shown as "age &gt;= 18" without revealing DOB — or any other attribute.</p>
-      </div>
-      <div class="how-point">
-        <h4>Binding prevents splicing</h4>
-        <p>The VC disclosure is cryptographically bound to the biometric proof, so a stolen VC can't be replayed by another holder.</p>
-      </div>
-      <div class="how-point">
-        <h4>Open, auditable, testable</h4>
-        <p>Apache 2.0, 519 tests (77 Halo2-specific), 89% coverage. Build it, fuzz it, read the circuits.</p>
+        <h4>Missing provenance</h4>
+        <p>A valid relation does not establish a camera observed a live person.
+        Trusted sensor or hardware-backed capture attestation remains unimplemented.</p>
       </div>
     </div>
   </div>
 </section>
-
-<section id="faq">
-  <div class="wrap faq">
-    <div class="section-label">Questions</div>
-    <h2>The honest answers.</h2>
-
-    <details>
-      <summary>How is this different from Apple Face ID or Android biometrics?</summary>
-      <div class="answer">
-        Apple and Android biometrics unlock the device for its owner. They can't prove identity to a
-        third party — there's no exportable, verifiable proof. sable generates a proof you can hand
-        to a verifier over NFC or BLE, while keeping the template on the device.
-      </div>
-    </details>
-
-    <details>
-      <summary>How is this different from cloud MPC biometric services?</summary>
-      <div class="answer">
-        MPC services split your template across nodes and perform statistical matching over the shards.
-        You still trust the operators, still need always-on connectivity, and still don't have a true
-        ZK proof. sable computes a real ZK proof over the template on-device and verifies offline.
-      </div>
-    </details>
-
-    <details>
-      <summary>What stops someone stealing my proof?</summary>
-      <div class="answer">
-        Every proof is bound to a fresh challenge nonce from the verifier. Proofs can't be replayed
-        because the nonce changes per session. Theft of a prior proof gives the attacker nothing useful.
-      </div>
-    </details>
-
-    <details>
-      <summary>Is this ready for production?</summary>
-      <div class="answer">
-        No — and the README says so. It's an experimental library with AI-assisted development. The
-        cryptographic implementations need independent security auditing before any safety-critical use.
-        Demo, research, and pre-production integration: yes. Real deployments: after audit.
-      </div>
-    </details>
-
-    <details>
-      <summary>Does the liveness detection really work without a depth camera?</summary>
-      <div class="answer">
-        Reflectance analysis with controlled illumination (Tang et al., NDSS 2018) distinguishes 3D
-        faces from screens and photos with high accuracy. It's not equivalent to a dedicated IR depth
-        sensor, but it defeats the replay attacks you actually see in the wild.
-      </div>
-    </details>
-
-    <details>
-      <summary>Where's the source?</summary>
-      <div class="answer">
-        Open source, Apache 2.0, hosted on Codeberg. Rust core with Android and iOS bindings.
-      </div>
-    </details>
-
-  </div>
-</section>
-
-<section id="cta" class="final">
+<section id="faq" class="faq">
   <div class="wrap">
-    <h2>A biometric proof you can <em>verify</em>, never own.</h2>
-    <p>
-      Halo2 ZK on the edge. Offline NFC/BLE verification. Selective disclosure.
-      Built on commodity phone hardware, open source under Apache 2.0.
-    </p>
-    <div class="cta-row" style="justify-content:center;">
-      <a href="#" class="btn btn-primary">Get the source <span class="arrow">→</span></a>
-      <a href="#demo" class="btn btn-ghost">Back to the demo</a>
-    </div>
-    <div style="margin-top:2rem;font-family:'DM Mono',monospace;font-size:0.82rem;color:var(--text-faint);">
-      clone: <code style="background:var(--ink-2);padding:4px 10px;border-radius:3px;color:var(--text);">git clone https://codeberg.org/anuna/sable</code>
-    </div>
-    <div class="notice">
-      <strong>Disclaimer:</strong> experimental code under active development. The cryptographic
-      implementations require independent security auditing before production use. Not suitable for
-      safety-critical deployments today.
-    </div>
+    <div class="section-label">Security limitations</div>
+    <h2>What this build <em>does not promise.</em></h2>
+    <details open>
+      <summary>Is this ready for production?</summary>
+      <div class="answer">No. Critical and high remediation remains incomplete.
+      Do not use it for real access control, identity decisions or public deployment.
+      Passing unit tests is not independent security approval.</div>
+    </details>
+    <details>
+      <summary>Does biometric data stay on my device?</summary>
+      <div class="answer">No. The current demo sends embeddings and images to the server.
+      Proof privacy does not hide them from that server, its operator or TLS terminator.
+      Client-side proving and a commitment/proof-only server interface remain required.</div>
+    </details>
+    <details>
+      <summary>Does liveness prove physical presence?</summary>
+      <div class="answer">No. Software liveness is experimental presentation-attack risk reduction.
+      Thresholds need population and attack testing. A malicious prover with a template
+      can fabricate satisfying private measurements without capturing a person.</div>
+    </details>
+    <details>
+      <summary>Are mobile, offline P2P and government credentials available?</summary>
+      <div class="answer">No. The unsafe legacy APIs are withdrawn. The Noise replacement
+      is private test code; attestation binding and transport integration are incomplete.
+      Hardware keystore and selective-disclosure integration are not available controls.</div>
+    </details>
+    <details>
+      <summary>Does Halo2 mean there is no trusted setup?</summary>
+      <div class="answer">Not in this implementation. It uses BN254 KZG with locally generated
+      research parameters. Production ceremony provenance and the key lifecycle have not
+      been established.</div>
+    </details>
+    <p>The source includes the red-team findings, current threat model and remediation
+    evidence under <code>docs/security/</code>. The prior production recommendation is withdrawn.</p>
   </div>
 </section>
-
 <footer>
   <div class="wrap footer-inner">
     <div>sable · built by <a href="https://anuna.coop">Anuna</a></div>
-    <div>
-      <a href="https://codeberg.org/anuna/sable">source</a> ·
-      <a href="#">docs</a> ·
-      <a href="#">paper</a> ·
-      <a href="#">changelog</a>
-    </div>
+    <div><a href="https://codeberg.org/anuna/sable">Source and security documentation</a></div>
   </div>
 </footer>
-
-<script>
-  document.querySelectorAll('.step').forEach(step => {
-    step.addEventListener('click', () => {
-      document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
-      document.querySelectorAll('.terminal-pane').forEach(p => p.classList.remove('active'));
-      step.classList.add('active');
-      document.getElementById(step.dataset.pane).classList.add('active');
-    });
-  });
-</script>
-
 </body>
 </html>

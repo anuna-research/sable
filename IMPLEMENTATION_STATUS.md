@@ -1,5 +1,11 @@
 # SABLE Implementation Status
 
+> **Historical milestone log — not current security status.** Completion marks
+> below do not establish implemented security controls. Mobile, legacy attestation,
+> Groth16 and unauthenticated P2P APIs are withdrawn. Consult the
+> [current threat model](docs/security/THREAT_MODEL.md) and
+> [remediation record](docs/security/REMEDIATION-2026-09-14.md).
+
 ## ✅ Completed - Milestone 1: Core Cryptography
 
 ### Architecture

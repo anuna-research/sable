@@ -1,7 +1,8 @@
 //! # Halo2 Zero-Knowledge Proof Circuits
 //!
 //! This module contains Halo2-based ZK circuits for SABLE face verification.
-//! Halo2 provides transparent setup (no trusted ceremony required).
+//! This backend uses BN254 KZG with locally generated research parameters, not
+//! a transparent setup. Production setup provenance is not established.
 //!
 //! ## Overview
 //!
@@ -14,6 +15,22 @@
 //!
 //! ## Modules
 //!
+//! Scalar-distance simulation APIs are not available in library builds:
+//!
+//! ```compile_fail
+//! use sable_core::zk::halo2::FaceVerificationProver;
+//! fn unsupported(prover: &mut FaceVerificationProver) {
+//!     let _ = prover.prove(0, 200);
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use sable_core::zk::halo2::FaceVerificationProver;
+//! fn unsupported(prover: &mut FaceVerificationProver) {
+//!     let _ = prover.prove_with_liveness(0, 200, None);
+//! }
+//! ```
+//!
 //! - [`hello`] - Hello world circuit for validation and benchmarking
 //! - [`quantizer`] - f64 to u8 feature quantization (CON-003)
 //! - [`poseidon`] - Poseidon hash circuit for commitments (REQ-004)
@@ -23,6 +40,42 @@
 //! - [`proof`] - Real proof generation and verification (REQ-008)
 //!
 //! ## Quick Start
+//!
+//! Authentication verification has one public entry point, `verify_expected`.
+//! Legacy methods cannot bypass policy checks:
+//!
+//! ```compile_fail
+//! use sable_core::zk::halo2::{FaceVerificationVerifier, Proof};
+//! fn unsupported(verifier: &FaceVerificationVerifier<'_>, proof: &Proof) {
+//!     let _ = verifier.verify(proof);
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use sable_core::zk::halo2::{FaceVerificationVerifier, Proof};
+//! fn unsupported(verifier: &FaceVerificationVerifier<'_>, proof: &Proof) {
+//!     let _ = verifier.verify_full(proof);
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use sable_core::zk::halo2::{FaceVerificationVerifier, Proof, Halo2Fr};
+//! fn unsupported(verifier: &FaceVerificationVerifier<'_>, proof: &Proof) {
+//!     let _ = verifier.verify_bound(proof, Halo2Fr::from(1));
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use sable_core::zk::halo2::{FaceVerificationVerifier, Proof};
+//! fn unsupported(verifier: &FaceVerificationVerifier<'_>, proof: &Proof) {
+//!     let _ = verifier.verify_with_threshold(proof);
+//! }
+//! ```
+//!
+//! ```compile_fail
+//! use sable_core::zk::halo2::FaceVerificationVerifier;
+//! let _ = FaceVerificationVerifier::new;
+//! ```
 //!
 //! ```rust,ignore
 //! use sable_core::zk::halo2::{
@@ -43,11 +96,13 @@
 //!
 //! // 4. Generate ZK proof
 //! let mut prover = FaceVerificationProver::new();
-//! let proof = prover.prove(distance, threshold)?;
+//! // liveness_witness must come from the application's validated capture flow.
+//! let proof = prover.prove_with_embeddings(&enrolled, &live, threshold, Some(liveness_witness))?;
 //!
 //! // 5. Verify proof
 //! let verifier = FaceVerificationVerifier::from_prover(&mut prover)?;
-//! let is_match = verifier.verify(&proof)?;
+//! // expected_policy comes from the verifier's registration and challenge state.
+//! let is_match = verifier.verify_expected(&proof, &expected_policy, trusted_now)?;
 //! ```
 //!
 //! ## Why Halo2?
@@ -74,6 +129,7 @@ pub mod hamming;
 pub mod hello;
 pub mod liveness;
 pub mod poseidon;
+pub mod policy;
 pub mod proof;
 pub mod quantizer;
 pub mod thermometer;
@@ -86,7 +142,8 @@ mod tests;
 pub use hamming::{HammingDistanceCircuit, hamming_distance, hamming_similarity, MAX_EMBEDDING_DIM};
 pub use hello::HelloCircuit;
 pub use poseidon::{PoseidonCircuit, poseidon_hash_pair, poseidon_commit_bytes_value};
-pub use proof::{FaceVerificationProver, FaceVerificationVerifier, Proof, ProofSetup, VerificationDetails};
+pub use proof::{FaceVerificationProver, FaceVerificationVerifier, Proof, ProofSetup};
+pub use policy::{ExpectedPolicy, AUTH_CIRCUIT_V1, decode_instances};
 pub use quantizer::{FeatureQuantizer, QuantizedEmbedding, FACE_EMBEDDING_DIM};
 pub use thermometer::{ThermometerHammingCircuit, encode as thermometer_encode, prescale_tanh as thermometer_prescale_tanh, level_to_byte, byte_to_level, is_valid_thermometer_byte, LEVELS as THERMOMETER_LEVELS};
 pub use threshold::{ThresholdConfig, VerificationResult, precomputed};
